@@ -1,7 +1,7 @@
 // Drag payload for BrowseItems: any card is a drag source, the home Shortcuts grid is the drop
 // target. One custom MIME type so a drop zone can recognise our drags during `dragover`, where the
 // spec forbids reading the data itself — only the type list is visible until the drop lands.
-import type { BrowseItem } from './api';
+import type { BrowseItem, RowRef } from './api';
 
 export const ITEM_MIME = 'application/x-limusic-item';
 /** A queue row being dragged to a new position (`QueueList`), carrying its queue index. */
@@ -10,6 +10,33 @@ export const QUEUE_ROW_MIME = 'application/x-limusic-queue-row';
 export const SECTION_ROW_MIME = 'application/x-limusic-section-row';
 /** A lyrics provider being reordered in Settings (`LyricsSourcesSettings`). */
 export const LYRICS_SOURCE_MIME = 'application/x-limusic-lyrics-source';
+
+/** Track rows dragged off a playlist page: a reorder there, or a copy/move onto a sidebar playlist.
+ *  Each row carries the handle of the row after it that stays, which an undone move puts it back in
+ *  front of. `from` is the playlist they were dragged from (null for a list that isn't one). */
+export const TRACK_ROWS_MIME = 'application/x-limusic-track-rows';
+export type TrackRowsDrag = { from: string | null; fromTitle: string; rows: RowRef[] };
+
+export function setDragRows(e: DragEvent, drag: TrackRowsDrag): void {
+	e.dataTransfer?.setData(TRACK_ROWS_MIME, JSON.stringify(drag));
+}
+
+export const isDragRows = (e: DragEvent): boolean =>
+	!!e.dataTransfer?.types.includes(TRACK_ROWS_MIME);
+
+/** The dropped rows, or null when the payload isn't ours or is malformed. */
+export function getDragRows(e: DragEvent): TrackRowsDrag | null {
+	try {
+		const raw = e.dataTransfer?.getData(TRACK_ROWS_MIME);
+		if (!raw) return null;
+		const drag = JSON.parse(raw) as TrackRowsDrag;
+		return Array.isArray(drag?.rows) && drag.rows.every((r) => typeof r?.song?.video_id === 'string')
+			? drag
+			: null;
+	} catch {
+		return null;
+	}
+}
 
 export function setDragItem(e: DragEvent, item: BrowseItem): void {
 	e.dataTransfer?.setData(ITEM_MIME, JSON.stringify(item));
