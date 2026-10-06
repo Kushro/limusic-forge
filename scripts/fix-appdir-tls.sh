@@ -78,18 +78,27 @@
 #   - It must not be a plugin directory. Host gio modules are built against the host's GLib; that
 #     half of v0.2.11 is what produced the gvfs errors, and defect 4 is the last of it.
 #
-# Usage:  scripts/fix-appdir-tls.sh [bundle-dir]     (default: target/release/bundle/appimage)
+# Usage:  bash scripts/fix-appdir-tls.sh [bundle-dir]     (default: target/release/bundle/appimage)
 # Runs from CI (.github/workflows/linux-release.yml) and by hand after a local
 # `cargo tauri build --bundles appimage` when you want to test the repaired AppDir.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 BUNDLE="${1:-target/release/bundle/appimage}"
-APPDIR="$(readlink -f "$BUNDLE/limusic.AppDir" 2>/dev/null || true)"
+# Globbed: the bundler names both after productName, "LiMusic Forge", space included
+# ("LiMusic Forge.AppDir", "LiMusic Forge_<version>_amd64.AppImage"). CI renames the AppImage to
+# limusic-forge_<version>_amd64.AppImage only after this script, so either spelling can be here.
+APPDIR=""
+for d in "$BUNDLE"/*.AppDir; do
+  [ -d "$d" ] || continue
+  [ -z "$APPDIR" ] || { echo "more than one AppDir in $BUNDLE — remove the stale one"; exit 1; }
+  APPDIR="$(readlink -f "$d")"
+done
 [ -n "$APPDIR" ] && [ -d "$APPDIR" ] || {
-  echo "no AppDir at $BUNDLE/limusic.AppDir — run \`cargo tauri build --bundles appimage\` first"; exit 1; }
-APPIMAGE="$(ls "$BUNDLE"/limusic_*.AppImage 2>/dev/null | head -1 || true)"
-[ -n "$APPIMAGE" ] || { echo "no limusic_*.AppImage in $BUNDLE"; exit 1; }
+  echo "no *.AppDir in $BUNDLE — run \`cargo tauri build --bundles appimage\` first"; exit 1; }
+# Newest first, so a stale bundle from an earlier version is never the one repacked.
+APPIMAGE="$(ls -t "$BUNDLE"/*.AppImage 2>/dev/null | head -1 || true)"
+[ -n "$APPIMAGE" ] || { echo "no *.AppImage in $BUNDLE"; exit 1; }
 APPIMAGE="$(readlink -f "$APPIMAGE")"
 
 # Libraries that must come from the HOST, never from us. Bundling one of these shadows the host's

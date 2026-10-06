@@ -22,7 +22,7 @@ name: macOS release binaries
 # Intel Macs need a second leg on `macos-13` publishing `darwin-x86_64`; add it when someone asks.
 #
 # NOT SIGNED WITH AN APPLE CERT, so the app is quarantined on first launch and Gatekeeper says the
-# app "is damaged". Users clear it with `xattr -dr com.apple.quarantine /Applications/limusic.app`.
+# app "is damaged". Users clear it with `xattr -dr com.apple.quarantine "/Applications/LiMusic Forge.app"`.
 # Fixing that properly is a paid Apple Developer account plus notarization. See RELEASING.md §6.
 #
 # It can also be run by hand against an older tag to backfill:
@@ -92,6 +92,17 @@ jobs:
         run: |
           VERSION="$(jq -r .version src-tauri/tauri.conf.json)"
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          # Prerelease (beta channel only, RELEASING.md §8): drop build metadata (+…), take the suffix
+          # after the FIRST '-', and it is one only if that suffix starts with rc, beta or alpha, any
+          # case. Any other suffix is stable: the fork ships 1.2.0-forge.1 (and 1.2.0-forge.2-rc.1)
+          # as Latest, so `*-*` is NOT the test. Body identical to is_prerelease in
+          # scripts/release.sh and the other two workflows; same rule as isPrerelease in the app.
+          is_prerelease() {
+            local core="${1%%+*}"
+            case "$core" in *-*) ;; *) return 1 ;; esac
+            case "$(printf '%s' "${core#*-}" | tr '[:upper:]' '[:lower:]')" in rc*|beta*|alpha*) return 0 ;; *) return 1 ;; esac
+          }
+          if is_prerelease "$VERSION"; then echo "PRERELEASE=true"; else echo "PRERELEASE=false"; fi >> "$GITHUB_ENV"
           if [ "v$VERSION" != "${{ steps.rel.outputs.tag }}" ]; then
             if [ "${{ inputs.dry_run }}" = "true" ]; then
               echo "::warning::dry run: built ref is ${{ steps.rel.outputs.tag }} but the app version is $VERSION"
@@ -222,8 +233,16 @@ jobs:
           # to the filesystem.
           tauri build --bundles app --config \
             '{"build":{"beforeBuildCommand":""},"bundle":{"createUpdaterArtifacts":false}}'
-          [ -d "target/release/bundle/macos/limusic.app" ] \
-            || { echo "::error::no .app at target/release/bundle/macos/limusic.app"; find target/release/bundle -maxdepth 2; exit 1; }
+          # The .app is named after productName, "LiMusic Forge.app", space included (confirmed by
+          # a dry run). Globbed rather than spelled out, and exported as $APP for every later step,
+          # all of which quote it. Its name stays: it is what users see in /Applications, and the
+          # updater swaps in whatever .app the tarball holds. Only the shipped files get slugs.
+          shopt -s nullglob
+          apps=(target/release/bundle/macos/*.app)
+          [ "${#apps[@]}" = 1 ] \
+            || { echo "::error::expected one .app in target/release/bundle/macos, found ${#apps[@]}"; find target/release/bundle -maxdepth 2; exit 1; }
+          echo "APP=${apps[0]}" >> "$GITHUB_ENV"
+          echo "APP_NAME=$(basename "${apps[0]}")" >> "$GITHUB_ENV"
 
       # THE step this workflow exists for. dylibbundler walks the binary's dependency graph, copies
       # every non-system dylib into Contents/Frameworks and rewrites the install names to
@@ -239,9 +258,8 @@ jobs:
         timeout-minutes: 6
         run: |
           set -euo pipefail
-          APP=target/release/bundle/macos/limusic.app
           # The executable inside the bundle is NOT named after the bundle: productName names the
-          # .app, the cargo package names the binary (limusic-app). Ask the bundle rather than
+          # .app, mainBinaryName names the binary (limusic-forge). Ask the bundle rather than
           # guessing, so a rename of either can't quietly break this.
           BIN="$APP/Contents/MacOS/$(plutil -extract CFBundleExecutable raw "$APP/Contents/Info.plist")"
           [ -x "$BIN" ] || { echo "::error::no executable at $BIN"; ls -l "$APP/Contents/MacOS"; exit 1; }
@@ -262,7 +280,6 @@ jobs:
       - name: Drop the duplicate rpaths dylibbundler leaves behind
         run: |
           set -euo pipefail
-          APP=target/release/bundle/macos/limusic.app
           find "$APP" -type f -print0 | while IFS= read -r -d '' f; do
             # `otool -l` on a non-Mach-O file just prints nothing useful, so no file-type test is
             # needed; the awk below yields no rpaths and the inner loop does nothing.
@@ -298,7 +315,6 @@ jobs:
       - name: Re-sign the bundle
         run: |
           set -euo pipefail
-          APP=target/release/bundle/macos/limusic.app
           codesign --force --deep --sign - "$APP"
           codesign --verify --deep --strict --verbose=2 "$APP"
 
@@ -309,7 +325,6 @@ jobs:
       - name: Check no Mach-O lists a duplicate rpath
         run: |
           set -euo pipefail
-          APP=target/release/bundle/macos/limusic.app
           # No `|| true` here, unlike the Homebrew guard: that one needs it because grep exits 1 on
           # every clean file, whereas uniq -d exits 0, so a non-zero pipeline here means otool
           # could not read the file. errexit does not reach inside a command substitution (and
@@ -339,7 +354,6 @@ jobs:
       - name: Check nothing still links to Homebrew
         run: |
           set -euo pipefail
-          APP=target/release/bundle/macos/limusic.app
           # [[:space:]], not \s: this runs under BSD grep, whose POSIX regex has no \s, and a
           # pattern that quietly matches nothing is worse than no guard at all.
           #
@@ -373,12 +387,14 @@ jobs:
             echo "::error::TAURI_SIGNING_PRIVATE_KEY secret is not set, the build would produce an unsignable update"
             exit 1
           fi
-          TAR="target/release/bundle/macos/limusic_${VERSION}_aarch64.app.tar.gz"
+          # Slug file name, limusic-forge_<version>_aarch64.app.tar.gz; the .app inside keeps its
+          # productName ("$APP_NAME", with a space).
+          TAR="target/release/bundle/macos/limusic-forge_${VERSION}_aarch64.app.tar.gz"
           # cd into the bundle dir rather than `tar -C`, so there is no question about whether the
           # archive path is resolved before or after the chdir. The archive must contain the .app
           # at its root: that is what the updater extracts over the installed one.
-          (cd target/release/bundle/macos \
-            && COPYFILE_DISABLE=1 tar -czf "limusic_${VERSION}_aarch64.app.tar.gz" limusic.app)
+          (cd "$(dirname "$APP")" \
+            && COPYFILE_DISABLE=1 tar -czf "$(basename "$TAR")" "$APP_NAME")
           tauri signer sign "$TAR"
           [ -f "$TAR.sig" ] || { echo "::error::tauri signer produced no .sig for $TAR"; exit 1; }
           echo "TAR=$TAR" >> "$GITHUB_ENV"
@@ -392,8 +408,8 @@ jobs:
           set -euo pipefail
           rm -rf /tmp/roundtrip && mkdir -p /tmp/roundtrip
           tar -xzf "$TAR" -C /tmp/roundtrip
-          codesign --verify --deep --strict --verbose=2 /tmp/roundtrip/limusic.app
-          test -x "/tmp/roundtrip/limusic.app/Contents/MacOS/$EXECUTABLE"
+          codesign --verify --deep --strict --verbose=2 "/tmp/roundtrip/$APP_NAME"
+          test -x "/tmp/roundtrip/$APP_NAME/Contents/MacOS/$EXECUTABLE"
           echo "the extracted bundle verifies and its binary is executable"
 
       # hdiutil rather than tauri's dmg bundler: that one drives AppleScript to lay the window out
@@ -402,14 +418,13 @@ jobs:
       - name: Build the DMG
         run: |
           set -euo pipefail
-          APP=target/release/bundle/macos/limusic.app
-          DMG="target/release/bundle/dmg/limusic_${VERSION}_aarch64.dmg"
-          STAGE="$(mktemp -d)/Limusic"
+          DMG="target/release/bundle/dmg/limusic-forge_${VERSION}_aarch64.dmg"
+          STAGE="$(mktemp -d)/LiMusic Forge"
           mkdir -p "$STAGE" "$(dirname "$DMG")"
           # ditto, not cp: it is the copy that preserves a bundle's metadata and signature intact.
-          ditto "$APP" "$STAGE/limusic.app"
+          ditto "$APP" "$STAGE/$APP_NAME"
           ln -s /Applications "$STAGE/Applications"
-          hdiutil create -volname "Limusic" -srcfolder "$STAGE" -ov -format UDZO "$DMG"
+          hdiutil create -volname "LiMusic Forge" -srcfolder "$STAGE" -ov -format UDZO "$DMG"
           echo "DMG=$DMG" >> "$GITHUB_ENV"
           echo "dmg: $(du -h "$DMG" | cut -f1)"
 
@@ -424,7 +439,7 @@ jobs:
         if: ${{ inputs.dry_run }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: limusic-macos-dry-run-${{ steps.rel.outputs.tag }}
+          name: limusic-forge-macos-dry-run-${{ steps.rel.outputs.tag }}
           path: |
             target/release/bundle/dmg/*.dmg
             target/release/bundle/macos/*.app.tar.gz
@@ -564,8 +579,9 @@ jobs:
           # shared script or composite action would come from the tag and a re-dispatch against an
           # older one would not pick this up. Keep the three copies byte-identical.
           #
-          # A release candidate (a version with a `-`, 1.1.0-rc.1) is never Latest, so no stable
-          # install ever reads it. What it moves instead is the beta pointer: a permanent prerelease
+          # A release candidate (PRERELEASE=true: a -rc*, -beta* or -alpha* version, 1.1.0-rc.1) is
+          # never Latest, so no stable install ever reads it. Any other suffix is stable: the fork
+          # ships 1.2.0-forge.1 as Latest, with its latest.json at /releases/latest/download/. What it moves instead is the beta pointer: a permanent prerelease
           # tagged `beta` holding one latest.json, which installs on the beta channel read
           # (`check_beta_update` in commands.rs). A complete stable release moves the pointer too when
           # it is ahead of what the pointer holds, so beta installs land on 1.1.0 once it ships but
@@ -579,7 +595,7 @@ jobs:
             echo "::notice::not promoting yet, latest.json carries $HAVE and needs $REQUIRED_PLATFORMS"
             exit 0
           fi
-          if [[ "$VERSION" == *-* ]]; then
+          if [ "$PRERELEASE" = true ]; then
             echo "$TAG is a release candidate: never Latest, beta channel only"
           else
             retry 3 gh release edit "$TAG" --latest --repo "$GITHUB_REPOSITORY"
@@ -604,7 +620,7 @@ jobs:
           # An RC exists for the beta channel, so it fails without one; a stable release is complete
           # without it and only warns.
           if ! BETA_ID="$(retry 3 gh api "repos/$GITHUB_REPOSITORY/releases/tags/beta" --jq .id)"; then
-            if [[ "$VERSION" == *-* ]]; then
+            if [ "$PRERELEASE" = true ]; then
               echo "::error::no beta release to point at $TAG, so no install can get it. Create it (RELEASING.md §8) and re-dispatch"
               exit 1
             fi

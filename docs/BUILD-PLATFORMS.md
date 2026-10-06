@@ -53,7 +53,7 @@ cargo tauri build --bundles deb   # → target/release/bundle/deb/*.deb
   new, add it there by hand. A forgotten entry produces a package that installs cleanly and then
   refuses to start, so the workflow's `Verify the .deb installs and resolves its libraries` step
   installs it on a clean Ubuntu 24.04 and fails on the first unresolved `ldd` line.
-- A freshly bundled AppDir is **not portable** until `scripts/fix-appdir-tls.sh` has run over it —
+- A freshly bundled AppDir is **not portable** until `bash scripts/fix-appdir-tls.sh` has run over it —
   linuxdeploy bundles the host's TLS trust stack (whose CA anchors live outside the bundle) and
   writes a `GIO_EXTRA_MODULES` containing a literal newline and a path into your own `target/` dir,
   which leaves the webview with `GDummyTlsBackend` and no HTTPS anywhere but this machine. CI runs

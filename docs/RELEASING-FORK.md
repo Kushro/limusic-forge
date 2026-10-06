@@ -124,9 +124,16 @@ así que los invitados no tienen que configurarlo.
 4. Cada workflow adjunta sus binarios y su entrada en `latest.json`; el release pasa a *Latest*
    cuando las plataformas están completas.
 
-Pendiente de otras unidades del plan: la CI y `scripts/release.sh` todavía apuntan al repositorio
-y al criterio de prerelease de upstream (cualquier `-` es prerelease). Hasta que se ajusten, no
-publiques un `-forge.N` con ellos sin revisar esos pasos.
+`bash scripts/release.sh` hace los pasos 3 y 4 de una vez: publica el release en
+`Kushro/limusic-forge` y lanza los tres workflows con el tag. La CI y el script usan el mismo
+criterio de prerelease que la app (una función `is_prerelease` idéntica en `release.sh` y en los
+tres workflows): se descarta el build metadata (`+…`), se toma el sufijo tras el **primer** `-`, y
+la versión es prerelease sólo si ese sufijo **empieza** por `rc`, `beta` o `alpha`, sin distinguir
+mayúsculas. Así `1.3.0-rc.1`, `1.2.0-RC.1` y `1.3.0-beta.2+b.5` son prerelease, y `1.2.0`,
+`1.2.0-forge.1` y `1.2.0-forge.2-rc.1` salen como estables.
+
+Los scripts se invocan con bash (`bash scripts/…`); GitButler en Windows no conserva el bit +x.
+El job `rustfmt` de `checks.yml` falla si un workflow llama a `scripts/*.sh` sin `bash` delante.
 
 ## 6. Qué pasa si falta cada cosa
 
