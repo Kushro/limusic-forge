@@ -26,6 +26,8 @@
 		Search01Icon,
 		ShuffleSquareIcon,
 		Wrench01Icon,
+		FilterHorizontalIcon,
+		FileExportIcon,
 		ArrowReloadHorizontalIcon,
 		Tick02Icon
 	} from '@hugeicons/core-free-icons';
@@ -54,6 +56,9 @@
 	import { dragScroll, isDragRows, setDragRows, TRACK_ROWS_MIME, type TrackRowsDrag } from '$lib/dnd';
 	import MoveToPlaylist from '$lib/components/MoveToPlaylist.svelte';
 	import PlaylistToolsDialog from '$lib/components/PlaylistToolsDialog.svelte';
+	import ExportPlaylist from '$lib/components/ExportPlaylist.svelte';
+	import FilterChips from '$lib/components/FilterChips.svelte';
+	import { applyFacets, facetsActive, NO_FACETS, regexFilter, type Facets } from '$lib/facets';
 	import { endRowDrag, startRowDrag } from '$lib/rowdrag.svelte';
 	import { announceOp } from '$lib/playlistops.svelte';
 	import { t } from '$lib/i18n.svelte';
@@ -90,7 +95,8 @@
 		patchLibraryPlaylist,
 		forgetPlaylist,
 		lastPlaylistAdd,
-		lastPlaylistRemove
+		lastPlaylistRemove,
+		savedIn
 	} from '$lib/player.svelte';
 
 	// `$state.raw`, not `$state`: a deep proxy makes every read of a row go through a trap and
@@ -217,6 +223,13 @@
 				? (pl.subtitle ?? '').replace(/^[\d,.]+ songs?/i, `${pl.items.length} songs`)
 				: pl?.subtitle
 	);
+	// How many times each video is in this playlist: the ×2 chip on its rows, and the duplicates facet.
+	const copies = $derived.by(() => {
+		const n = new Map<string, number>();
+		for (const s of pl?.items ?? []) n.set(s.video_id, (n.get(s.video_id) ?? 0) + 1);
+		return n;
+	});
+
 	// --- sorting (`$lib/sort`) ---------------------------------------------------------------
 	let sort = $state<SortKey>('default');
 	let desc = $state(false);
@@ -263,13 +276,26 @@
 
 	// The rows actually on screen: the sorted list, narrowed by the header's filter box. Identical
 	// to `sortedItems` with no query typed.
-	const shown = $derived(filterTracks(sortedItems, applied));
+	// Facet chips under the header (`facets.ts`), and the search box as a regex when `.*` is on.
+	let facets = $state<Facets>({ ...NO_FACETS });
+	let regex = $state(false);
+	let filtersOpen = $state(false);
+	const searched = $derived(
+		regex ? regexFilter(sortedItems, applied) : { items: filterTracks(sortedItems, applied), error: false }
+	);
+	const shown = $derived(
+		applyFacets(searched.items, facets, {
+			copies,
+			elsewhere: (v) =>
+				(savedIn.map[v] ?? []).some((p) => p !== id && p !== api.LIKED_MUSIC_ID)
+		})
+	);
 	const selection = trackSelection(() => sortedItems, () => shown,
 		() => `${auth.epoch}:${id}`, () => !pl?.continuation,
 		// A filter's matches are only the loaded ones, and typing one walks the list anyway, so the
 		// header count would be the wrong number to offer there.
 		() => (filtering ? undefined : headerCount), loadAll);
-	const filtering = $derived(!!applied.trim());
+	const filtering = $derived(!!applied.trim() || facetsActive(facets));
 	// The leading number of YouTube's own "190 tracks - 9+ hours", which is what the subtitle under
 	// the title shows until every page is in. An upper bound, not a count: it includes rows that
 	// never arrive (unavailable, region-blocked). A locale that doesn't lead with the number gives
@@ -449,6 +475,9 @@
 		sortOpen = false;
 		stagedFrom = null;
 		needsManual = false;
+		facets = { ...NO_FACETS };
+		regex = false;
+		filtersOpen = false;
 		query = '';
 		applied = '';
 		searchOpened = false;
@@ -1112,15 +1141,10 @@
 		endRowDrag();
 	}
 
-	// How many times each video is in this playlist, for the ×2 chip on its rows.
-	const copies = $derived.by(() => {
-		const n = new Map<string, number>();
-		for (const s of pl?.items ?? []) n.set(s.video_id, (n.get(s.video_id) ?? 0) + 1);
-		return n;
-	});
-
-	// The tools dialog (duplicates, split, merge). Not on On Repeat, which is built from play counts.
+	// The tools dialog (duplicates, split, merge), and export. Not on On Repeat, which is built from
+	// play counts.
 	let toolsOpen = $state(false);
+	let exportOpen = $state(false);
 
 	// "Move to…" from the selection bar: the same transfer a drop on a sidebar playlist makes.
 	// Not counted as an own edit: the rows leaving this list is what the reload shows.
@@ -1305,7 +1329,23 @@
 						</div>
 					</div>
 				</div>
-				<div class="absolute right-6 top-6">
+				<div class="absolute right-6 top-6 flex items-center gap-2">
+					<button
+						class="flex h-9 w-9 items-center justify-center rounded-full border bg-background/80 shadow-sm {filtersOpen ||
+						facetsActive(facets) ||
+						regex
+							? 'border-primary/40 text-primary'
+							: 'text-muted-foreground hover:text-foreground'}"
+						onclick={() => {
+							filtersOpen = !filtersOpen;
+							if (filtersOpen) searchOpened = true; // facets cover every page, so walk them in
+						}}
+						aria-pressed={filtersOpen}
+						aria-label={t('facets.label')}
+						title={t('facets.label')}
+					>
+						<HugeiconsIcon icon={FilterHorizontalIcon} class="h-4 w-4" />
+					</button>
 					<TrackFilter
 						bind:value={query}
 						placeholder={t('common.search_this_playlist')}
@@ -1319,6 +1359,11 @@
 				onRemove={isLiked || editable ? removeSelected : undefined}
 				onMove={reorderable ? openMove : undefined}
 			/>
+			{#if filtersOpen || facetsActive(facets) || regex}
+				<div class="border-b px-6 py-2">
+					<FilterChips bind:facets bind:regex regexError={searched.error} items={pl.items} />
+				</div>
+			{/if}
 			{#if stagedFrom}
 				<!-- Unsaved order. Sticky, so Save is in reach wherever the last drag ended. -->
 				<div
@@ -1455,6 +1500,7 @@
 		title={pl.title ?? t('common.playlist_singular')}
 		editable={reorderable}
 	/>
+	<ExportPlaylist bind:open={exportOpen} playlistId={id} title={pl.title ?? t('common.playlist_singular')} />
 {/if}
 
 {#if sortOpen}
@@ -1604,6 +1650,13 @@
 				disabled={!pl?.items.length}
 			>
 				<HugeiconsIcon icon={Wrench01Icon} class="h-4 w-4" /> {t('tools.open')}
+			</button>
+			<button
+				class="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm hover:bg-accent/10"
+				onclick={() => run(() => (exportOpen = true))}
+				disabled={!pl?.items.length}
+			>
+				<HugeiconsIcon icon={FileExportIcon} class="h-4 w-4" /> {t('export.open')}
 			</button>
 		{/if}
 		{#if reorderable && manualView}

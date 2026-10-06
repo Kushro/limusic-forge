@@ -11,7 +11,7 @@ use tauri::{Emitter, Manager, State};
 
 use crate::blocked::BlockedArtist;
 use crate::playlist_tools::journal::{self, Named, OpRecord, Restore, Summary};
-use crate::playlist_tools::{build, dedup, merge, rows, split, transfer};
+use crate::playlist_tools::{build, dedup, export, merge, rows, split, transfer};
 use crate::state::{
     is_local_playlist, AppState, LOCAL_PLAYLIST_PREFIX, ON_REPEAT_ID, ON_REPEAT_LIMIT,
     ON_REPEAT_WINDOW_SECS,
@@ -1726,6 +1726,22 @@ pub async fn build_playlists(
 #[tauri::command]
 pub fn cancel_playlist_build() {
     build::cancel();
+}
+
+/// Write the whole playlist to `path` (picked in the save dialog) as CSV, JSON or M3U8. Answers
+/// how many tracks went out.
+#[tauri::command]
+pub async fn export_playlist(
+    state: St<'_>,
+    playlist_id: String,
+    title: String,
+    format: export::Format,
+    path: String,
+) -> Result<usize, String> {
+    let rows = rows::read_all(&state, &playlist_id).await?;
+    let text = export::render(format, &title, &rows)?;
+    std::fs::write(&path, text).map_err(|e| e.to_string())?;
+    Ok(rows.len())
 }
 
 /// The undo history, newest first.

@@ -7,6 +7,7 @@
 
 pub mod build;
 pub mod dedup;
+pub mod export;
 pub mod journal;
 pub mod lis;
 pub mod merge;

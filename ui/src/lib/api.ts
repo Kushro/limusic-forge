@@ -810,6 +810,13 @@ export const buildPlaylists = async (args: {
 	return { ...r, op: r.op && op(r.op) };
 };
 export const cancelPlaylistBuild = () => invoke<void>('cancel_playlist_build');
+/** Write the whole playlist to `path` as CSV, JSON or M3U8. Answers how many tracks went out. */
+export const exportPlaylist = (
+	playlistId: string,
+	title: string,
+	format: 'csv' | 'json' | 'm3u8',
+	path: string
+) => invoke<number>('export_playlist', { playlistId, title, format, path });
 export type BuildProgress = { done: number; total: number; current: string };
 export const onPlaylistOpProgress = (cb: (p: BuildProgress) => void): Promise<UnlistenFn> =>
 	listen<BuildProgress>('playlist-op-progress', (e) => cb(e.payload));

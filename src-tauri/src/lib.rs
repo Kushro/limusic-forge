@@ -912,6 +912,7 @@ pub fn run() {
             commands::merge_preview,
             commands::build_playlists,
             commands::cancel_playlist_build,
+            commands::export_playlist,
             commands::playlist_history,
             commands::undo_playlist_op,
             commands::create_playlist,
