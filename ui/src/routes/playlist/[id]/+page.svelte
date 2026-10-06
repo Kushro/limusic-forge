@@ -29,6 +29,7 @@
 		FilterHorizontalIcon,
 		FileExportIcon,
 		ArrowReloadHorizontalIcon,
+		RefreshIcon,
 		Tick02Icon
 	} from '@hugeicons/core-free-icons';
 	import { Badge } from '$lib/components/ui/badge';
@@ -46,7 +47,8 @@
 	import ErrorState from '$lib/components/ErrorState.svelte';
 	import * as api from '$lib/api';
 	import { ON_REPEAT_ID } from '$lib/api';
-	import type { BrowseItem, PlaylistPage, SongItem } from '$lib/api';
+	import type { BrowseItem, PlaylistPage, PlaylistSyncInfo, SongItem } from '$lib/api';
+	import { infoFor, relativeAgo, syncLine } from '$lib/plsort';
 	import { getCached, putCached, invalidateCachedPrefix } from '$lib/pagecache';
 	import { thumb } from '$lib/thumb';
 	import { anchorMenu, fitMenu, NO_ANCHOR } from '$lib/menu';
@@ -223,6 +225,75 @@
 				? (pl.subtitle ?? '').replace(/^[\d,.]+ songs?/i, `${pl.items.length} songs`)
 				: pl?.subtitle
 	);
+	// --- last sync and "Sync" (the playlist monitor) ------------------------------------------------
+	// Only what the monitor reads: a YouTube playlist you own or edit, or Liked Music. A playlist on
+	// this machine and On Repeat have nothing on YouTube to read.
+	const canSync = $derived(
+		!!pl &&
+			!!auth.account?.signedIn &&
+			!isOnRepeat &&
+			!isLocalList &&
+			(pl.owned || !!pl.collaborative || isLiked)
+	);
+	let syncInfo = $state<PlaylistSyncInfo | null>(null);
+	let syncingThis = $state(false);
+	function loadSyncInfo(pid: string) {
+		api
+			.playlistSyncInfo()
+			.then((all) => {
+				if (pid === id) syncInfo = infoFor(all, pid) ?? null;
+			})
+			.catch(() => {});
+	}
+	$effect(() => {
+		const pid = id;
+		syncInfo = null;
+		if (pid) untrack(() => loadSyncInfo(pid));
+	});
+	// Any sync's end (this button's, a menu's, Sync all, the scheduler) may have read this one.
+	// "2 h ago" ages on a minute's tick while the page stays open.
+	let now = $state(Date.now() / 1000);
+	$effect(() => {
+		const off = api.onPlaylistIndexSynced(() => loadSyncInfo(untrack(() => id)));
+		const tick = setInterval(() => (now = Date.now() / 1000), 60_000);
+		return () => {
+			clearInterval(tick);
+			void off.then((f) => f());
+		};
+	});
+	const syncedText = $derived.by(() => {
+		if (!syncInfo) return null;
+		const a = relativeAgo(syncInfo.synced_at, now);
+		const ago = t(`library.sync_ago_${a.unit}`, { n: a.n });
+		const changes = syncLine(syncInfo);
+		return changes
+			? t('library.synced_line_changes', { ago, changes })
+			: t('library.synced_line', { ago });
+	});
+	// Then the rows again: the sync read YouTube's copy, which may differ from the cached one here.
+	async function syncThis() {
+		if (syncingThis) return;
+		const pid = id;
+		syncingThis = true;
+		try {
+			const s = await api.syncPlaylist(pid);
+			const changes = syncLine(s);
+			toast.success(changes ? t('library.sync_done', { changes }) : t('library.sync_no_changes'));
+			if (pid === id) {
+				invalidateCachedPrefix(`playlist:${pid}`);
+				await load(pid);
+			}
+		} catch (e) {
+			const msg = String(e);
+			if (msg === 'busy') toast(t('monitor.busy'));
+			else if (msg === 'unreadable') toast.error(t('library.sync_unreadable'));
+			else toast.error(msg);
+		} finally {
+			syncingThis = false;
+			loadSyncInfo(pid);
+		}
+	}
+
 	// How many times each video is in this playlist: the ×2 chip on its rows, and the duplicates facet.
 	const copies = $derived.by(() => {
 		const n = new Map<string, number>();
@@ -1265,6 +1336,9 @@
 						{pl.title ?? t('common.playlist_singular')}
 					</h1>
 					{#if subtitle}<p class="mt-2 text-sm text-muted-foreground">{subtitle}</p>{/if}
+					{#if syncedText && canSync}
+						<p class="mt-1 text-xs tabular-nums text-muted-foreground">{syncedText}</p>
+					{/if}
 					{#if pl.description}
 						<!-- Two lines, then More/Less, same as the album page. -->
 						<div class="mt-2 max-w-2xl">
@@ -1303,6 +1377,19 @@
 								{selection}
 								class="-ml-2 flex h-9 w-9 cursor-pointer items-center justify-center rounded-full transition hover:bg-muted hover:text-foreground"
 							/>
+							{#if canSync}
+								<Button
+									variant="ghost"
+									size="sm"
+									class="gap-2 text-muted-foreground"
+									title={t('library.sync_tooltip')}
+									disabled={syncingThis}
+									onclick={syncThis}
+								>
+									<HugeiconsIcon icon={RefreshIcon} class="h-4 w-4 {syncingThis ? 'animate-spin' : ''}" />
+									{syncingThis ? t('library.syncing') : t('library.sync')}
+								</Button>
+							{/if}
 						</div>
 						<!-- Pushed to the far end of the header, away from the play controls. -->
 						<div class="flex items-center gap-1">

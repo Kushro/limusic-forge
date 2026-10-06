@@ -694,6 +694,18 @@ export const syncPlaylist = (playlistId: string) =>
 	invoke<SyncSummary>('sync_playlist', { playlistId });
 /** The last full sync's summary, null before the first. */
 export const lastSyncSummary = () => invoke<SyncSummary | null>('last_sync_summary');
+/** One playlist's last complete sync: when (epoch seconds), how many items it held, and what that
+ *  sync found changed. */
+export type PlaylistSyncInfo = {
+	synced_at: number;
+	item_count: number;
+	added: number;
+	removed: number;
+	moved: number;
+};
+/** Playlist id → its last complete sync; playlists never synced are absent. SQLite only. */
+export const playlistSyncInfo = () =>
+	invoke<Record<string, PlaylistSyncInfo>>('playlist_sync_info');
 /** Alerts neither seen nor dismissed (the badge). */
 export const unseenAlertCount = () => invoke<number>('unseen_alert_count');
 /** The monitor page's cards. `items` is index rows (a track once per playlist); `duplicates_estimate`

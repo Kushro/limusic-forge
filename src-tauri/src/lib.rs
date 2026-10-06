@@ -1012,6 +1012,7 @@ pub fn run() {
             commands::sync_playlist_index,
             commands::sync_playlist,
             commands::last_sync_summary,
+            commands::playlist_sync_info,
             commands::unseen_alert_count,
             commands::monitor_stats,
             commands::monitor_runs,

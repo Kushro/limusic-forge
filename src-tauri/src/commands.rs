@@ -226,7 +226,7 @@ pub async fn get_queue(state: St<'_>) -> Result<serde_json::Value, String> {
 /// `visitor_data`) and internal blobs (`queue_json`, `queue_index`, `queue_position`) never cross
 /// into the webview: they'd otherwise ship the login credential to the renderer on every open, and
 /// the webview can't overwrite them either.
-const UI_SETTINGS: [&str; 34] = [
+const UI_SETTINGS: [&str; 36] = [
     "volume",
     "proxy",
     "quality",
@@ -264,6 +264,10 @@ const UI_SETTINGS: [&str; 34] = [
     // Snapshot backups (backups.rs): the folder, and how many each playlist keeps. PF's keys.
     "monitor.backups_dir",
     "retention_keep_last",
+    // The Library's playlists tab: `default|title|count|synced` (`:desc` reverses) and `grid|list`
+    // (plsort.ts).
+    "library_playlists_sort",
+    "library_playlists_view",
 ];
 
 /// Resolve the music video for `video_id` and hand back a `limusicvideo://` URL the player view
@@ -1606,6 +1610,15 @@ pub async fn sync_playlist(state: St<'_>, playlist_id: String) -> Result<SyncSum
 #[tauri::command]
 pub fn last_sync_summary(state: St<'_>) -> Option<SyncSummary> {
     monitor::last_summary(&state.db)
+}
+
+/// Playlist id → its last complete sync (`synced_at`, `item_count`, `added`, `removed`, `moved`):
+/// the Library's "2 h ago · +3 −1 ~2" line and its sort by count or by sync. SQLite only.
+#[tauri::command]
+pub fn playlist_sync_info(
+    state: St<'_>,
+) -> std::collections::HashMap<String, crate::db::PlaylistSync> {
+    state.db.playlist_syncs()
 }
 
 /// Alerts neither seen nor dismissed: the badge's number before any `alerts-changed` arrives.
