@@ -1325,6 +1325,31 @@ mod tests {
         assert_eq!(env!("CARGO_PKG_NAME"), "limusic-forge");
     }
 
+    /// The Windows installer the fork ships: NSIS only (WiX rejects the `-forge.N` suffix, so no
+    /// MSI while the version carries one), per-user so it never asks for elevation, English and
+    /// Spanish, and the WebView2 bootstrapper as the regular installer's mode. The updater
+    /// downloads this same setup, so it must stay small; the offline WebView2 setup is a second
+    /// CI pass that overrides `webviewInstallMode` with `--config`. Nothing here builds a Windows
+    /// bundle, so a drifted key would only surface in a release; this fails instead.
+    #[test]
+    fn windows_bundle_config_is_forge() {
+        let conf: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.windows.conf.json")).unwrap();
+        let bundle = &conf["bundle"];
+        assert_eq!(bundle["targets"], serde_json::json!(["nsis"]));
+        let resources = bundle["resources"].as_array().unwrap();
+        assert!(resources.contains(&serde_json::json!("libmpv-2.dll")));
+
+        let win = &bundle["windows"];
+        assert_eq!(win["nsis"]["installMode"], "currentUser");
+        assert_eq!(win["nsis"]["languages"], serde_json::json!(["English", "Spanish"]));
+        assert_eq!(win["webviewInstallMode"]["type"], "downloadBootstrapper");
+
+        // Catches a typo or a key Tauri would reject.
+        serde_json::from_value::<tauri::utils::config::WindowsConfig>(win.clone())
+            .expect("bundle.windows is not a valid WindowsConfig");
+    }
+
     #[test]
     fn close_hides_unless_explicitly_disabled() {
         assert!(close_hides(None)); // fresh install → tray on

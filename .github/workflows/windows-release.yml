@@ -163,9 +163,20 @@ jobs:
       # the rebuilt artifacts because the key it restored was an exact match. The result is a full
       # cold compile on every single release, for ever. Keep this step above the cache.
       #
-      # Two flags go in:
+      # Three flags go in:
       #   -L native=…\.libmpv   the mpv.lib synthesised further down (link-time only; libmpv2-sys
       #                         ships pregenerated bindings and just emits `cargo:rustc-link-lib`)
+      #   +crt-static           the whole C runtime (vcruntime AND the UCRT) linked statically, so
+      #                         the exe imports no VCRUNTIME140*.dll, MSVCP140*.dll or
+      #                         api-ms-win-crt-*.dll and starts on a machine without the VC++
+      #                         redistributable. cc-built C deps (rquickjs-sys, sqlite) follow it to
+      #                         /MT, and v8's prebuilt lib is /MT already. It must live here and not
+      #                         in .cargo/config.toml: an RUSTFLAGS env var replaces the config's
+      #                         rustflags outright, so a flag there would silently vanish in CI.
+      #                         STATIC_VCRUNTIME=false goes with it: the Tauri CLI otherwise exports
+      #                         STATIC_VCRUNTIME=true, and tauri-build's hybrid link then pulls the
+      #                         UCRT back in as a DLL (/NODEFAULTLIB:libucrt.lib + ucrt.lib).
+      #                         "Check the exe imports no C runtime DLL" below enforces the result.
       #   rust-lld              LLD instead of MSVC's link.exe. Cargo is the bulk of this job, and
       #                         with `codegen-units = 1` + thin LTO most of that is the codegen and
       #                         link of limusic-app itself. The Linux job took its release build
@@ -175,11 +186,12 @@ jobs:
       #
       # The rust-lld half is a SOFT fallback on purpose: if rustup moves the binary, warn and build
       # with link.exe. A linker optimisation must never be the reason a release fails to build.
-      - name: Resolve RUSTFLAGS (linker + libmpv link path)
+      - name: Resolve RUSTFLAGS (linker, libmpv link path, static CRT)
         shell: bash
         run: |
           set -euo pipefail
-          FLAGS="-L native=${{ github.workspace }}\.libmpv"
+          FLAGS="-L native=${{ github.workspace }}\.libmpv -C target-feature=+crt-static"
+          echo "STATIC_VCRUNTIME=false" >> "$GITHUB_ENV"
           SYSROOT="$(rustc --print sysroot | tr '\\' '/')"
           RUST_LLD="$SYSROOT/lib/rustlib/x86_64-pc-windows-msvc/bin/rust-lld.exe"
           if [ -f "$RUST_LLD" ]; then
@@ -203,8 +215,11 @@ jobs:
         # PINNED, like the actions. `^2` took 2.12.0 the day it was published and broke two legs at
         # once: its new linuxdeploy stopped bundling libgmp and libpipewire (the bundle check
         # caught it), and it stopped exporting STATIC_VCRUNTIME=true, which the locked tauri-build
-        # 2.6.3 needs for the hybrid CRT link, so rquickjs-sys no longer linked on Windows. Move it
-        # on purpose, with the tauri crates, and dry-run all three legs before a release.
+        # 2.6.3 needed for its hybrid CRT link back when the C runtime was dynamic, so rquickjs-sys
+        # no longer linked on Windows. The build is now fully static (+crt-static and
+        # STATIC_VCRUNTIME=false, set with RUSTFLAGS above), which no longer leans on that export,
+        # but the pin stays for linuxdeploy. Move it on purpose, with the tauri crates, and dry-run
+        # all three legs before a release.
         run: npm install -g "@tauri-apps/cli@2.11.5"
 
       # libmpv is the whole reason Windows builds are a chore. The dev package ships the DLL and a
@@ -285,6 +300,29 @@ jobs:
           # WiX refuses a version whose prerelease suffix isn't numeric, which -rc.1 isn't.
           BUNDLES=(); [ "$PRERELEASE" = false ] || BUNDLES=(--bundles nsis)
           tauri build "${BUNDLES[@]}" --config '{"build":{"beforeBuildCommand":""}}'   # → target/release/bundle/{nsis,msi}/
+
+      # The static CRT is only as good as the flags that reached every link, and nothing else in
+      # this job would notice if one stopped (a Tauri CLI that forces STATIC_VCRUNTIME=true again,
+      # a RUSTFLAGS override). The exe would still build and start here, where the VC++
+      # redistributable is installed, and fail on a clean Windows. Read its import table instead.
+      - name: Check the exe imports no C runtime DLL
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs = & $vswhere -latest -products * -property installationPath
+          Import-Module "$vs\Common7\Tools\Microsoft.VisualStudio.DevShell.dll"
+          Enter-VsDevShell -VsInstallPath $vs -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64'
+
+          $exe = "$env:GITHUB_WORKSPACE\target\release\limusic-forge.exe"
+          if (-not (Test-Path $exe)) { throw "$exe not found — did mainBinaryName change?" }
+          $deps = & dumpbin /dependents $exe | Select-String -Pattern '^\s+(\S+\.dll)\s*$' |
+            ForEach-Object { $_.Matches[0].Groups[1].Value }
+          if ($deps.Count -lt 5) { throw "parsed only $($deps.Count) imports — dumpbin output format changed?" }
+          $deps | ForEach-Object { Write-Host "  $_" }
+          $crt = $deps | Where-Object { $_ -match '^(vcruntime140|msvcp140|api-ms-win-crt-|ucrtbase)' }
+          if ($crt) { throw "the exe imports the C runtime dynamically: $($crt -join ', ') — check +crt-static and STATIC_VCRUNTIME" }
+          Write-Host "no C runtime DLL imported"
 
       - name: Dry run — built and signed, attaching nothing
         if: ${{ inputs.dry_run }}
