@@ -11,7 +11,7 @@ use tauri::{Emitter, Manager, State};
 
 use crate::blocked::BlockedArtist;
 use crate::playlist_tools::journal::{self, Named, OpRecord, Restore, Summary};
-use crate::playlist_tools::{rows, transfer};
+use crate::playlist_tools::{dedup, rows, transfer};
 use crate::state::{
     is_local_playlist, AppState, LOCAL_PLAYLIST_PREFIX, ON_REPEAT_ID, ON_REPEAT_LIMIT,
     ON_REPEAT_WINDOW_SECS,
@@ -1603,21 +1603,44 @@ pub async fn reorder_playlist(
 }
 
 /// Take rows out of a playlist, undoably. Each row comes with the handle of the row after it that
-/// stays (`before`), which is where an undo puts it back.
+/// stays (`before`), which is where an undo puts it back. `kind` names it in the history: a plain
+/// removal, or the duplicate finder's.
 #[tauri::command]
 pub async fn remove_tracks(
     state: St<'_>,
     playlist_id: String,
     title: String,
     rows: Vec<Restore>,
+    kind: Option<String>,
 ) -> Result<Option<OpRecord>, String> {
+    let kind = if kind.as_deref() == Some("dedupe") { "dedupe" } else { "remove" };
     let songs: Vec<SongItem> = rows.iter().map(|r| r.song.clone()).collect();
     rows::remove_rows(&state, &playlist_id, &songs, &|| false).await?;
     journal::announce(&state, std::slice::from_ref(&playlist_id));
     let summary =
         Summary { playlists: vec![Named { id: playlist_id.clone(), title }], count: songs.len() };
     let undo = [journal::restore_step(&playlist_id, &rows)];
-    Ok(journal::record(&state, "remove", &summary, &undo))
+    Ok(journal::record(&state, kind, &summary, &undo))
+}
+
+/// The whole playlist and the duplicate clusters in it (`playlist_tools::dedup`). Reads every page
+/// of an account playlist, so the indices line up with rows the UI may not have scrolled to yet.
+#[derive(serde::Serialize)]
+pub struct DuplicateReport {
+    rows: Vec<SongItem>,
+    clusters: Vec<dedup::Cluster>,
+}
+
+#[tauri::command]
+pub async fn find_duplicates(
+    state: St<'_>,
+    playlist_id: String,
+    options: dedup::Options,
+    keep: dedup::Keep,
+) -> Result<DuplicateReport, String> {
+    let rows = rows::read_all(&state, &playlist_id).await?;
+    let clusters = dedup::find_clusters(&rows, &options, keep);
+    Ok(DuplicateReport { rows, clusters })
 }
 
 /// Copy or move tracks into another playlist: a drop on a sidebar playlist, or "Move to…".

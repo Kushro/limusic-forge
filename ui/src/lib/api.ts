@@ -718,15 +718,33 @@ export const reorderPlaylist = async (playlistId: string, title: string, order: 
 	const r = await invoke<RawPlaylistOp | null>('reorder_playlist', { playlistId, title, order });
 	return r && op(r);
 };
-/** Take rows out of a playlist, undoably (see `RowRef`). */
-export const removeTracks = async (playlistId: string, title: string, rows: RowRef[]) => {
+/** Take rows out of a playlist, undoably (see `RowRef`). `kind` names it in the history. */
+export const removeTracks = async (
+	playlistId: string,
+	title: string,
+	rows: RowRef[],
+	kind: 'remove' | 'dedupe' = 'remove'
+) => {
 	const r = await invoke<RawPlaylistOp | null>('remove_tracks', {
 		playlistId,
 		title,
-		rows: rows.map((r) => ({ song: r.song, before: r.before }))
+		rows: rows.map((r) => ({ song: r.song, before: r.before })),
+		kind
 	});
 	return r && op(r);
 };
+/** Which copy of a duplicate stays: the highest, the lowest, or the audio track over a video. */
+export type DuplicateKeep = 'first' | 'last' | 'prefer_song';
+/** The whole playlist, and the groups of rows (indices into it) that are copies of each other. */
+export type DuplicateReport = {
+	rows: SongItem[];
+	clusters: { rows: number[]; reasons: ('exact' | 'title' | 'similar')[]; keep: number }[];
+};
+export const findDuplicates = (
+	playlistId: string,
+	options: { exact: boolean; title: boolean; similar: boolean },
+	keep: DuplicateKeep
+) => invoke<DuplicateReport>('find_duplicates', { playlistId, options, keep });
 /** What a copy or move did. `duplicates`: already in the target; `refused`: YouTube wouldn't take
  *  them (or files on this computer bound for an account playlist). */
 export type Transferred = {

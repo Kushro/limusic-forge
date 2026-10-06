@@ -25,6 +25,7 @@
 		SpotifyIcon,
 		Search01Icon,
 		ShuffleSquareIcon,
+		Wrench01Icon,
 		ArrowReloadHorizontalIcon,
 		Tick02Icon
 	} from '@hugeicons/core-free-icons';
@@ -52,6 +53,7 @@
 	import { anchorsFor, moveBlock, movedCount, nudge, seededShuffle } from '$lib/reorder';
 	import { dragScroll, isDragRows, setDragRows, TRACK_ROWS_MIME, type TrackRowsDrag } from '$lib/dnd';
 	import MoveToPlaylist from '$lib/components/MoveToPlaylist.svelte';
+	import PlaylistToolsDialog from '$lib/components/PlaylistToolsDialog.svelte';
 	import { endRowDrag, startRowDrag } from '$lib/rowdrag.svelte';
 	import { announceOp } from '$lib/playlistops.svelte';
 	import { t } from '$lib/i18n.svelte';
@@ -1110,6 +1112,16 @@
 		endRowDrag();
 	}
 
+	// How many times each video is in this playlist, for the ×2 chip on its rows.
+	const copies = $derived.by(() => {
+		const n = new Map<string, number>();
+		for (const s of pl?.items ?? []) n.set(s.video_id, (n.get(s.video_id) ?? 0) + 1);
+		return n;
+	});
+
+	// The tools dialog (duplicates, split, merge). Not on On Repeat, which is built from play counts.
+	let toolsOpen = $state(false);
+
 	// "Move to…" from the selection bar: the same transfer a drop on a sidebar playlist makes.
 	// Not counted as an own edit: the rows leaving this list is what the reload shows.
 	let moveRows = $state<TrackRowsDrag | null>(null);
@@ -1376,6 +1388,7 @@
 									selectionKey={selection.visibleKeys[n]}
 									index={n}
 									showPlayCount
+									copies={copies.get(item.video_id)}
 									active={item.video_id === nowId}
 									onplay={() => playAll(n)}
 									onAdd={() => openAddToPlaylist(item)}
@@ -1434,6 +1447,15 @@
 <svelte:window ondragend={endDrag} onkeydown={onReorderKey} />
 
 <MoveToPlaylist bind:drag={moveRows} ondone={() => selection.clear()} />
+
+{#if pl && !isOnRepeat}
+	<PlaylistToolsDialog
+		bind:open={toolsOpen}
+		playlistId={id}
+		title={pl.title ?? t('common.playlist_singular')}
+		editable={reorderable}
+	/>
+{/if}
 
 {#if sortOpen}
 	<button
@@ -1574,8 +1596,17 @@
 				</button>
 			{/if}
 		{/if}
-		{#if reorderable && manualView}
+		{#if !isOnRepeat}
 			<div class="my-1 h-px bg-border"></div>
+			<button
+				class="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm hover:bg-accent/10"
+				onclick={() => run(() => (toolsOpen = true))}
+				disabled={!pl?.items.length}
+			>
+				<HugeiconsIcon icon={Wrench01Icon} class="h-4 w-4" /> {t('tools.open')}
+			</button>
+		{/if}
+		{#if reorderable && manualView}
 			<button
 				class="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm hover:bg-accent/10"
 				onclick={() => stageWhole((items) => seededShuffle(items, Date.now()))}

@@ -907,6 +907,7 @@ pub fn run() {
             commands::reorder_playlist,
             commands::remove_tracks,
             commands::transfer_tracks,
+            commands::find_duplicates,
             commands::playlist_history,
             commands::undo_playlist_op,
             commands::create_playlist,

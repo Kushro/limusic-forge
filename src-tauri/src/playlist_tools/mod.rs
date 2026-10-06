@@ -5,6 +5,7 @@
 //! Layout: pure logic in its own modules (`lis`), every edit through `rows` (account and local
 //! playlists alike), and `journal` for undo.
 
+pub mod dedup;
 pub mod journal;
 pub mod lis;
 pub mod rows;
