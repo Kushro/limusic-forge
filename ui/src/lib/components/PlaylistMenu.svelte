@@ -20,8 +20,10 @@
 		PlayListAddIcon,
 		RefreshIcon,
 		Share08Icon,
-		UserBlock01Icon
+		UserBlock01Icon,
+		Download04Icon
 	} from '@hugeicons/core-free-icons';
+	import { enqueue as enqueueDownloads } from '$lib/downloads.svelte';
 	import * as api from '$lib/api';
 	import type { BrowseItem } from '$lib/api';
 	import { addItemToPlaylist, enqueueItem, playItem } from '$lib/browse';
@@ -175,6 +177,31 @@
 		}
 	}
 
+	// Every track, not the first page: `playlist_rows` reads an account playlist to the end and a
+	// local one from SQLite (local files in it are skipped by the queue). An album is one page.
+	// On Repeat and folders on this disk have nothing to download.
+	const canDownload = $derived(
+		item.id !== api.ON_REPEAT_ID &&
+			((item.kind === 'playlist' && (onYouTube || api.isLocalPlaylist(item.id))) ||
+				(item.kind === 'album' && onYouTube))
+	);
+	// Same shape as `queue`: the tracks come first, so the menu stays open until they are queued.
+	let downloading = $state(false);
+	async function downloadAll() {
+		if (downloading) return;
+		downloading = true;
+		try {
+			const songs =
+				item.kind === 'album' ? (await api.getAlbum(item.id)).items : await api.playlistRows(item.id);
+			await enqueueDownloads(songs);
+			menuOpen = false;
+		} catch (e) {
+			toast.error(t('downloads.enqueue_failed', { error: String(e) }));
+		} finally {
+			downloading = false;
+		}
+	}
+
 	let menuOpen = $state(false);
 	let anchor = $state(NO_ANCHOR);
 
@@ -317,6 +344,23 @@
 				}}
 			>
 				<HugeiconsIcon icon={PlayListAddIcon} class="h-4 w-4" /> {t('player.save_to_playlist')}
+			</button>
+		{/if}
+		{#if canDownload}
+			<button
+				class="flex w-full cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm hover:bg-accent/10 disabled:opacity-50"
+				disabled={downloading}
+				onclick={(e) => {
+					e.stopPropagation();
+					downloadAll();
+				}}
+			>
+				<HugeiconsIcon icon={Download04Icon} class="h-4 w-4" />
+				{downloading
+					? t('common.loading')
+					: item.kind === 'album'
+						? t('downloads.download_album')
+						: t('downloads.download_playlist')}
 			</button>
 		{/if}
 		{#if canSync}

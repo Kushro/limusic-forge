@@ -5,7 +5,7 @@
 	// playlist to copy them there. The facet chips (`FilterChips` in its global mode) narrow by
 	// playlist, availability, first seen and spread, and the list sorts. Above the list, the
 	// monitor's alerts: tracks that left a playlist or turned unavailable since the last sync.
-	import { onMount } from 'svelte';
+	import { onMount, untrack } from 'svelte';
 	import { goto } from '$app/navigation';
 	import { HugeiconsIcon } from '@hugeicons/svelte';
 	import {
@@ -34,6 +34,7 @@
 		type FacetContext,
 		type Facets
 	} from '$lib/facets';
+	import { isDownloaded, track as trackDownloads } from '$lib/downloads.svelte';
 	import { setDragRows } from '$lib/dnd';
 	import { endRowDrag, startRowDrag } from '$lib/rowdrag.svelte';
 	import { thumb } from '$lib/thumb';
@@ -90,8 +91,15 @@
 		copies: new Map(),
 		elsewhere: (v) => (byId.get(v)?.playlists.length ?? 0) > 1,
 		playlistsOf: (v) => byId.get(v)?.playlists ?? [],
-		firstSeen: (v) => byId.get(v)?.first_seen ?? null
+		firstSeen: (v) => byId.get(v)?.first_seen ?? null,
+		// Reactive through the store's map, so the list re-filters as the answers arrive.
+		downloaded: isDownloaded
 	};
+	// The Downloaded facet needs every song's state, not just the rows scrolled into view.
+	$effect(() => {
+		const ids = songs.map((e) => e.song.video_id);
+		untrack(() => trackDownloads(ids));
+	});
 	const searched = $derived.by((): { list: Everywhere[]; error: boolean } => {
 		if (regex) {
 			const r = regexFilter(allSongs, query);
@@ -289,7 +297,7 @@
 		<TrackFilter bind:value={query} placeholder={t('everywhere.search')} />
 	</div>
 	<div class="mb-3 flex flex-wrap items-center gap-2">
-		<FilterChips bind:facets bind:regex regexError={searched.error} items={allSongs} global playlists={facetPlaylists} />
+		<FilterChips bind:facets bind:regex regexError={searched.error} items={allSongs} global playlists={facetPlaylists} downloads />
 		{#if shown.length && !allShownPicked}
 			<Button variant="ghost" size="sm" class="ml-auto" onclick={selectFiltered}>
 				{t('everywhere.select_filtered', { count: shown.length })}

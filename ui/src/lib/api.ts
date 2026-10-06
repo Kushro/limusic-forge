@@ -802,7 +802,8 @@ export const onToolsInstallProgress = (cb: (p: ToolsInstallProgress) => void): P
 export type DownloadsInfo = { dir: string; default_dir: string };
 export const downloadsInfo = () => invoke<DownloadsInfo>('downloads_info');
 export const openDownloadsDir = () => invoke<void>('open_downloads_dir');
-export type EnqueueResult = { queued: number; already: number };
+/** `invalid`: songs left out because their id is not a YouTube video's. */
+export type EnqueueResult = { queued: number; already: number; invalid: number };
 /** What a download needs of a song: the id, plus what fills the catalog. A `SongItem` is one. */
 export type DownloadSong = Pick<SongItem, 'video_id'> &
 	Partial<Pick<SongItem, 'title' | 'artists' | 'duration'>>;

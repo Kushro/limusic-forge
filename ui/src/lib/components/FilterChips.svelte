@@ -20,7 +20,8 @@
 		regexError = false,
 		items,
 		global = false,
-		playlists = []
+		playlists = [],
+		downloads = false
 	}: {
 		facets: Facets;
 		regex?: boolean;
@@ -28,6 +29,8 @@
 		items: SongItem[];
 		global?: boolean;
 		playlists?: { id: string; title: string; count: number }[];
+		/** The host passes `FacetContext.downloaded`, so the Downloaded chip has something to go on. */
+		downloads?: boolean;
 	} = $props();
 
 	let artistQuery = $state('');
@@ -68,6 +71,7 @@
 	const KINDS: Facets['kind'][] = ['all', 'songs', 'videos'];
 	const STATUSES: Facets['status'][] = ['all', 'available', 'unavailable'];
 	const SPREADS: Facets['spread'][] = ['all', 'several', 'one'];
+	const DOWNLOADED: Facets['downloaded'][] = ['all', 'yes', 'no'];
 	function next<T>(all: T[], v: T): T {
 		return all[(all.indexOf(v) + 1) % all.length];
 	}
@@ -235,6 +239,15 @@
 	>
 		{t(`facets.kind_${facets.kind}`)}
 	</button>
+	{#if downloads}
+		<button
+			class={chip(facets.downloaded !== 'all')}
+			onclick={() => (facets = { ...facets, downloaded: next(DOWNLOADED, facets.downloaded) })}
+			title={t('facets.downloaded_hint')}
+		>
+			{t(`facets.downloaded_${facets.downloaded}`)}
+		</button>
+	{/if}
 	<button
 		class="{chip(regex)} font-mono {regexError ? 'border-destructive text-destructive' : ''}"
 		onclick={() => (regex = !regex)}

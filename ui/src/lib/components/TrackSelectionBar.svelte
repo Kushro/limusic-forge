@@ -8,8 +8,11 @@
 		PlayListAddIcon,
 		PlayListRemoveIcon,
 		SquareArrowRightDoubleIcon,
-		Cancel01Icon
+		Cancel01Icon,
+		Download04Icon
 	} from '@hugeicons/core-free-icons';
+	import * as api from '$lib/api';
+	import { enqueue as enqueueDownloads } from '$lib/downloads.svelte';
 	import { Button } from './ui/button';
 	import { enqueue, openAddManyToPlaylist, ui } from '$lib/player.svelte';
 	import type { SongItem } from '$lib/api';
@@ -42,6 +45,18 @@
 	// Local files included: the picker narrows itself to the playlists on this machine for them.
 	const canAdd = $derived(selection.count > 0);
 	const blocked = $derived(busy || selection.selectingAll || selection.pending > 0);
+	// Local files have nothing to download; a selection of only those gets no button.
+	const downloadable = $derived(selection.songs.filter((s) => !api.isLocalId(s.video_id)).length);
+
+	async function download() {
+		if (blocked || !downloadable) return;
+		busy = true;
+		try {
+			await enqueueDownloads([...selection.songs]);
+		} finally {
+			busy = false;
+		}
+	}
 
 	function onKey(e: KeyboardEvent) {
 		// Space activates these buttons, never the app-wide transport shortcut.
@@ -111,6 +126,14 @@
 						title={t('player.add_to_playlist')} aria-label={t('player.add_to_playlist')}
 						onclick={() => openAddManyToPlaylist([...selection.songs])}>
 						<HugeiconsIcon icon={PlayListAddIcon} class="h-4 w-4" />
+					</Button>
+				{/if}
+				{#if downloadable}
+					<Button variant="ghost" size="icon" disabled={blocked} onkeydown={onKey}
+						title={t('downloads.download_n', { count: downloadable })}
+						aria-label={t('downloads.download_n', { count: downloadable })}
+						onclick={download}>
+						<HugeiconsIcon icon={Download04Icon} class="h-4 w-4" />
 					</Button>
 				{/if}
 				{#if onMove}

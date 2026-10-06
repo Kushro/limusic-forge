@@ -381,6 +381,10 @@ async fn execute(
                     container.as_deref(),
                     now_secs(),
                 );
+                // The first download ever puts its folder in Local music, once (D21).
+                if crate::local::adopt_download_folder(db, &row.dest_dir) {
+                    tracing::info!("downloads: the download folder joined the local library");
+                }
                 Outcome {
                     video_id: row.video_id.clone(),
                     format: row.format.clone(),

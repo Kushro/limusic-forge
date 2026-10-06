@@ -1,7 +1,8 @@
 // Narrowing a track list by more than a search box: artist, length, duplicates, songs vs music
 // videos, and a regex mode for the search itself. PlaylistForge's playlist filters, as chips under
 // the playlist header; Library ▸ In your playlists adds which playlists, availability, first seen
-// and spread. Every facet combines with the others (AND). Pure, so `facets.check.ts`
+// and spread, and downloaded where the host knows. Every facet combines with the others (AND).
+// Pure, so `facets.check.ts`
 // runs it under plain Node.
 import type { SongItem } from './api';
 
@@ -26,6 +27,8 @@ export type Facets = {
 	seenTo: number | null;
 	/** `several`: in two or more of your playlists. `one`: in exactly one. */
 	spread: 'all' | 'several' | 'one';
+	/** Whether the video has a downloaded file, by `FacetContext.downloaded`; skipped without it. */
+	downloaded: 'all' | 'yes' | 'no';
 };
 
 export const NO_FACETS: Facets = {
@@ -38,7 +41,8 @@ export const NO_FACETS: Facets = {
 	status: 'all',
 	seenFrom: null,
 	seenTo: null,
-	spread: 'all'
+	spread: 'all',
+	downloaded: 'all'
 };
 
 export function facetsActive(f: Facets): boolean {
@@ -52,7 +56,8 @@ export function facetsActive(f: Facets): boolean {
 		f.status !== 'all' ||
 		f.seenFrom !== null ||
 		f.seenTo !== null ||
-		f.spread !== 'all'
+		f.spread !== 'all' ||
+		f.downloaded !== 'all'
 	);
 }
 
@@ -102,6 +107,8 @@ export type FacetContext = {
 	/** When a video was first seen in any playlist, epoch seconds or null. Without it the first-seen
 	 *  range is skipped. */
 	firstSeen?: (videoId: string) => number | null;
+	/** Whether a video has a downloaded file. Without it the `downloaded` facet is skipped. */
+	downloaded?: (videoId: string) => boolean;
 };
 
 /** How many songs each playlist holds among `rows`, keyed by playlist id. */
@@ -162,9 +169,11 @@ export function applyFacets<T extends SongItem>(items: T[], f: Facets, ctx: Face
 	const lo = f.minMin === null ? null : f.minMin * 60;
 	const hi = f.maxMin === null ? null : f.maxMin * 60;
 	const lists = new Set(f.playlists);
-	const { playlistsOf, firstSeen } = ctx;
+	const { playlistsOf, firstSeen, downloaded } = ctx;
 	const ranged = f.seenFrom !== null || f.seenTo !== null;
 	return items.filter((s) => {
+		if (downloaded && f.downloaded !== 'all' && downloaded(s.video_id) !== (f.downloaded === 'yes'))
+			return false;
 		if (f.status === 'available' && s.unavailable) return false;
 		if (f.status === 'unavailable' && !s.unavailable) return false;
 		if (playlistsOf && (lists.size || f.spread !== 'all')) {

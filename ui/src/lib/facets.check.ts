@@ -74,6 +74,14 @@ ok(ids(applyFacets(g, { ...NO_FACETS, spread: 'one', status: 'available', seenTo
 ok(facetsActive({ ...NO_FACETS, seenTo: 0 }) && facetsActive({ ...NO_FACETS, spread: 'one' }), 'New facets count as active');
 // On a playlist page there is no global context: those facets have nothing to go on.
 ok(ids(applyFacets(g, { ...NO_FACETS, playlists: ['VL9'], spread: 'several', seenFrom: 999 }, ctx)) === 'pqru', 'No context: skipped');
+// Downloaded: by the host's callback, which a page without download state does not pass.
+const dctx = { ...gctx, downloaded: (v: string) => v === 'q' || v === 'u' };
+ok(ids(applyFacets(g, { ...NO_FACETS, downloaded: 'yes' }, dctx)) === 'qu', 'Downloaded only');
+ok(ids(applyFacets(g, { ...NO_FACETS, downloaded: 'no' }, dctx)) === 'pr', 'Not downloaded only');
+ok(ids(applyFacets(g, { ...NO_FACETS, downloaded: 'yes', status: 'available', seenTo: 250 }, dctx)) === 'q', 'Downloaded combines');
+ok(ids(applyFacets(g, { ...NO_FACETS, downloaded: 'all' }, dctx)) === 'pqru', 'Downloaded: all keeps everything');
+ok(facetsActive({ ...NO_FACETS, downloaded: 'no' }), 'Downloaded counts as active');
+ok(ids(applyFacets(g, { ...NO_FACETS, downloaded: 'yes' }, gctx)) === 'pqru', 'No download context: skipped');
 const counts2 = playlistCounts([{ playlists: ['VL1', 'VL2'] }, { playlists: ['VL2', 'VL2'] }]);
 ok(counts2.get('VL1') === 1 && counts2.get('VL2') === 2, 'Playlist counts, each song once');
 const day = dayToSecs('2026-10-06');
