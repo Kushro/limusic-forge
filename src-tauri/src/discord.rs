@@ -698,7 +698,10 @@ impl Presence {
 
     /// Time left before the next connect attempt is allowed, or `None` when we may try now.
     fn connect_backoff_remaining(&self) -> Option<Duration> {
-        self.connect_backoff.checked_sub(self.last_connect_try?.elapsed())
+        // `checked_sub` yields `Some(ZERO)` when elapsed == backoff exactly; that's "now", not "wait".
+        self.connect_backoff
+            .checked_sub(self.last_connect_try?.elapsed())
+            .filter(|rem| !rem.is_zero())
     }
 
     fn ensure_connected(&mut self) -> bool {
@@ -1042,8 +1045,16 @@ mod tests {
         assert!(rem <= CONNECT_RETRY_MIN, "first retry within {CONNECT_RETRY_MIN:?}, got {rem:?}");
 
         p.connect_backoff = CONNECT_RETRY_MAX; // after repeated failures
+        p.last_connect_try = Some(Instant::now() - CONNECT_RETRY_MAX / 2);
+        let rem = p.connect_backoff_remaining().expect("still throttled mid-backoff");
+        assert!(rem <= CONNECT_RETRY_MAX / 2, "at most half the backoff left, got {rem:?}");
+
+        // Exactly on the boundary (elapsed can't be less than the backoff, and may equal it when
+        // the clock hasn't ticked between the two reads): the backoff is over.
         p.last_connect_try = Some(Instant::now() - CONNECT_RETRY_MAX);
         assert!(p.connect_backoff_remaining().is_none(), "the backoff still lets retries through");
+        p.last_connect_try = Some(Instant::now() - CONNECT_RETRY_MAX - Duration::from_millis(1));
+        assert!(p.connect_backoff_remaining().is_none(), "past the backoff — try now");
     }
 
     fn full_track() -> Track {
