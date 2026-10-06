@@ -432,7 +432,13 @@ export interface PlaybackSnapshot {
 export const getPlayback = () => invoke<PlaybackSnapshot>('get_playback');
 
 // --- settings (context/11) -----------------------------------------------------------------
-export const getSettings = () => invoke<Record<string, string>>('get_settings');
+/** Stored settings plus a few read-only, derived ones (`native_chrome`, `native_video`,
+ *  `discord_available`). Every value is a string, booleans as `'true'`/`'false'`. */
+export type Settings = Record<string, string> & {
+	/** Whether this build was compiled with a Discord application id (rich presence can work). */
+	discord_available?: 'true' | 'false';
+};
+export const getSettings = () => invoke<Settings>('get_settings');
 export const setSetting = (key: string, value: string) =>
 	invoke<void>('set_setting', { key, value });
 /** Streamable client keys for the "disabled clients" setting. */
@@ -1141,6 +1147,8 @@ export const theaterFullscreen = (on: boolean) => invoke<void>('theater_fullscre
 
 // --- Last.fm scrobbling ---------------------------------------------------------------------
 export interface LastfmState {
+	/** From `lastfm_status` only: whether this build carries Last.fm API credentials. */
+	configured?: boolean;
 	connected: boolean;
 	username?: string | null;
 	/** Set when a connect attempt failed (timeout, network, rejected) — show it as a toast. */

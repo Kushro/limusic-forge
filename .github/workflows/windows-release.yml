@@ -14,6 +14,7 @@ name: Windows release binaries
 #   TAURI_SIGNING_PRIVATE_KEY           contents of ~/.tauri/limusic.key
 #   TAURI_SIGNING_PRIVATE_KEY_PASSWORD  empty string (the key has no password)
 #   LASTFM_API_KEY / LASTFM_API_SECRET  Last.fm credentials (optional — warn-only if absent)
+#   LIMUSIC_DISCORD_APP_ID              Discord application id (optional — Discord off if absent)
 # Without the signing pair the bundler emits no .sig and this job fails loudly rather than
 # shipping an unsignable update.
 
@@ -263,6 +264,9 @@ jobs:
           # Scoped to this step only — no other step (or third-party action) sees the signing key.
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # Public Discord application id for rich presence, baked in by `option_env!` in
+          # discord.rs. Optional: without it the build ships with Discord disabled.
+          LIMUSIC_DISCORD_APP_ID: ${{ secrets.LIMUSIC_DISCORD_APP_ID }}
           # NOTE: RUSTFLAGS is deliberately NOT set here. It is exported to $GITHUB_ENV before
           # rust-cache runs, so the cache key and cargo's fingerprints agree. See that step.
         run: |

@@ -369,6 +369,9 @@ pub async fn get_settings(state: St<'_>) -> Result<serde_json::Value, String> {
         .collect();
     map.insert("native_chrome".into(), native_chrome(&state.db).into());
     map.insert("native_video".into(), crate::state::native_video().to_string().into());
+    // Whether this build has a Discord application id (D4): without one the Discord tab and the
+    // titlebar toggle say so and stay disabled.
+    map.insert("discord_available".into(), crate::discord::available().to_string().into());
     Ok(serde_json::Value::Object(map))
 }
 
@@ -2295,6 +2298,21 @@ pub struct ReleaseNote {
     body: String,
 }
 
+/// Whether a version (or a `v`-prefixed tag) is a prerelease (D1): its suffix (what follows the
+/// first `-`, build metadata after `+` ignored) starts with `rc`, `beta` or `alpha`,
+/// case-insensitive. The fork's own `-forge.N` suffix marks a stable release, so `1.2.0-forge.1`
+/// is not one while `1.3.0-rc.1` is. Cut release candidates as `1.3.0-rc.N`, never
+/// `1.2.0-forge.2-rc.1`: that one is stable by this rule and orders after `1.2.0-forge.2`. The
+/// UI's twin is `isPrerelease` in ui/src/lib/version.ts; keep both rules identical.
+pub(crate) fn is_prerelease(version: &str) -> bool {
+    let core = version.split('+').next().unwrap_or_default();
+    let Some((_, pre)) = core.split_once('-') else {
+        return false;
+    };
+    let pre = pre.to_ascii_lowercase();
+    ["rc", "beta", "alpha"].iter().any(|p| pre.starts_with(p))
+}
+
 /// What's new, read straight from the GitHub releases API so the release description is the only
 /// place the changelog is written. Cached for the process: the list only changes when a release
 /// is cut, and unauthenticated GitHub allows 60 requests an hour.
@@ -2310,11 +2328,13 @@ pub async fn release_notes() -> Result<Vec<ReleaseNote>, String> {
         published_at: Option<String>,
         body: Option<String>,
         draft: bool,
-        prerelease: bool,
     }
     let releases: Vec<GhRelease> = crate::http::client()
-        .get("https://api.github.com/repos/SimoHypers/limusic/releases?per_page=20")
-        .header("User-Agent", concat!("Limusic/", env!("CARGO_PKG_VERSION")))
+        .get(format!(
+            "https://api.github.com/repos/{}/releases?per_page=20",
+            crate::brand::REPO_SLUG
+        ))
+        .header("User-Agent", concat!("LiMusicForge/", env!("CARGO_PKG_VERSION")))
         .header("Accept", "application/vnd.github+json")
         .timeout(std::time::Duration::from_secs(15))
         .send()
@@ -2325,9 +2345,10 @@ pub async fn release_notes() -> Result<Vec<ReleaseNote>, String> {
         .json()
         .await
         .map_err(|e| e.to_string())?;
+    // By version, not GitHub's flag: a `-forge.N` release is the fork's stable line (`is_prerelease`).
     let notes: Vec<ReleaseNote> = releases
         .into_iter()
-        .filter(|r| !r.draft && !r.prerelease)
+        .filter(|r| !r.draft && !is_prerelease(&r.tag_name))
         .map(|r| ReleaseNote {
             version: r.tag_name.trim_start_matches('v').to_string(),
             date: r
@@ -2350,8 +2371,15 @@ pub async fn release_notes() -> Result<Vec<ReleaseNote>, String> {
 /// their package manager, so the UI shows them a download link instead.
 ///
 /// Reads the same `Env::appimage` the updater plugin decides on, so the two cannot disagree.
+///
+/// A build whose `plugins.updater.pubkey` is empty (the fork until its signing key exists, see
+/// docs/RELEASING-FORK.md) can verify nothing it downloads, so it never self-updates either: the UI
+/// falls back to the same download link.
 #[tauri::command]
 pub fn can_self_update(app: tauri::AppHandle) -> bool {
+    if !updater_pubkey_configured(app.config().plugins.0.get("updater")) {
+        return false;
+    }
     #[cfg(target_os = "linux")]
     {
         use tauri::Manager;
@@ -2366,11 +2394,19 @@ pub fn can_self_update(app: tauri::AppHandle) -> bool {
     }
 }
 
+/// Whether the updater plugin's config (`plugins.updater` in tauri.conf.json) carries a public key.
+fn updater_pubkey_configured(updater: Option<&serde_json::Value>) -> bool {
+    updater
+        .and_then(|u| u.get("pubkey"))
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|k| !k.trim().is_empty())
+}
+
 /// The beta channel's manifest. `beta` is a permanent prerelease holding nothing but this file, and
 /// the release workflows move it to the newest release candidate, or to the newest release once that
 /// is ahead, so the URL never changes.
 const BETA_MANIFEST: &str =
-    "https://github.com/SimoHypers/limusic/releases/download/beta/latest.json";
+    "https://github.com/Kushro/limusic-forge/releases/download/beta/latest.json";
 
 /// What the updater plugin's own `check` command returns, so the UI can wrap it in the plugin's
 /// `Update` class and install it the usual way.
@@ -2569,6 +2605,48 @@ pub fn theater_fullscreen(window: tauri::WebviewWindow, on: bool) -> Result<(), 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// D1: the fork's `-forge.N` releases are stable; only rc/beta/alpha are prereleases.
+    #[test]
+    fn prerelease_is_rc_beta_or_alpha_never_forge() {
+        // `-forge.2-rc.1` is stable by D1 (only the suffix's start counts): RCs are `x.y.z-rc.N`.
+        for stable in [
+            "1.2.0",
+            "v1.2.0",
+            "1.2.0-forge.1",
+            "v1.2.0-forge.12",
+            "1.2.0-forge.1+build.5",
+            "1.2.0-forge.2-rc.1",
+        ] {
+            assert!(!is_prerelease(stable), "{stable} is stable");
+        }
+        for pre in ["1.2.0-rc.2", "v1.3.0-beta.1", "1.3.0-alpha", "1.2.0-RC.1", "1.3.0-rc.1+b.2"] {
+            assert!(is_prerelease(pre), "{pre} is a prerelease");
+        }
+    }
+
+    #[test]
+    fn prerelease_self_update_needs_a_pubkey() {
+        let cfg = |v: serde_json::Value| updater_pubkey_configured(Some(&v));
+        assert!(!updater_pubkey_configured(None));
+        assert!(!cfg(serde_json::json!({ "pubkey": "" })));
+        assert!(!cfg(serde_json::json!({ "pubkey": "  " })));
+        assert!(!cfg(serde_json::json!({ "endpoints": [] })));
+        assert!(cfg(serde_json::json!({ "pubkey": "not-empty" })));
+    }
+
+    /// The shipped config: the fork's feed, and no key until the owner generates one.
+    #[test]
+    fn prerelease_updater_config_points_at_the_fork() {
+        let conf: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.conf.json")).expect("tauri.conf.json");
+        let updater = &conf["plugins"]["updater"];
+        assert_eq!(
+            updater["endpoints"][0],
+            "https://github.com/Kushro/limusic-forge/releases/latest/download/latest.json"
+        );
+        assert!(updater["pubkey"].is_string());
+    }
 
     #[test]
     fn on_repeat_rows_shed_the_queue_slot_they_were_played_from() {

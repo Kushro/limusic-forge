@@ -12,7 +12,6 @@
 		KeyboardIcon,
 		Cancel01Icon as RemoveIcon,
 		Copy01Icon,
-		Coffee02Icon,
 		DiscordIcon,
 		Globe02Icon,
 		ArrowDown01Icon,
@@ -76,7 +75,7 @@
 	import GlobalHotkeysSettings from '$lib/components/GlobalHotkeysSettings.svelte';
 	import LyricsSourcesSettings from '$lib/components/LyricsSourcesSettings.svelte';
 	import LanguagePicker from '$lib/components/LanguagePicker.svelte';
-	import { APP_NAME, UPSTREAM_VERSION } from '$lib/brand';
+	import { APP_NAME, REPO_URL, UPSTREAM_VERSION } from '$lib/brand';
 
 	type TabId = 'general' | 'themes' | 'playback' | 'hotkeys' | 'discord' | 'data' | 'about';
 	const TABS = $derived<{ id: TabId; label: string; hint: string; icon: typeof Settings02Icon }[]>([
@@ -305,7 +304,7 @@
 				version,
 				system
 			});
-			await api.openExternal(`https://github.com/SimoHypers/limusic/issues/new?${q}`);
+			await api.openExternal(`${REPO_URL}/issues/new?${q}`);
 		} catch (e) {
 			diagError = String(e);
 		}
@@ -627,7 +626,19 @@
 					<p class="truncate text-xs text-muted-foreground">{currentTab.hint}</p>
 				</header>
 
-				{#if loaded && tab === 'discord'}
+				{#if loaded && tab === 'discord' && settings.discord_available === 'false'}
+					<!-- D4: a build without a Discord application id cannot connect at all. The tab
+					     still shows what the presence would look like, but nothing in it is live. -->
+					<div class="flex min-h-0 flex-1 flex-col">
+						<Alert class="mx-6 mt-4 w-auto shrink-0">
+							<HugeiconsIcon icon={Alert02Icon} size={16} strokeWidth={1.8} />
+							<AlertDescription>{t('settings.discord.unavailable')}</AlertDescription>
+						</Alert>
+						<div class="flex min-h-0 flex-1 opacity-60" inert>
+							<DiscordSettings {settings} />
+						</div>
+					</div>
+				{:else if loaded && tab === 'discord'}
 					<DiscordSettings {settings} />
 				{:else}
 				<div class="min-w-0 flex-1 overflow-y-auto overflow-x-hidden px-6 py-5">
@@ -983,18 +994,6 @@
 								{t('settings.about.based_on', { upstream: UPSTREAM_VERSION })}
 							</p>
 						</div>
-
-						<section class={GROUP}>
-							<h3 class={LABEL}>{t('settings.sections.support')}</h3>
-							<div class={CARD}>
-								{@render row({
-									title: t('settings.about.kofi'),
-									desc: t('settings.about.kofi_hint'),
-									control: kofiButton,
-									tall: true
-								})}
-							</div>
-						</section>
 
 						<section class={GROUP}>
 							<h3 class={LABEL}>{t('settings.sections.updates')}</h3>
@@ -1516,13 +1515,6 @@
 
 {#snippet reportButton()}
 	<Button size="sm" onclick={openBugForm}>{t('settings.about.report_issue_button')}</Button>
-{/snippet}
-
-{#snippet kofiButton()}
-	<Button variant="secondary" size="sm" onclick={() => api.openExternal('https://ko-fi.com/simohypers')}>
-		<HugeiconsIcon icon={Coffee02Icon} size={15} strokeWidth={1.8} />
-		{t('settings.about.kofi_button')}
-	</Button>
 {/snippet}
 
 {#snippet diagAlert()}

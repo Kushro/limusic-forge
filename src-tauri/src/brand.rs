@@ -11,3 +11,9 @@ pub const APP_NAME: &str = "LiMusic Forge";
 /// Machine-facing short name: the binary (`mainBinaryName`), and the id the desktop sees for us
 /// (tray item id, MPRIS bus suffix).
 pub const APP_SLUG: &str = "limusic-forge";
+
+/// The fork's GitHub repository, `owner/name`: releases, the updater feed and issue reports.
+pub const REPO_SLUG: &str = "Kushro/limusic-forge";
+
+/// The fork's GitHub repository page.
+pub const REPO_URL: &str = "https://github.com/Kushro/limusic-forge";

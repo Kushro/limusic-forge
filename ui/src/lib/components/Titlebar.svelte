@@ -64,9 +64,13 @@
 	// connects/clears the presence the moment it flips). Optimistic; reverted on failure. The flag
 	// lives in `prefs` because the Discord settings tab toggles the same thing: a local copy here
 	// went stale the moment the other one was used.
-	const discordOn = $derived(prefs.discordRpc);
+	// A build compiled without a Discord application id (D4) can't connect at all: the button stays,
+	// greyed out, and its tooltip says why. Assumed available until `get_settings` says otherwise.
+	let discordAvailable = $state(true);
+	const discordOn = $derived(discordAvailable && prefs.discordRpc);
 
 	async function toggleDiscord() {
+		if (!discordAvailable) return;
 		const next = !discordOn;
 		prefs.discordRpc = next;
 		try {
@@ -79,6 +83,9 @@
 	}
 
 	onMount(() => {
+		api.getSettings()
+			.then((s) => (discordAvailable = s.discord_available !== 'false'))
+			.catch(() => {});
 		api.lastfmStatus()
 			.then((s) => {
 				connected = s.connected;
@@ -235,11 +242,18 @@
 		</button>
 
 		<button
-			class="flex h-full w-8 items-center justify-center text-muted-foreground transition-colors hover:bg-accent/10 hover:text-foreground {discordOn
-				? 'text-foreground'
-				: ''}"
+			class="flex h-full w-8 items-center justify-center text-muted-foreground transition-colors {!discordAvailable
+				? 'cursor-not-allowed opacity-50'
+				: discordOn
+					? 'text-foreground hover:bg-accent/10'
+					: 'hover:bg-accent/10 hover:text-foreground'}"
 			onclick={toggleDiscord}
-			title={discordOn ? t('integrations.discord_tooltip_on') : t('integrations.discord_tooltip_off')}
+			aria-disabled={!discordAvailable}
+			title={!discordAvailable
+				? t('integrations.discord_unavailable')
+				: discordOn
+					? t('integrations.discord_tooltip_on')
+					: t('integrations.discord_tooltip_off')}
 			aria-label={t('settings.general.discord_rpc')}
 		>
 			<span class="relative">

@@ -31,6 +31,7 @@ name: macOS release binaries
 # Requires repo secrets (same set as the other two):
 #   TAURI_SIGNING_PRIVATE_KEY / TAURI_SIGNING_PRIVATE_KEY_PASSWORD   (mandatory, no sig no update)
 #   LASTFM_API_KEY / LASTFM_API_SECRET                               (optional, warn-only)
+#   LIMUSIC_DISCORD_APP_ID                                           (optional, Discord off if absent)
 
 # DISPATCH ONLY, ON PURPOSE, for the reason spelled out in the other two workflows: Actions caches
 # are ref-scoped, and a run triggered by `release: published` executes on the tag ref, so it can
@@ -209,6 +210,10 @@ jobs:
       # unfixed .app and then fails the build asking for the signing key, which is deliberately not
       # in scope here: the tarball that ships is made and signed further down, after dylibbundler.
       - name: Build the app bundle
+        env:
+          # Public Discord application id for rich presence, baked in by `option_env!` in
+          # discord.rs. Optional: without it the build ships with Discord disabled.
+          LIMUSIC_DISCORD_APP_ID: ${{ secrets.LIMUSIC_DISCORD_APP_ID }}
         run: |
           set -euo pipefail
           (cd ui && pnpm build)

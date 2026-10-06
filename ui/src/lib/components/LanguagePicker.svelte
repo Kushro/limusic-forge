@@ -1,11 +1,10 @@
 <script lang="ts">
 	// The language list, as a panel under the settings row rather than a dropdown. Twelve catalogs
-	// already ran the select off the bottom of the dialog, and Weblate keeps sending more, so the
+	// already ran the select off the bottom of the dialog, and more keep arriving, so the
 	// list needs a search field and a shape that grows sideways instead of down.
 	import { HugeiconsIcon } from '@hugeicons/svelte';
-	import { Search01Icon, Tick02Icon, TranslateIcon } from '@hugeicons/core-free-icons';
+	import { Search01Icon, Tick02Icon } from '@hugeicons/core-free-icons';
 	import { Input } from '$lib/components/ui/input';
-	import * as api from '$lib/api';
 	import { matchLocales } from '$lib/langlist';
 	import { t, LOCALES, COVERAGE, currentLocale, type LocaleId } from '$lib/i18n.svelte';
 
@@ -94,15 +93,4 @@
 	{:else}
 		<p class="px-1 py-6 text-center text-xs text-muted-foreground">{t('common.no_matches')}</p>
 	{/if}
-
-	<!-- Every catalog but English is volunteer work in progress, and this is where somebody notices
-	     their language is at 61%. -->
-	<button
-		type="button"
-		onclick={() => api.openExternal('https://hosted.weblate.org/engage/limusic/')}
-		class="mt-2 flex w-full cursor-pointer items-center justify-center gap-1.5 rounded-lg px-2 py-1.5 text-[11px] text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-	>
-		<HugeiconsIcon icon={TranslateIcon} strokeWidth={2} class="size-3.5" />
-		{t('settings.general.language_contribute')}
-	</button>
 </div>

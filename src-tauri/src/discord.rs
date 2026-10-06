@@ -45,24 +45,29 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use discord_rich_presence::{activity, DiscordIpc, DiscordIpcClient};
 use innertube::SongItem;
 
-/// Discord application id (a snowflake — digits only). **Must be set before rich presence does
-/// anything.** Register an app named "LiMusic Forge" at <https://discord.com/developers/applications> and
-/// paste its Application ID here — the app's *name* is what renders after "Listening to", and its
-/// icon is the fallback artwork. Nothing else in the portal needs configuring: no bot user, no
-/// OAuth redirect, no client secret. (Metrolist needs all of that only because Android has no
-/// Discord client.)
-const APP_ID: &str = "1525891596804161727";
+/// Discord application id (a snowflake — digits only), fixed at compile time from the
+/// `LIMUSIC_DISCORD_APP_ID` environment variable (a CI secret for release builds, see
+/// docs/RELEASING-FORK.md). Register an app named "LiMusic Forge" at
+/// <https://discord.com/developers/applications> and use its Application ID — the app's *name* is
+/// what renders after "Listening to", and its icon is the fallback artwork. Nothing else in the
+/// portal needs configuring: no bot user, no OAuth redirect, no client secret. (Metrolist needs all
+/// of that only because Android has no Discord client.) Empty when the build had no id: rich
+/// presence is then disabled, and Settings says so.
+const APP_ID: &str = match option_env!("LIMUSIC_DISCORD_APP_ID") {
+    Some(id) => id,
+    None => "",
+};
 
 const SONG_URL: &str = "https://music.youtube.com/watch?v=";
 const ARTIST_URL: &str = "https://music.youtube.com/channel/";
 const ALBUM_URL: &str = "https://music.youtube.com/browse/";
-const REPO_URL: &str = "https://github.com/SimoHypers/limusic";
+const REPO_URL: &str = crate::brand::REPO_URL;
 /// The small "provider badge" Discord draws in the corner of the artwork, the way Spotify's and
 /// Apple Music's cards do (issue #226). Served straight from the repo so there is no asset to
 /// register in the Discord developer portal and nothing to keep in sync at release time; if this
 /// path ever moves, the badge silently stops rendering and nothing else breaks.
 const BADGE_URL: &str =
-    "https://raw.githubusercontent.com/SimoHypers/limusic/master/src-tauri/icons/128x128.png";
+    "https://raw.githubusercontent.com/Kushro/limusic-forge/master/src-tauri/icons/128x128.png";
 
 /// Reconnect backoff while enabled but unconnected (Discord not running, or it quit). Starts short
 /// — Discord may simply be slower to start than we are — and eases off so a permanently-absent
@@ -257,12 +262,23 @@ impl DiscordHandle {
     }
 }
 
+/// A Discord application id: a non-empty run of digits.
+fn is_app_id(id: &str) -> bool {
+    !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// Whether this build was compiled with a Discord application id, i.e. whether rich presence can
+/// work at all. `get_settings` hands it to the UI as `discord_available`.
+pub fn available() -> bool {
+    is_app_id(APP_ID)
+}
+
 /// Spawn the presence owner thread. `enabled` is the persisted `discord_rpc` setting — when off,
 /// the thread parks on the channel and never opens a socket.
 pub fn spawn(enabled: bool, cfg: RpcConfig) -> Option<DiscordHandle> {
     // Without a real app id there is nothing to connect *as*. Say so once, loudly, rather than
-    // leaving a settings toggle that silently does nothing.
-    if APP_ID.is_empty() || !APP_ID.bytes().all(|b| b.is_ascii_digit()) {
+    // leaving a settings toggle that silently does nothing (Settings also shows it as unavailable).
+    if !available() {
         tracing::warn!(APP_ID, "discord rich presence disabled: APP_ID is not a Discord app id");
         return None;
     }
@@ -837,13 +853,19 @@ fn discord_thumb(url: &str) -> Option<String> {
 mod tests {
     use super::*;
 
-    /// `spawn` refuses to run without one, so a bad edit here silently disables the whole feature.
+    /// The id comes from the build environment: absent is a supported build (Discord disabled),
+    /// but anything present must be a real application id, or `spawn` would quietly refuse it.
     #[test]
-    fn app_id_is_a_snowflake() {
+    fn app_id_is_empty_or_a_snowflake() {
         assert!(
-            !APP_ID.is_empty() && APP_ID.bytes().all(|b| b.is_ascii_digit()),
-            "APP_ID must be a Discord application id (digits only) — got {APP_ID:?}"
+            APP_ID.is_empty() || is_app_id(APP_ID),
+            "LIMUSIC_DISCORD_APP_ID must be a Discord application id (digits only) — got {APP_ID:?}"
         );
+        assert_eq!(available(), !APP_ID.is_empty());
+        assert!(is_app_id("1525891596804161727"));
+        assert!(!is_app_id(""));
+        assert!(!is_app_id("12a4"));
+        assert!(!is_app_id(" 123"));
     }
 
     fn track(id: &str) -> Box<Track> {

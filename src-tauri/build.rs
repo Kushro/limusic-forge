@@ -14,6 +14,10 @@ fn main() {
             }
         }
     }
+    // Discord application id for rich presence, read by `option_env!` in discord.rs. Cargo already
+    // tracks env vars that `option_env!` reads, but saying it here keeps the build script the one
+    // place that lists what a release build takes from its environment (docs/RELEASING-FORK.md).
+    println!("cargo:rerun-if-env-changed=LIMUSIC_DISCORD_APP_ID");
     // tauri-build watches tauri.conf.json but not the icons it embeds, so editing a PNG here
     // leaves `generate_context!` emitting the old `default_window_icon` (window, tray, taskbar).
     println!("cargo:rerun-if-changed=icons");
