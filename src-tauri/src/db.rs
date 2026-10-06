@@ -2284,6 +2284,21 @@ impl Db {
         gone
     }
 
+    /// Every playlist with at least one snapshot, sync record or not: a forgotten playlist's
+    /// history, or one kept from before a sign-out, still gets backed up.
+    pub fn snapshot_playlist_ids(&self) -> Vec<String> {
+        let conn = self.0.lock().unwrap();
+        let mut out = Vec::new();
+        if let Ok(mut stmt) =
+            conn.prepare("SELECT DISTINCT playlist_id FROM playlist_snapshot ORDER BY playlist_id")
+        {
+            if let Ok(rows) = stmt.query_map([], |r| r.get::<_, String>(0)) {
+                out.extend(rows.flatten());
+            }
+        }
+        out
+    }
+
     // --- monitor runs and per-playlist sync -----------------------------------------------------
 
     /// Log one monitor run (its `id` is ignored) and answer the new id.
@@ -4048,6 +4063,20 @@ mod tests {
             assert_eq!(d.snapshots(pl).len(), 1, "{pl}'s history was dropped");
         }
         assert_eq!(d.monitor_runs(10).len(), 1);
+    }
+
+    #[test]
+    fn snapshot_playlist_ids_list_each_playlist_once_synced_or_not() {
+        let d = db();
+        assert!(d.snapshot_playlist_ids().is_empty());
+        d.put_snapshot_if_changed("VL2", None, None, 1, &[snap("a")]).unwrap();
+        d.put_snapshot_if_changed("VL2", None, None, 2, &[snap("b")]).unwrap();
+        d.put_snapshot_if_changed("VL1", None, None, 1, &[snap("a")]).unwrap();
+        let sync = PlaylistSync { synced_at: 1, item_count: 1, added: 0, removed: 0, moved: 0 };
+        d.set_playlist_sync("VL1", &sync).unwrap();
+        d.set_playlist_sync("VL3", &sync).unwrap();
+        d.forget_playlist("VL1");
+        assert_eq!(d.snapshot_playlist_ids(), ["VL1", "VL2"], "no snapshot, no VL3");
     }
 
     #[test]

@@ -88,6 +88,9 @@ unicode-normalization = "0.1"
 # auto-launch under tauri-plugin-autostart).
 dirs = "6"
 auto-launch = "0.5"
+# Snapshot backups (backups.rs) in PlaylistForge's JSON format: RFC 3339 timestamps through serde.
+# Already in the lockfile with serde on (serde_with, under tauri).
+chrono = { version = "0.4.45", features = ["serde"] }
 
 # Taskbar thumbnail toolbar (#47). Same `windows` version tauri-runtime-wry already pulls in, so
 # `Window::hwnd()` hands us a matching HWND.

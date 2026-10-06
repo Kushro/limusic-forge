@@ -576,6 +576,7 @@
 			"advanced": "Advanced",
 			"network": "Network",
 			"storage": "Storage",
+			"backups": "Playlist backups",
 			"updates": "Updates",
 			"report": "Report a problem",
 			"whats_new": "What's new",
@@ -745,7 +746,20 @@
 		"data": {
 			"clear_cache": "Clear image and stream cache",
 			"clear_cache_hint": "Frees up disk space by clearing cached thumbnails and audio chunks.",
-			"clear_cache_button": "Clear cache now"
+			"clear_cache_button": "Clear cache now",
+			"backups_dir": "Backups folder",
+			"backups_dir_hint": "After every playlist sync, each changed playlist is saved here as a JSON file, in the same format PlaylistForge uses.",
+			"backups_dir_rejected": "That folder belongs to PlaylistForge or LiMusic; backups go to the default folder instead.",
+			"backups_dir_pick": "Change…",
+			"backups_dir_dialog": "Choose the backups folder",
+			"backups_keep": "Keep last",
+			"backups_keep_hint": "Snapshots kept per playlist, in the app and in the folder. Older ones are deleted after each sync. The app also keeps each playlist's previous snapshot to compare against, even with 1.",
+			"backups_export": "Back up now",
+			"backups_export_hint": "Save the latest snapshot of every playlist that has one now: synced ones, and any forgotten or from before a sign-out whose snapshots are still kept.",
+			"backups_exporting": "Backing up…",
+			"backups_exported": "{written} saved, {pruned} old backups removed.",
+			"backups_busy": "A playlist sync is running. Try again when it finishes.",
+			"backups_open": "Open folder"
 		},
 		"about": {
 			"description": "A beautiful, fast, and lightweight desktop music player powered by Tauri and Svelte.",

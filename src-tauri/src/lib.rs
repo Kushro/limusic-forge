@@ -2,6 +2,7 @@
 
 mod appicon;
 mod audioproxy;
+mod backups;
 mod blocked;
 mod brand;
 mod cipher;
@@ -1012,6 +1013,9 @@ pub fn run() {
             commands::sync_playlist,
             commands::last_sync_summary,
             commands::unseen_alert_count,
+            commands::backups_info,
+            commands::export_backups_now,
+            commands::open_backups_dir,
             commands::play_counts,
             commands::get_album,
             commands::get_blocked_artists,

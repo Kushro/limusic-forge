@@ -634,6 +634,89 @@
 			clearing = false;
 		}
 	}
+
+	// --- Data tab: playlist snapshot backups (backups.rs) ---
+	// The folder and the count are the `monitor.backups_dir` and `retention_keep_last` settings
+	// (PlaylistForge's keys); `backupsInfo` resolves them, an empty folder being the default.
+	let backups = $state<api.BackupsInfo | null>(null);
+	let keepInput = $state('');
+	let backupsBusy = $state(false);
+	// Toasts render behind this modal, so the section reports on itself.
+	let backupsNote = $state<{ message: string; error: boolean } | null>(null);
+	async function loadBackups() {
+		try {
+			backups = await api.backupsInfo();
+			keepInput = String(backups.keep);
+		} catch (e) {
+			backupsNote = { message: String(e), error: true };
+		}
+	}
+	$effect(() => {
+		if (ui.settingsOpen && tab === 'data')
+			untrack(() => {
+				backupsNote = null;
+				loadBackups();
+			});
+	});
+	async function pickBackupsDir() {
+		try {
+			const picked = await open({
+				directory: true,
+				title: t('settings.data.backups_dir_dialog'),
+				defaultPath: backups?.dir
+			});
+			if (typeof picked !== 'string') return;
+			await api.setSetting('monitor.backups_dir', picked);
+			await loadBackups();
+		} catch (e) {
+			backupsNote = { message: String(e), error: true };
+		}
+	}
+	async function resetBackupsDir() {
+		try {
+			await api.setSetting('monitor.backups_dir', '');
+			await loadBackups();
+		} catch (e) {
+			backupsNote = { message: String(e), error: true };
+		}
+	}
+	async function saveKeep() {
+		const n = Math.floor(Number(keepInput.trim()));
+		if (!Number.isFinite(n) || n < 1) {
+			keepInput = String(backups?.keep ?? 30);
+			return;
+		}
+		if (n === backups?.keep) return;
+		try {
+			await api.setSetting('retention_keep_last', String(n));
+			await loadBackups();
+		} catch (e) {
+			backupsNote = { message: String(e), error: true };
+		}
+	}
+	async function exportBackups() {
+		backupsNote = null;
+		backupsBusy = true;
+		try {
+			const r = await api.exportBackupsNow();
+			backupsNote = {
+				message: t('settings.data.backups_exported', { written: r.written, pruned: r.pruned_files }),
+				error: false
+			};
+		} catch (e) {
+			const busy = String(e) === 'busy';
+			backupsNote = { message: busy ? t('settings.data.backups_busy') : String(e), error: true };
+		} finally {
+			backupsBusy = false;
+		}
+	}
+	async function openBackups() {
+		try {
+			await api.openBackupsDir();
+		} catch (e) {
+			backupsNote = { message: String(e), error: true };
+		}
+	}
 </script>
 
 <!-- One row shape for the whole modal: label and description on the left, the control on the right,
@@ -686,7 +769,10 @@
 	>
 		<Dialog.Description class="sr-only">{t('settings.title')}</Dialog.Description>
 
-		<div class="flex h-[min(38rem,80vh)]">
+		<!-- min-w-0: this is a grid item of the dialog, whose min-width is auto, so the min-content
+		     width of an unbreakable row (a long backups or downloads path) would widen the dialog's
+		     column past the dialog and the overflow-hidden would clip every card. -->
+		<div class="flex h-[min(38rem,80vh)] min-w-0">
 			<!-- Tab rail -->
 			<nav class="flex w-52 shrink-0 flex-col border-r bg-muted/40 p-3">
 				<Dialog.Title class="px-3 pt-1 pb-4 font-heading text-base font-semibold">
@@ -1072,6 +1158,29 @@
 									title: t('settings.data.clear_cache'),
 									desc: t('settings.data.clear_cache_hint'),
 									control: clearButton
+								})}
+							</div>
+						</section>
+						<section class={GROUP}>
+							<h3 class={LABEL}>{t('settings.sections.backups')}</h3>
+							<div class={CARD}>
+								{@render row({
+									title: t('settings.data.backups_dir'),
+									desc: t('settings.data.backups_dir_hint'),
+									below: backupsDirRow
+								})}
+								{@render row({
+									title: t('settings.data.backups_keep'),
+									desc: t('settings.data.backups_keep_hint'),
+									control: backupsKeepInput,
+									tall: true
+								})}
+								{@render row({
+									title: t('settings.data.backups_export'),
+									desc: t('settings.data.backups_export_hint'),
+									control: backupsButtons,
+									below: backupsNote ? backupsNoteLine : undefined,
+									tall: true
 								})}
 							</div>
 						</section>
@@ -1725,6 +1834,62 @@
 	<Button variant="destructive" size="sm" onclick={doClearCaches} disabled={clearing}>
 		{clearing ? t('common.loading') : t('settings.data.clear_cache_button')}
 	</Button>
+{/snippet}
+
+{#snippet backupsDirRow()}
+	<div class="flex items-center gap-2">
+		<span
+			class="min-w-0 flex-1 truncate rounded-lg bg-muted/60 px-3 py-1.5 font-mono text-xs"
+			title={backups?.dir}
+		>
+			{backups?.dir ?? ''}
+		</span>
+		<Button variant="outline" size="sm" class="shrink-0" onclick={pickBackupsDir}>
+			{t('settings.data.backups_dir_pick')}
+		</Button>
+		{#if backups && (backups.dir !== backups.default_dir || backups.rejected)}
+			<Button variant="ghost" size="sm" class="shrink-0" onclick={resetBackupsDir}>
+				{t('common.reset')}
+			</Button>
+		{/if}
+	</div>
+	{#if backups?.rejected}
+		<p class="mt-1.5 text-xs text-destructive">{t('settings.data.backups_dir_rejected')}</p>
+	{/if}
+{/snippet}
+
+{#snippet backupsKeepInput()}
+	<form
+		onsubmit={(e) => {
+			e.preventDefault();
+			saveKeep();
+		}}
+	>
+		<Input
+			class="w-20 text-right"
+			inputmode="numeric"
+			aria-label={t('settings.data.backups_keep')}
+			bind:value={keepInput}
+			onblur={saveKeep}
+		/>
+	</form>
+{/snippet}
+
+{#snippet backupsButtons()}
+	<div class="flex items-center gap-2">
+		<Button variant="outline" size="sm" onclick={openBackups}>{t('settings.data.backups_open')}</Button>
+		<Button size="sm" onclick={exportBackups} disabled={backupsBusy}>
+			{backupsBusy ? t('settings.data.backups_exporting') : t('settings.data.backups_export')}
+		</Button>
+	</div>
+{/snippet}
+
+{#snippet backupsNoteLine()}
+	{#if backupsNote}
+		<p class="text-xs {backupsNote.error ? 'text-destructive' : 'text-muted-foreground'}">
+			{backupsNote.message}
+		</p>
+	{/if}
 {/snippet}
 
 {#snippet copyDiagButton()}

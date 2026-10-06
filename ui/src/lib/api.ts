@@ -705,6 +705,18 @@ export const onPlaylistIndexSynced = (cb: (s: SyncSummary) => void): Promise<Unl
 	listen<SyncSummary>('playlist-index-synced', (e) => cb(e.payload));
 export const onAlertsChanged = (cb: (unseen: number) => void): Promise<UnlistenFn> =>
 	listen<{ unseen: number }>('alerts-changed', (e) => cb(e.payload.unseen));
+/** Snapshot backups (backups.rs): the folder in use, the default one, and how many each playlist
+ *  keeps. The folder and the count are the `monitor.backups_dir` and `retention_keep_last`
+ *  settings; an empty folder setting means the default. `rejected`: the folder picked lies inside
+ *  PlaylistForge's or LiMusic's data, so `dir` is the default instead. */
+export type BackupsInfo = { dir: string; default_dir: string; keep: number; rejected: boolean };
+export const backupsInfo = () => invoke<BackupsInfo>('backups_info');
+export type BackupsOutcome = { written: number; pruned_files: number; pruned_rows: number };
+/** Back up every synced playlist's newest snapshot now, then prune. Rejects with `busy` while a
+ *  sync runs. */
+export const exportBackupsNow = () => invoke<BackupsOutcome>('export_backups_now');
+/** Open the backups folder in the file manager (created if missing). */
+export const openBackupsDir = () => invoke<void>('open_backups_dir');
 /**
  * videoId → times played, from the local listening history. Same trailing window On Repeat uses
  * (a month): the history table is pruned to it, so there is no older data. A videoId that isn't in

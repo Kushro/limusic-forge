@@ -226,7 +226,7 @@ pub async fn get_queue(state: St<'_>) -> Result<serde_json::Value, String> {
 /// `visitor_data`) and internal blobs (`queue_json`, `queue_index`, `queue_position`) never cross
 /// into the webview: they'd otherwise ship the login credential to the renderer on every open, and
 /// the webview can't overwrite them either.
-const UI_SETTINGS: [&str; 32] = [
+const UI_SETTINGS: [&str; 34] = [
     "volume",
     "proxy",
     "quality",
@@ -261,6 +261,9 @@ const UI_SETTINGS: [&str; 32] = [
     "onboarding_import_prompted",
     // Hours between playlist syncs: 0 (off), 1, 3, 6, 12 or 24 (monitor_interval_secs).
     "monitor_interval_hours",
+    // Snapshot backups (backups.rs): the folder, and how many each playlist keeps. PF's keys.
+    "monitor.backups_dir",
+    "retention_keep_last",
 ];
 
 /// Resolve the music video for `video_id` and hand back a `limusicvideo://` URL the player view
@@ -1360,6 +1363,69 @@ fn announce_sync(state: &AppState, summary: &SyncSummary) {
     let _ = state.app.emit("alerts-changed", json!({ "unseen": unseen }));
 }
 
+/// The end of a monitor run: back up the newest snapshot of each playlist it read unless that file
+/// is already there, then prune the database and the backups folder to `retention_keep_last`
+/// (backups.rs). Off the async workers; a failure costs the backup, never the run.
+async fn back_up_run(state: &Arc<AppState>, playlist_ids: Vec<String>) {
+    let st = state.clone();
+    let data = crate::paths::data_dir(&state.app);
+    let done = tauri::async_runtime::spawn_blocking(move || {
+        let dir = crate::backups::backups_dir(&st.db, &data);
+        let keep = crate::backups::keep_last(&st.db);
+        crate::backups::export_and_prune(&st.db, &dir, keep, &playlist_ids, true)
+    })
+    .await;
+    if let Err(e) = done {
+        tracing::warn!(error = %e, "snapshot backups did not run");
+    }
+}
+
+/// Where the backups go, where they go by default, how many each playlist keeps, and whether the
+/// folder picked was turned down for being another app's (`rejected`; the default is used then).
+#[tauri::command]
+pub fn backups_info(state: St<'_>) -> Value {
+    let data = crate::paths::data_dir(&state.app);
+    json!({
+        "dir": crate::backups::backups_dir(&state.db, &data).to_string_lossy(),
+        "default_dir": crate::backups::default_dir(&data).to_string_lossy(),
+        "keep": crate::backups::keep_last(&state.db),
+        "rejected": crate::backups::dir_rejected(&state.db),
+    })
+}
+
+/// Back up the newest snapshot of every playlist that has one now (synced or not: a forget or a
+/// sign-out keeps the snapshots), rewriting its file, then prune as a monitor run does. Answers
+/// `{ written, pruned_files, pruned_rows }`; `Err("busy")` while a sync runs, which would be
+/// writing the same snapshots.
+#[tauri::command]
+pub async fn export_backups_now(state: St<'_>) -> Result<crate::backups::Outcome, String> {
+    let Some(_running) = state.begin_monitor_run() else {
+        return Err("busy".into());
+    };
+    let st = state.inner().clone();
+    let data = crate::paths::data_dir(&state.app);
+    tauri::async_runtime::spawn_blocking(move || {
+        let dir = crate::backups::backups_dir(&st.db, &data);
+        let keep = crate::backups::keep_last(&st.db);
+        // Synced playlists, and any other with snapshots kept (forgotten, or from before a
+        // sign-out): their history outlives the sync record, so its backups do too.
+        let mut ids: Vec<String> = st.db.playlist_syncs().into_keys().collect();
+        ids.extend(st.db.snapshot_playlist_ids());
+        ids.sort();
+        ids.dedup();
+        crate::backups::export_and_prune(&st.db, &dir, keep, &ids, false)
+    })
+    .await
+    .map_err(|e| e.to_string())
+}
+
+/// Open the backups folder in the file manager, creating it if it is not there yet.
+#[tauri::command]
+pub fn open_backups_dir(state: St<'_>) -> Result<(), String> {
+    let data = crate::paths::data_dir(&state.app);
+    crate::backups::open_dir(&crate::backups::backups_dir(&state.db, &data))
+}
+
 /// The whole crawl: every playlist you own, then the index pruned to them, the stamp, the summary
 /// (`playlist_index_last_summary`) and a `monitor_runs` row. `Err("busy")` while another run
 /// holds the monitor, `Err("empty_library")` when YouTube answered with no playlists at all.
@@ -1414,6 +1480,7 @@ pub(crate) async fn sync_all(state: &Arc<AppState>, trigger: &str) -> Result<Syn
         json!({ "done": total, "total": total, "current": Value::Null }),
     );
     state.db.retain_playlists(&indexed);
+    back_up_run(state, indexed).await;
     state.db.set_setting(PLAYLIST_INDEX_STAMP, &now_secs().to_string());
     note_sync_attempt(&state.db, started, summary.outcome() != "failed");
     monitor::save_summary(&state.db, &summary);
@@ -1525,6 +1592,7 @@ pub async fn sync_playlist(state: St<'_>, playlist_id: String) -> Result<SyncSum
     let _ = state
         .app
         .emit("playlist-sync-progress", json!({ "done": 1, "total": 1, "current": Value::Null }));
+    back_up_run(&state, vec![playlist_id.clone()]).await;
     let detail = json!({ "scope": playlist_id });
     record_run(&state, &summary, started, summary.outcome(), detail);
     announce_sync(&state, &summary);
