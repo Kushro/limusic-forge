@@ -226,7 +226,7 @@ pub async fn get_queue(state: St<'_>) -> Result<serde_json::Value, String> {
 /// `visitor_data`) and internal blobs (`queue_json`, `queue_index`, `queue_position`) never cross
 /// into the webview: they'd otherwise ship the login credential to the renderer on every open, and
 /// the webview can't overwrite them either.
-const UI_SETTINGS: [&str; 36] = [
+const UI_SETTINGS: [&str; 37] = [
     "volume",
     "proxy",
     "quality",
@@ -268,6 +268,9 @@ const UI_SETTINGS: [&str; 36] = [
     // (plsort.ts).
     "library_playlists_sort",
     "library_playlists_view",
+    // Tools ▸ Extract into a new playlist: `build` (one undoable build, the default) or
+    // `create_transfer` (make the playlist, then copy or move into it).
+    "tools.extract_new_mode",
 ];
 
 /// Resolve the music video for `video_id` and hand back a `limusicvideo://` URL the player view
@@ -2079,6 +2082,14 @@ pub async fn transfer_tracks(
     transfer::run(&state, req).await
 }
 
+/// Every row of a playlist, in its order, each with its handle (`set_video_id`) when it is yours to
+/// edit: an account playlist is read page by page. What Tools ▸ Extract filters and Tools ▸ Reorder
+/// rearranges, which both need the whole list and the rows' handles.
+#[tauri::command]
+pub async fn playlist_rows(state: St<'_>, playlist_id: String) -> Result<Vec<SongItem>, String> {
+    rows::read_all(&state, &playlist_id).await
+}
+
 /// A split, worked out but not written: the whole playlist and which rows go into which part.
 #[derive(serde::Serialize)]
 pub struct SplitPlan {
@@ -2121,8 +2132,10 @@ pub async fn merge_preview(
     Ok(merge::merge(&lists, how, dedupe, &skip))
 }
 
-/// Write a split or a merge (`playlist_tools::build`): new playlists, or one existing playlist
-/// appended to. Progress arrives as `playlist-op-progress`; `cancel_playlist_build` stops it.
+/// Write a split, a merge or an extract (`playlist_tools::build`): new playlists, or one existing
+/// playlist appended to. `mode` only means something to an extract from one playlist: a move takes
+/// the rows out of it once they are in (copy when left out). Progress arrives as
+/// `playlist-op-progress`; `cancel_playlist_build` stops it.
 #[tauri::command]
 pub async fn build_playlists(
     state: St<'_>,
@@ -2130,9 +2143,10 @@ pub async fn build_playlists(
     sources: Vec<Named>,
     lists: Vec<build::NewList>,
     dest: build::Dest,
+    mode: Option<transfer::Mode>,
 ) -> Result<build::Built, String> {
-    let kind = if kind == "merge" { "merge" } else { "split" };
-    build::run(&state, kind, sources, lists, dest).await
+    let kind = build::journal_kind(&kind);
+    build::run(&state, kind, sources, lists, dest, mode.unwrap_or(transfer::Mode::Copy)).await
 }
 
 #[tauri::command]

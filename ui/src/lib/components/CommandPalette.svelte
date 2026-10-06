@@ -28,7 +28,8 @@
 		DatabaseImportIcon,
 		Sun01Icon,
 		Radar01Icon,
-		RefreshIcon
+		RefreshIcon,
+		Wrench01Icon
 	} from '@hugeicons/core-free-icons';
 	import * as Command from '$lib/components/ui/command/index.js';
 	import { Skeleton } from '$lib/components/ui/skeleton';
@@ -170,6 +171,13 @@
 			keywords: ['sync', 'check', 'runs', 'stats', 'backups', 'interval'],
 			run: go('/monitor')
 		},
+		{
+			id: 'goto:tools',
+			group: 'goto',
+			label: t('nav.tools'),
+			keywords: ['extract', 'split', 'merge', 'duplicates', 'dedupe', 'reorder', 'filter'],
+			run: go('/tools')
+		},
 		...LIBRARY_TABS.map(
 			([tab, key]): PaletteCommand => ({
 				id: `goto:library:${tab}`,
@@ -235,6 +243,7 @@
 		'goto:search': Search01Icon,
 		'goto:alerts': Notification03Icon,
 		'goto:monitor': Radar01Icon,
+		'goto:tools': Wrench01Icon,
 		'action:check-playlists': RefreshIcon,
 		'action:settings': Settings01Icon,
 		'action:import': DatabaseImportIcon,

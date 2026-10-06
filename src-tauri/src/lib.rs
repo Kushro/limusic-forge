@@ -1047,6 +1047,7 @@ pub fn run() {
             commands::remove_tracks,
             commands::transfer_tracks,
             commands::find_duplicates,
+            commands::playlist_rows,
             commands::plan_split,
             commands::merge_preview,
             commands::build_playlists,

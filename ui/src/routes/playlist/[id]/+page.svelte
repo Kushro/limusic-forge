@@ -34,7 +34,6 @@
 	} from '@hugeicons/core-free-icons';
 	import { Badge } from '$lib/components/ui/badge';
 	import { Button } from '$lib/components/ui/button';
-	import * as RadioGroup from '$lib/components/ui/radio-group';
 	import * as AlertDialog from '$lib/components/ui/alert-dialog';
 	import { Skeleton } from '$lib/components/ui/skeleton';
 	import TrackRow from '$lib/components/TrackRow.svelte';
@@ -58,6 +57,7 @@
 	import { dragScroll, isDragRows, setDragRows, TRACK_ROWS_MIME, type TrackRowsDrag } from '$lib/dnd';
 	import MoveToPlaylist from '$lib/components/MoveToPlaylist.svelte';
 	import PlaylistToolsDialog from '$lib/components/PlaylistToolsDialog.svelte';
+	import PlaylistSortPanel from '$lib/components/PlaylistSortPanel.svelte';
 	import ExportPlaylist from '$lib/components/ExportPlaylist.svelte';
 	import FilterChips from '$lib/components/FilterChips.svelte';
 	import { applyFacets, facetsActive, NO_FACETS, regexFilter, type Facets } from '$lib/facets';
@@ -66,7 +66,6 @@
 	import { t } from '$lib/i18n.svelte';
 	import { imp, updateFromSpotify } from '$lib/import.svelte';
 	import {
-		SORTS,
 		fetchSort,
 		persistedSort,
 		sortSongs,
@@ -1601,31 +1600,13 @@
 		style={sortAnchor.style}
 		{@attach fitMenu(sortAnchor)}
 	>
-		<RadioGroup.Root
+		<PlaylistSortPanel
 			value={sort}
-			onValueChange={(v) => chooseSort(v as SortKey)}
-			class="gap-0"
-		>
-			{#each SORTS as key (key)}
-				<label
-					class="flex w-full cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm hover:bg-accent/10"
-				>
-					<RadioGroup.Item value={key} />
-					{t(`sort.${key}`)}
-				</label>
-			{/each}
-		</RadioGroup.Root>
-		{#if reorderable && (sort !== 'default' || desc)}
-			<div class="my-1 h-px bg-border"></div>
-			<button
-				class="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm hover:bg-accent/10 disabled:opacity-50"
-				onclick={keepSortAsOrder}
-				disabled={savingOrder}
-			>
-				<HugeiconsIcon icon={Tick02Icon} class="h-4 w-4" />
-				{t('reorder.keep_sort')}
-			</button>
-		{/if}
+			onchoose={chooseSort}
+			canKeep={reorderable && (sort !== 'default' || desc)}
+			onkeep={keepSortAsOrder}
+			saving={savingOrder}
+		/>
 	</div>
 {/if}
 

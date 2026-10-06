@@ -18,8 +18,9 @@ export async function undoOp(id: number): Promise<boolean> {
 	try {
 		const op = await api.undoPlaylistOp(id);
 		toast.success(t('undo.done'));
-		// Undoing a split or a merge deletes the playlists it made: the library has to drop them.
-		if (op.kind === 'split' || op.kind === 'merge') {
+		// Undoing a split, a merge or an extract deletes the playlists it made: the library has to
+		// drop them.
+		if (op.kind === 'split' || op.kind === 'merge' || op.kind === 'extract') {
 			loadLibrary(true);
 			refreshLocalPlaylists();
 		}

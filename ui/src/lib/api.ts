@@ -854,7 +854,7 @@ export type RowRef = { song: SongItem; before: string | null };
 /** One journal entry: an edit the playlist tools made, and whether it can still be undone. */
 export type PlaylistOp = {
 	id: number;
-	kind: 'reorder' | 'remove' | 'copy' | 'move' | 'dedupe' | 'split' | 'merge' | 'add';
+	kind: 'reorder' | 'remove' | 'copy' | 'move' | 'dedupe' | 'split' | 'merge' | 'extract' | 'add';
 	summary: { playlists: { id: string; title: string }[]; count: number };
 	createdAt: number;
 	undone: boolean;
@@ -930,6 +930,10 @@ export const transferTracks = async (args: {
 	});
 	return { ...r, op: r.op && op(r.op) };
 };
+/** Every row of a playlist in its order, read in full (every page of an account playlist). Rows of
+ *  a playlist you can edit carry their handle (`set_video_id`); what Extract and Reorder work on. */
+export const playlistRows = (playlistId: string) =>
+	invoke<SongItem[]>('playlist_rows', { playlistId });
 export type SplitBy = { by: 'artist'; min: number } | { by: 'count'; parts: number } | { by: 'size'; max: number };
 export type SplitOrder =
 	| { order: 'playlist' | 'title' | 'artist' | 'duration' }
@@ -951,18 +955,26 @@ export type BuildDest = { to: 'new'; local: boolean } | { to: 'existing'; id: st
 export type Built = {
 	created: { id: string; title: string }[];
 	added: number;
+	/** Rows a move took out of its source (an extract only). */
+	removed: number;
 	stopped: boolean;
 	error: string | null;
 	op: PlaylistOp | null;
 };
-/** Write a split or a merge. Progress comes through `onPlaylistOpProgress`. */
+/** Write a split, a merge or an extract. Progress comes through `onPlaylistOpProgress`. `mode`
+ *  only matters to an extract from one playlist: `move` takes the rows out of it once they are in,
+ *  undoably (copy when left out). */
 export const buildPlaylists = async (args: {
-	kind: 'split' | 'merge';
+	kind: 'split' | 'merge' | 'extract';
 	sources: { id: string; title: string }[];
 	lists: { name: string; songs: SongItem[] }[];
 	dest: BuildDest;
+	mode?: 'copy' | 'move';
 }) => {
-	const r = await invoke<Omit<Built, 'op'> & { op: RawPlaylistOp | null }>('build_playlists', args);
+	const r = await invoke<Omit<Built, 'op'> & { op: RawPlaylistOp | null }>('build_playlists', {
+		...args,
+		mode: args.mode ?? null
+	});
 	return { ...r, op: r.op && op(r.op) };
 };
 export const cancelPlaylistBuild = () => invoke<void>('cancel_playlist_build');
