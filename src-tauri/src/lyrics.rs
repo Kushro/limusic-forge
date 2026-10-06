@@ -1697,7 +1697,7 @@ mod tests {
 
     /// Are the external providers still alive? Hits them all for real, so it is NOT in the default
     /// run (context/17: network tests are opt-in, or `cargo test` fails offline):
-    ///   cargo test -p limusic-app --lib -- --ignored --nocapture
+    ///   cargo test -p limusic-forge --lib -- --ignored --nocapture
     ///
     /// This exists because a provider that is *broken* and a provider that simply *has no lyrics
     /// for this track* both return `Ok(None)`, and nothing else in the chain can tell them apart:

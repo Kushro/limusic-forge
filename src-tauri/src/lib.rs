@@ -1,8 +1,9 @@
-//! Limusic Tauri app. Wires transport + player + db + orchestrator behind the command boundary.
+//! LiMusic Forge Tauri app. Wires transport + player + db + orchestrator behind the command boundary.
 
 mod appicon;
 mod audioproxy;
 mod blocked;
+mod brand;
 mod cipher;
 mod commands;
 mod db;
@@ -259,7 +260,7 @@ fn fatal(what: &str, detail: &str) -> ! {
 static AUTOSTARTED: AtomicBool = AtomicBool::new(false);
 const RESTARTED_ENV: &str = "LIMUSIC_RESTARTED";
 
-/// What a cold launch was given, so `limusic-app 'https://music.youtube.com/watch?v=…'` opens the
+/// What a cold launch was given, so `limusic-forge 'https://music.youtube.com/watch?v=…'` opens the
 /// link once the SPA has mounted (#348). Taken once by `take_launch_args`. A launch while we are
 /// already running reaches the single-instance callback instead, which emits `open-link`. Raw
 /// strings either way: `parseYtLink` in the UI decides what is a link, so there is one parser.
@@ -355,11 +356,11 @@ pub fn run() {
     // (Windows) pointing somewhere else, or the second copy opens the first one's SQLite file and
     // the two fight over it, which is what the guard exists to prevent:
     //
-    //     LIMUSIC_MULTI=1 XDG_DATA_HOME=/tmp/limusic-b ./target/debug/limusic-app
+    //     LIMUSIC_MULTI=1 XDG_DATA_HOME=/tmp/limusic-b ./target/debug/limusic-forge
     if std::env::var_os("LIMUSIC_MULTI").is_none() {
         builder = builder.plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
             tray::show_main(app);
-            // `limusic-app <link>` against this instance (#348). argv[0] leads on every platform.
+            // `limusic-forge <link>` against this instance (#348). argv[0] leads on every platform.
             if args.len() > 1 {
                 let _ = app.emit_to("main", "open-link", &args[1..]);
             }
@@ -1180,6 +1181,23 @@ mod tests {
             mac["app"]["windows"][0].clone(),
         )
         .expect("macOS window config is not a valid WindowConfig");
+    }
+
+    /// The fork must never ship under upstream's identifier: that would share (and could clobber)
+    /// upstream LiMusic's data dirs, single-instance lock and updater channel. Also pins the names
+    /// `brand.rs` mirrors, and keeps the bundle version in step with Cargo's.
+    #[test]
+    fn brand_identity_is_forge() {
+        let conf: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+        assert_eq!(conf["identifier"], "com.limusicforge.desktop");
+        assert_eq!(conf["mainBinaryName"], crate::brand::APP_SLUG);
+        assert_eq!(conf["mainBinaryName"], "limusic-forge");
+        assert_eq!(conf["productName"], crate::brand::APP_NAME);
+        assert_eq!(conf["productName"], "LiMusic Forge");
+        assert_eq!(conf["app"]["windows"][0]["title"], crate::brand::APP_NAME);
+        assert_eq!(conf["version"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(env!("CARGO_PKG_NAME"), "limusic-forge");
     }
 
     #[test]

@@ -775,7 +775,7 @@ mod tests {
         include_str!("../tests/fixtures/spotify/pathfinder_playlist_page.json");
 
     /// Live, against Spotify only (no YouTube): a 150-track editorial playlist comes back whole,
-    /// with albums, which only pathfinder knows. `cargo test -p limusic-app --lib -- --ignored`.
+    /// with albums, which only pathfinder knows. `cargo test -p limusic-forge --lib -- --ignored`.
     #[tokio::test]
     #[ignore]
     async fn reads_past_the_embed_limit() {

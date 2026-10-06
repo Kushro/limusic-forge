@@ -1,9 +1,11 @@
 [package]
-name = "limusic-app"
+name = "limusic-forge"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Limusic — desktop YouTube Music client"
+description = "LiMusic Forge — desktop YouTube Music client, a fork of LiMusic"
+repository = "https://github.com/Kushro/limusic-forge"
+homepage = "https://github.com/Kushro/limusic-forge"
 rust-version = "1.80"
 
 [lib]

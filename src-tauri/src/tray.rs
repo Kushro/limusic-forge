@@ -130,11 +130,11 @@ mod imp {
 
     impl Tray for LimusicTray {
         fn id(&self) -> String {
-            "limusic".into()
+            crate::brand::APP_SLUG.into()
         }
 
         fn title(&self) -> String {
-            "Limusic".into()
+            crate::brand::APP_NAME.into()
         }
 
         fn icon_pixmap(&self) -> Vec<Icon> {
@@ -169,8 +169,9 @@ mod imp {
                     ..Default::default()
                 })
             };
+            let show = format!("Show {}", crate::brand::APP_NAME);
             vec![
-                item("Show Limusic", "show"),
+                item(&show, "show"),
                 MenuItem::Separator,
                 item(if self.playing { "Pause" } else { "Play" }, "play_pause"),
                 item("Next", "next"),
@@ -244,7 +245,8 @@ mod imp {
     }
 
     pub fn init(app: &AppHandle) -> tauri::Result<()> {
-        let show = MenuItem::with_id(app, "show", "Show Limusic", true, None::<&str>)?;
+        let show_label = format!("Show {}", crate::brand::APP_NAME);
+        let show = MenuItem::with_id(app, "show", show_label, true, None::<&str>)?;
         let play_pause = MenuItem::with_id(app, "play_pause", "Play", true, None::<&str>)?;
         let next = MenuItem::with_id(app, "next", "Next", true, None::<&str>)?;
         let prev = MenuItem::with_id(app, "prev", "Previous", true, None::<&str>)?;
@@ -269,7 +271,7 @@ mod imp {
         let mut builder = TrayIconBuilder::with_id("main")
             .menu(&menu)
             .show_menu_on_left_click(false)
-            .tooltip("Limusic")
+            .tooltip(crate::brand::APP_NAME)
             .on_menu_event(|app, event| handle_menu(app, event.id.as_ref()))
             .on_tray_icon_event(|tray, event| {
                 if let TrayIconEvent::DoubleClick { button: MouseButton::Left, .. } = event {

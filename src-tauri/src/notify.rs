@@ -2,7 +2,7 @@
 //! setting. Off by default: Linux desktops already show the MPRIS widget, and a notification per
 //! song is a preference, not something everyone wants.
 //!
-//! Only while no Limusic window has focus: a song change the user is looking at needs no toast.
+//! Only while no LiMusic Forge window has focus: a song change the user is looking at needs no toast.
 //! Best-effort like `media.rs`: a missing notification daemon is a `debug!` line.
 
 #[cfg(all(unix, not(target_os = "macos")))]
@@ -20,7 +20,7 @@ pub fn track_changed(app: &AppHandle, title: &str, artists: &str) {
         return;
     }
     let mut n = notify_rust::Notification::new();
-    n.summary(title).body(artists).appname("Limusic");
+    n.summary(title).body(artists).appname(crate::brand::APP_NAME);
     #[cfg(all(unix, not(target_os = "macos")))]
     {
         // The binary name is the icon name the .deb/.rpm install. An AppImage has no themed icon,

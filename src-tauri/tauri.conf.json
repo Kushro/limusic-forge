@@ -1,8 +1,9 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "limusic",
-  "version": "1.2.0-rc.2",
-  "identifier": "com.limusic.desktop",
+  "productName": "LiMusic Forge",
+  "mainBinaryName": "limusic-forge",
+  "version": "1.2.0-forge.1",
+  "identifier": "com.limusicforge.desktop",
   "build": {
     "frontendDist": "../ui/build",
     "devUrl": "http://localhost:5183",
@@ -12,7 +13,7 @@
   "app": {
     "windows": [
       {
-        "title": "Limusic",
+        "title": "LiMusic Forge",
         "width": 1200,
         "height": 800,
         "minWidth": 900,
@@ -37,6 +38,8 @@
   "bundle": {
     "active": true,
     "category": "Music",
+    "publisher": "Kushro",
+    "copyright": "© SimoHypers and contributors; LiMusic Forge © Kushro — GPL-3.0",
     "targets": ["deb", "rpm", "appimage"],
     "createUpdaterArtifacts": true,
     "icon": [
