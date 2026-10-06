@@ -27,6 +27,7 @@
 			rows: [
 				[t('dialogs.shortcuts.refresh_page'), 'F5'],
 				[t('dialogs.shortcuts.search_anywhere'), `${MOD}K`],
+				[t('dialogs.shortcuts.open_settings'), `${MOD}P`],
 				[t('dialogs.shortcuts.toggle_now_playing'), `${MOD}E`],
 				[t('dialogs.shortcuts.zoom_in'), `${MOD}+`],
 				[t('dialogs.shortcuts.zoom_out'), `${MOD}-`],

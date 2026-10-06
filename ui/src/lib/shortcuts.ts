@@ -36,7 +36,7 @@ const typing = (t: EventTarget | null) =>
 	(t.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(t.tagName));
 
 /** `mini` = the mini-player window: same transport keys, minus the ones that toggle a piece of
- *  chrome that window doesn't render (palette, shortcut list, now-playing view). */
+ *  chrome that window doesn't render (palette, shortcut list, now-playing view, settings). */
 export function initShortcuts(mini = false) {
 	const onKey = (e: KeyboardEvent) => {
 		// Focused controls (including track selection) have already handled this key.
@@ -61,6 +61,11 @@ export function initShortcuts(mini = false) {
 		// Ctrl+Alt belongs to the global hotkeys (Ctrl+Alt+M would otherwise mute here too and the
 		// two toggles cancel out), and on Windows it is also how AltGr arrives, typing a character.
 		if (e.altKey) return;
+		// The mini widget has no settings to open, but Ctrl+P must still not raise the print dialog.
+		if (mini && (e.key === 'p' || e.key === 'P')) {
+			e.preventDefault();
+			return;
+		}
 		if (mini && ('kKeE'.includes(e.key) || isHelpKey(e.key))) return;
 		// Out of the switch because the key is per-platform: on macOS ⌘H has to fall through
 		// untouched, so the window still hides.
@@ -81,6 +86,15 @@ export function initShortcuts(mini = false) {
 			case 'k':
 			case 'K':
 				ui.paletteOpen = !ui.paletteOpen;
+				break;
+			// Settings. Opens rather than toggles (the dialog closes on Escape like any other), and the
+			// preventDefault below is what keeps WebView2/WebKit from raising the print dialog. Works
+			// from a text field like the other Ctrl keys: Ctrl+P types nothing there.
+			case 'p':
+			case 'P':
+				ui.paletteOpen = false;
+				ui.shortcutsOpen = false;
+				ui.settingsOpen = true;
 				break;
 			case 'e':
 			case 'E':

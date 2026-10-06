@@ -313,6 +313,11 @@
 		"forget": "Remove “{query}” from recent searches",
 		"filters": "Result types"
 	},
+	"palette": {
+		"go_to": "Go to",
+		"actions": "Actions",
+		"library_tab": "Library: {tab}"
+	},
 	"errors": {
 		"unreachable": "Can't reach YouTube Music. Check your connection.",
 		"offline_title": "No connection",
@@ -890,6 +895,7 @@
 			"toggle_repeat": "Toggle repeat",
 			"mute_unmute": "Mute or unmute",
 			"search_anywhere": "Search from anywhere",
+			"open_settings": "Open settings",
 			"refresh_page": "Refresh page",
 			"toggle_now_playing": "Show or hide the now-playing view",
 			"volume_up": "Volume up",
