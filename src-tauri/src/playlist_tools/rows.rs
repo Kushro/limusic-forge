@@ -11,7 +11,7 @@ use std::sync::Arc;
 use innertube::SongItem;
 
 use super::lis::{self, Move};
-use crate::commands::{db_err, editable_playlist, local_key, playlist_row};
+use crate::commands::{db_err, editable_playlist, local_key, metadata_client, playlist_row};
 use crate::db::now_secs;
 use crate::import::{before_playlist_write, playlist_write_error, youtube_cooldown};
 use crate::local::SONG_PREFIX;
@@ -31,9 +31,9 @@ pub fn handle(row: &SongItem) -> Option<&str> {
     row.set_video_id.as_deref()
 }
 
-/// Every row of the playlist, in its order. An account playlist is read page by page; rows
-/// without a handle (YouTube leaves it off rows you may not remove) are dropped, since no edit
-/// could address them anyway.
+/// Every row of the playlist, in its order. An account playlist is read page by page. Any playlist
+/// can be read (a split or a merge may start from Liked Music or someone else's list); rows of one
+/// you can't edit carry no handle, and every edit below skips a row without one.
 pub async fn read_all(state: &Arc<AppState>, playlist_id: &str) -> Result<Vec<SongItem>, String> {
     if is_local_playlist(playlist_id) {
         let key = local_key(playlist_id)?;
@@ -47,7 +47,7 @@ pub async fn read_all(state: &Arc<AppState>, playlist_id: &str) -> Result<Vec<So
             })
             .collect());
     }
-    let client = editable_playlist(state, playlist_id)?;
+    let client = metadata_client(state)?;
     let page = state.it.playlist(client, playlist_id, None).await.map_err(|e| e.to_string())?;
     let mut out = page.items;
     let mut token = page.continuation;
@@ -58,7 +58,6 @@ pub async fn read_all(state: &Arc<AppState>, playlist_id: &str) -> Result<Vec<So
         out.extend(more.items);
         token = more.continuation;
     }
-    out.retain(|r| handle(r).is_some());
     Ok(out)
 }
 

@@ -3,7 +3,7 @@
 // lists the last 20 with an Undo on each.
 import * as api from './api';
 import type { PlaylistOp } from './api';
-import { toast } from './player.svelte';
+import { loadLibrary, refreshLocalPlaylists, toast } from './player.svelte';
 import { t } from './i18n.svelte';
 
 /** Say what an edit did, with an Undo button while it can still be undone. */
@@ -16,8 +16,13 @@ export function announceOp(op: PlaylistOp | null, msg: string) {
  *  what makes an open page re-read them. Answers whether it went through. */
 export async function undoOp(id: number): Promise<boolean> {
 	try {
-		await api.undoPlaylistOp(id);
+		const op = await api.undoPlaylistOp(id);
 		toast.success(t('undo.done'));
+		// Undoing a split or a merge deletes the playlists it made: the library has to drop them.
+		if (op.kind === 'split' || op.kind === 'merge') {
+			loadLibrary(true);
+			refreshLocalPlaylists();
+		}
 		return true;
 	} catch (e) {
 		toast.error(t('undo.failed', { error: String(e) }));

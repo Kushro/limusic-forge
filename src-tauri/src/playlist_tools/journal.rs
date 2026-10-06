@@ -70,14 +70,18 @@ fn active_account(state: &AppState) -> Option<String> {
     state.db.get_setting("active_account")
 }
 
-/// Whether every playlist the steps touch lives on this machine (then any account may undo it).
-fn local_only(steps: &[Step]) -> bool {
-    steps.iter().all(|s| match s {
+fn step_is_local(s: &Step) -> bool {
+    match s {
         Step::Restore { playlist_id, .. }
         | Step::Remove { playlist_id, .. }
         | Step::Reorder { playlist_id, .. }
         | Step::DeletePlaylist { playlist_id } => is_local_playlist(playlist_id),
-    })
+    }
+}
+
+/// Whether every playlist the steps touch lives on this machine (then any account may undo it).
+fn local_only(steps: &[Step]) -> bool {
+    steps.iter().all(step_is_local)
 }
 
 fn to_record(state: &AppState, row: PlaylistOpRow) -> OpRecord {
@@ -133,7 +137,12 @@ pub async fn undo(state: &Arc<AppState>, id: i64) -> Result<OpRecord, String> {
         return Err("Switch to the account that made that change to undo it.".into());
     }
     let steps: Vec<Step> = serde_json::from_str(&row.inverse_json).map_err(|e| e.to_string())?;
-    for step in &steps {
+    for (i, step) in steps.iter().enumerate() {
+        // An undo of a split is a delete per playlist it made: on the account those wait their
+        // turn like any other run of writes. The first goes straight out.
+        if i > 0 && !step_is_local(step) {
+            crate::import::before_playlist_write(state, &|| false).await?;
+        }
         run(state, step).await?;
     }
     announce(state, &record.summary.playlists.iter().map(|p| p.id.clone()).collect::<Vec<_>>());

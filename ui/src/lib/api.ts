@@ -774,6 +774,45 @@ export const transferTracks = async (args: {
 	});
 	return { ...r, op: r.op && op(r.op) };
 };
+export type SplitBy = { by: 'artist'; min: number } | { by: 'count'; parts: number } | { by: 'size'; max: number };
+export type SplitOrder =
+	| { order: 'playlist' | 'title' | 'artist' | 'duration' }
+	| { order: 'shuffle'; seed: number };
+/** A split worked out but not written: the whole playlist and the rows (indices) of each part.
+ *  `artist` names a per-artist part; null is the pooled one, or a numbered part. */
+export type SplitPlan = { rows: SongItem[]; parts: { artist: string | null; rows: number[] }[] };
+export const planSplit = (playlistId: string, by: SplitBy, order: SplitOrder) =>
+	invoke<SplitPlan>('plan_split', { playlistId, by, order });
+/** Several playlists merged into one list, not written. `into` is an existing target whose tracks
+ *  a dedupe leaves out. */
+export const mergePreview = (
+	ids: string[],
+	how: 'concat' | 'round_robin',
+	dedupe: boolean,
+	into: string | null
+) => invoke<SongItem[]>('merge_preview', { ids, how, dedupe, into });
+export type BuildDest = { to: 'new'; local: boolean } | { to: 'existing'; id: string; title: string };
+export type Built = {
+	created: { id: string; title: string }[];
+	added: number;
+	stopped: boolean;
+	error: string | null;
+	op: PlaylistOp | null;
+};
+/** Write a split or a merge. Progress comes through `onPlaylistOpProgress`. */
+export const buildPlaylists = async (args: {
+	kind: 'split' | 'merge';
+	sources: { id: string; title: string }[];
+	lists: { name: string; songs: SongItem[] }[];
+	dest: BuildDest;
+}) => {
+	const r = await invoke<Omit<Built, 'op'> & { op: RawPlaylistOp | null }>('build_playlists', args);
+	return { ...r, op: r.op && op(r.op) };
+};
+export const cancelPlaylistBuild = () => invoke<void>('cancel_playlist_build');
+export type BuildProgress = { done: number; total: number; current: string };
+export const onPlaylistOpProgress = (cb: (p: BuildProgress) => void): Promise<UnlistenFn> =>
+	listen<BuildProgress>('playlist-op-progress', (e) => cb(e.payload));
 export const playlistHistory = async () =>
 	(await invoke<RawPlaylistOp[]>('playlist_history')).map(op);
 export const undoPlaylistOp = async (id: number) =>

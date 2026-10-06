@@ -33,6 +33,7 @@
 	import { rowDrag } from '$lib/rowdrag.svelte';
 	import { canDropOn, dropModeFor, transfer } from '$lib/transfer.svelte';
 	import DropConfirm from './DropConfirm.svelte';
+	import { building, stopBuild } from '$lib/build.svelte';
 
 	const nav = $derived([
 		{ href: '/', label: t('nav.home'), icon: Home01Icon },
@@ -241,6 +242,25 @@
 					></span>
 				</span>
 			{/if}
+		</button>
+	{/if}
+
+	{#if building.running}
+		<!-- A split or a merge still writing (the tools dialog may be closed). Click stops it. -->
+		<button
+			onclick={stopBuild}
+			title={t('build.stop')}
+			class="mt-2 flex flex-col gap-1.5 rounded-lg bg-primary/10 px-3 py-2 text-left text-xs font-medium text-primary transition-colors hover:bg-primary/15"
+		>
+			<span class="hidden truncate {wide('lg:inline')}">
+				{t('build.pill', { done: building.done, total: building.total })}
+			</span>
+			<span class="block h-1 w-full overflow-hidden rounded-full bg-primary/15">
+				<span
+					class="block h-full rounded-full bg-primary transition-[width] duration-300"
+					style="width: {building.total ? Math.round((building.done / building.total) * 100) : 0}%"
+				></span>
+			</span>
 		</button>
 	{/if}
 

@@ -11,7 +11,7 @@ use tauri::{Emitter, Manager, State};
 
 use crate::blocked::BlockedArtist;
 use crate::playlist_tools::journal::{self, Named, OpRecord, Restore, Summary};
-use crate::playlist_tools::{dedup, rows, transfer};
+use crate::playlist_tools::{build, dedup, merge, rows, split, transfer};
 use crate::state::{
     is_local_playlist, AppState, LOCAL_PLAYLIST_PREFIX, ON_REPEAT_ID, ON_REPEAT_LIMIT,
     ON_REPEAT_WINDOW_SECS,
@@ -756,7 +756,7 @@ pub async fn show_main(state: St<'_>, window: tauri::WebviewWindow) -> Result<bo
 
 // --- browse / library (context/08) ---------------------------------------------------------
 
-fn metadata_client(state: &Arc<AppState>) -> Result<&innertube::YouTubeClient, String> {
+pub(crate) fn metadata_client(state: &Arc<AppState>) -> Result<&innertube::YouTubeClient, String> {
     state.clients.get(innertube::METADATA_CLIENT).ok_or_else(|| "metadata client missing".into())
 }
 
@@ -1089,7 +1089,7 @@ pub async fn start_radio(
 
 // --- write actions (context/01 ✎, context/15) ----------------------------------------------
 
-fn require_login(state: &Arc<AppState>) -> Result<&innertube::YouTubeClient, String> {
+pub(crate) fn require_login(state: &Arc<AppState>) -> Result<&innertube::YouTubeClient, String> {
     if !state.it.is_logged_in() {
         return Err("Sign in first to use this.".into());
     }
@@ -1665,6 +1665,67 @@ pub async fn transfer_tracks(
         duplicates,
     };
     transfer::run(&state, req).await
+}
+
+/// A split, worked out but not written: the whole playlist and which rows go into which part.
+#[derive(serde::Serialize)]
+pub struct SplitPlan {
+    rows: Vec<SongItem>,
+    parts: Vec<split::Part>,
+}
+
+#[tauri::command]
+pub async fn plan_split(
+    state: St<'_>,
+    playlist_id: String,
+    by: split::SplitBy,
+    order: split::Order,
+) -> Result<SplitPlan, String> {
+    let rows = rows::read_all(&state, &playlist_id).await?;
+    let parts = split::split(&rows, by, order);
+    Ok(SplitPlan { rows, parts })
+}
+
+/// Several playlists merged into one list, not written yet. `into`: an existing playlist the merge
+/// will be appended to, whose tracks are left out when deduplicating.
+#[tauri::command]
+pub async fn merge_preview(
+    state: St<'_>,
+    ids: Vec<String>,
+    how: merge::Interleave,
+    dedupe: bool,
+    into: Option<String>,
+) -> Result<Vec<SongItem>, String> {
+    let mut lists = Vec::with_capacity(ids.len());
+    for id in &ids {
+        lists.push(rows::read_all(&state, id).await?);
+    }
+    let skip = match (&into, dedupe) {
+        (Some(target), true) => {
+            rows::read_all(&state, target).await?.into_iter().map(|s| s.video_id).collect()
+        }
+        _ => Default::default(),
+    };
+    Ok(merge::merge(&lists, how, dedupe, &skip))
+}
+
+/// Write a split or a merge (`playlist_tools::build`): new playlists, or one existing playlist
+/// appended to. Progress arrives as `playlist-op-progress`; `cancel_playlist_build` stops it.
+#[tauri::command]
+pub async fn build_playlists(
+    state: St<'_>,
+    kind: String,
+    sources: Vec<Named>,
+    lists: Vec<build::NewList>,
+    dest: build::Dest,
+) -> Result<build::Built, String> {
+    let kind = if kind == "merge" { "merge" } else { "split" };
+    build::run(&state, kind, sources, lists, dest).await
+}
+
+#[tauri::command]
+pub fn cancel_playlist_build() {
+    build::cancel();
 }
 
 /// The undo history, newest first.
