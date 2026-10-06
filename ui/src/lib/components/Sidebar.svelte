@@ -18,7 +18,8 @@
 		SquareArrowLeft01Icon,
 		SquareArrowRight01Icon,
 		SpotifyIcon,
-		Notification03Icon
+		Notification03Icon,
+		Radar01Icon
 	} from '@hugeicons/core-free-icons';
 	import { toggleMode } from 'mode-watcher';
 	import { Button } from '$lib/components/ui/button';
@@ -41,7 +42,8 @@
 		{ href: '/', label: t('nav.home'), icon: Home01Icon },
 		{ href: '/search', label: t('nav.search'), icon: Search01Icon },
 		{ href: '/library', label: t('nav.library'), icon: LibraryIcon },
-		{ href: '/alerts', label: t('nav.alerts'), icon: Notification03Icon }
+		{ href: '/alerts', label: t('nav.alerts'), icon: Notification03Icon },
+		{ href: '/monitor', label: t('nav.monitor'), icon: Radar01Icon }
 	]);
 	// The monitor's alerts neither seen nor dismissed, on the Alerts entry (99+ past that).
 	const badge = (href: string) =>

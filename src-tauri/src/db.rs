@@ -1990,6 +1990,22 @@ pub struct MonitorRun {
     pub detail_json: String,
 }
 
+/// The monitor page's numbers ([`Db::monitor_stats`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize)]
+pub struct MonitorStats {
+    pub playlists: i64,
+    pub items: i64,
+    pub unavailable: i64,
+    pub duplicates_estimate: i64,
+}
+
+/// When an alert was filed and of what kind: one bar segment of the monitor page's chart.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct AlertStamp {
+    pub at: i64,
+    pub kind: String,
+}
+
 /// One account playlist's last complete sync and what it found.
 #[allow(dead_code)] // the monitor and the library (commits 13, 17)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -2403,6 +2419,56 @@ impl Db {
                     detail_json: r.get(9)?,
                 })
             }) {
+                out.extend(rows.flatten());
+            }
+        }
+        out
+    }
+
+    /// The monitor page's cards: playlists in the index, the tracks in them, how many of those
+    /// YouTube greys out, and an estimate of the extra copies. The playlists are the ones with
+    /// index rows or a sync record (an empty one has only the latter); `items` counts index rows,
+    /// one per track and playlist. The duplicates are PlaylistForge's `library_stats` estimate:
+    /// within each synced playlist's newest snapshot (the index keeps a track once per playlist,
+    /// a snapshot keeps every copy), every copy of a video past its first.
+    pub fn monitor_stats(&self) -> MonitorStats {
+        let conn = self.0.lock().unwrap();
+        let count = |sql: &str| conn.query_row(sql, [], |r| r.get::<_, i64>(0)).unwrap_or(0);
+        MonitorStats {
+            playlists: count(
+                "SELECT COUNT(*) FROM (SELECT playlist_id FROM playlist_track \
+                 UNION SELECT playlist_id FROM playlist_sync)",
+            ),
+            items: count("SELECT COUNT(*) FROM playlist_track"),
+            unavailable: count(
+                "SELECT COUNT(*) FROM playlist_track \
+                 WHERE json_extract(song_json, '$.unavailable') = 1",
+            ),
+            duplicates_estimate: count(
+                "WITH cur AS (SELECT s.playlist_id, s.items_json FROM playlist_snapshot s \
+                     WHERE s.playlist_id IN (SELECT playlist_id FROM playlist_sync) \
+                     AND s.id = (SELECT s2.id FROM playlist_snapshot s2 \
+                         WHERE s2.playlist_id = s.playlist_id \
+                         ORDER BY s2.taken_at DESC, s2.id DESC LIMIT 1)) \
+                 SELECT COALESCE(SUM(cnt - 1), 0) FROM ( \
+                     SELECT COUNT(*) AS cnt FROM cur, json_each(cur.items_json) j \
+                     GROUP BY cur.playlist_id, json_extract(j.value, '$.v') \
+                     HAVING COUNT(*) > 1)",
+            ),
+        }
+    }
+
+    /// Every alert filed at or after `since` (dismissed ones too: they still happened), oldest
+    /// first, as `(at, kind)`. The monitor page buckets them by local day for its chart.
+    pub fn alerts_since(&self, since: i64) -> Vec<AlertStamp> {
+        let conn = self.0.lock().unwrap();
+        let mut out = Vec::new();
+        if let Ok(mut stmt) =
+            conn.prepare("SELECT at, kind FROM playlist_alert WHERE at >= ?1 ORDER BY at, id")
+        {
+            if let Ok(rows) =
+                stmt.query_map([since], |r| Ok(AlertStamp { at: r.get(0)?, kind: r.get(1)? }))
+            {
                 out.extend(rows.flatten());
             }
         }
@@ -4166,6 +4232,60 @@ mod tests {
         let got = d.monitor_runs(2);
         assert_eq!(got.iter().map(|r| r.started_at).collect::<Vec<_>>(), [30, 20]);
         assert_eq!((got[0].finished_at, got[0].trigger.as_str()), (35, "manual_ui"));
+    }
+
+    #[test]
+    fn monitor_stats_count_the_index_and_estimate_duplicates_like_playlistforge() {
+        let d = db();
+        assert_eq!(d.monitor_stats(), MonitorStats::default(), "an empty file is all zeros");
+
+        let grey = r#"{"video_id":"a","title":"A","artists":"","unavailable":true}"#;
+        d.set_playlist_songs("VL1", &[("a".into(), grey.into()), ("b".into(), "{}".into())]);
+        d.set_playlist_songs("VL2", &[("a".into(), "{}".into())]);
+        let sync = PlaylistSync { synced_at: 1, item_count: 0, added: 0, removed: 0, moved: 0 };
+        d.set_playlist_sync("VL1", &sync).unwrap();
+        // Synced, but empty: no index rows, still a playlist.
+        d.set_playlist_sync("VL3", &sync).unwrap();
+
+        // Only the newest snapshot counts: two extra copies there, three in the one before.
+        let older = [snap("a"), snap("a"), snap("a"), snap("a"), snap("b")];
+        d.put_snapshot_if_changed("VL1", None, None, 1, &older).unwrap();
+        let newest = [snap("a"), snap("a"), snap("b"), snap("b")];
+        d.put_snapshot_if_changed("VL1", None, None, 2, &newest).unwrap();
+        // The same video once in each of two playlists is no duplicate.
+        d.put_snapshot_if_changed("VL3", None, None, 2, &[snap("a")]).unwrap();
+        // A playlist with no sync record (forgotten, or not synced since v3) is left out.
+        d.put_snapshot_if_changed("VL9", None, None, 2, &[snap("z"), snap("z")]).unwrap();
+
+        let stats = d.monitor_stats();
+        assert_eq!(
+            stats,
+            MonitorStats { playlists: 3, items: 3, unavailable: 1, duplicates_estimate: 2 }
+        );
+    }
+
+    #[test]
+    fn alerts_since_lists_kinds_oldest_first_dismissed_included() {
+        let d = db();
+        for (at, video, kind) in [(20, "c", "removed"), (5, "a", "added"), (10, "b", "moved")] {
+            let key = alert_dedupe_key("VL1", video, kind, None);
+            d.insert_alert(&NewAlert {
+                playlist_id: "VL1",
+                video_id: video,
+                kind,
+                song_json: None,
+                at,
+                from_pos: None,
+                to_pos: None,
+                dedupe_key: &key,
+            })
+            .unwrap();
+        }
+        d.dismiss_playlist_alert("VL1", "c", "removed");
+        let got: Vec<(i64, String)> =
+            d.alerts_since(10).into_iter().map(|a| (a.at, a.kind)).collect();
+        assert_eq!(got, [(10, "moved".to_string()), (20, "removed".to_string())]);
+        assert!(d.alerts_since(21).is_empty());
     }
 
     #[test]

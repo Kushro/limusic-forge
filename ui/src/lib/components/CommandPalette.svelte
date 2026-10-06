@@ -26,7 +26,9 @@
 		Playlist02Icon,
 		Settings01Icon,
 		DatabaseImportIcon,
-		Sun01Icon
+		Sun01Icon,
+		Radar01Icon,
+		RefreshIcon
 	} from '@hugeicons/core-free-icons';
 	import * as Command from '$lib/components/ui/command/index.js';
 	import { Skeleton } from '$lib/components/ui/skeleton';
@@ -34,7 +36,7 @@
 	import ItemMenu from './ItemMenu.svelte';
 	import { searchSuggestions, type BrowseItem, type SearchSuggestions } from '$lib/api';
 	import { openItem, rowMeta } from '$lib/browse';
-	import { library, personal, ui } from '$lib/player.svelte';
+	import { auth, library, personal, syncAllPlaylists, toast, ui } from '$lib/player.svelte';
 	import { mergeSaved, orderLibrary } from '$lib/personal';
 	import { rankCommands, type PaletteCommand } from '$lib/palette';
 	import { thumb } from '$lib/thumb';
@@ -124,6 +126,13 @@
 	};
 	const go = (path: string) => close(() => goto(path));
 
+	// The sidebar's progress and the Monitor page show the run; this only reports how it ended.
+	function checkPlaylists() {
+		syncAllPlaylists()
+			.then(() => toast.success(t('monitor.check_done')))
+			.catch((e) => (String(e) === 'busy' ? toast(t('monitor.busy')) : toast.error(String(e))));
+	}
+
 	function openSettings(tab?: 'import') {
 		ui.settingsFocus = tab ? { tab } : null;
 		ui.settingsOpen = true;
@@ -154,6 +163,13 @@
 			keywords: ['monitor', 'changes', 'notifications', 'timeline'],
 			run: go('/alerts')
 		},
+		{
+			id: 'goto:monitor',
+			group: 'goto',
+			label: t('nav.monitor'),
+			keywords: ['sync', 'check', 'runs', 'stats', 'backups', 'interval'],
+			run: go('/monitor')
+		},
 		...LIBRARY_TABS.map(
 			([tab, key]): PaletteCommand => ({
 				id: `goto:library:${tab}`,
@@ -180,6 +196,18 @@
 			keywords: ['migrate', 'import', 'playlistforge', 'limusic', 'settings'],
 			run: close(() => openSettings('import'))
 		},
+		// Signed out there is nothing of yours to check, so the action isn't offered.
+		...(auth.account?.signedIn
+			? [
+					{
+						id: 'action:check-playlists',
+						group: 'actions',
+						label: t('palette.check_playlists'),
+						keywords: ['sync', 'monitor', 'refresh', 'alerts', 'scan'],
+						run: close(checkPlaylists)
+					} satisfies PaletteCommand
+				]
+			: []),
 		{
 			id: 'action:theme',
 			group: 'actions',
@@ -206,6 +234,8 @@
 		'goto:home': Home01Icon,
 		'goto:search': Search01Icon,
 		'goto:alerts': Notification03Icon,
+		'goto:monitor': Radar01Icon,
+		'action:check-playlists': RefreshIcon,
 		'action:settings': Settings01Icon,
 		'action:import': DatabaseImportIcon,
 		'action:theme': Sun01Icon

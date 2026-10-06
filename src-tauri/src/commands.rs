@@ -1614,6 +1614,27 @@ pub fn unseen_alert_count(state: St<'_>) -> u32 {
     state.db.unseen_alert_count()
 }
 
+/// The monitor page's cards: `{ playlists, items, unavailable, duplicates_estimate }`.
+#[tauri::command]
+pub fn monitor_stats(state: St<'_>) -> crate::db::MonitorStats {
+    state.db.monitor_stats()
+}
+
+/// The newest monitor runs, newest first: 20 unless `limit` says otherwise (at most 500).
+#[tauri::command]
+pub fn monitor_runs(state: St<'_>, limit: Option<u32>) -> Vec<crate::db::MonitorRun> {
+    state.db.monitor_runs(limit.unwrap_or(20).min(500) as usize)
+}
+
+/// Every alert filed over the last `days` days (14 unless said, at most 366), oldest first, as
+/// `{ at, kind }`. Raw rows rather than per-day sums: a day is the viewer's local day, which the
+/// page knows and this does not.
+#[tauri::command]
+pub fn alerts_by_day(state: St<'_>, days: Option<u32>) -> Vec<crate::db::AlertStamp> {
+    let days = i64::from(days.unwrap_or(14).clamp(1, 366));
+    state.db.alerts_since(now_secs() - days * 86_400)
+}
+
 /// `false` means the playlist already had the track and YouTube added nothing — not an error, but
 /// the UI must not draw an optimistic row for it (there is no real row to remove later).
 /// With `allow_duplicates` set to `true`, `true` is returned for a duplicate that was added on purpose.

@@ -696,6 +696,37 @@ export const syncPlaylist = (playlistId: string) =>
 export const lastSyncSummary = () => invoke<SyncSummary | null>('last_sync_summary');
 /** Alerts neither seen nor dismissed (the badge). */
 export const unseenAlertCount = () => invoke<number>('unseen_alert_count');
+/** The monitor page's cards. `items` is index rows (a track once per playlist); `duplicates_estimate`
+ *  is the extra copies inside each synced playlist's newest snapshot, as PlaylistForge counts them. */
+export type MonitorStats = {
+	playlists: number;
+	items: number;
+	unavailable: number;
+	duplicates_estimate: number;
+};
+export const monitorStats = () => invoke<MonitorStats>('monitor_stats');
+export type MonitorOutcome = 'ok' | 'partial' | 'failed' | 'lock_busy' | 'cancelled';
+/** One `monitor_runs` row. Times are epoch seconds; `detail_json` is the run's JSON detail as text. */
+export type MonitorRun = {
+	id: number;
+	started_at: number;
+	finished_at: number;
+	trigger: SyncTrigger;
+	outcome: MonitorOutcome;
+	playlists_ok: number;
+	playlists_failed: number;
+	alerts_new: number;
+	units_spent: number;
+	detail_json: string;
+};
+/** The newest monitor runs, newest first (20 by default). */
+export const monitorRuns = (limit?: number) =>
+	invoke<MonitorRun[]>('monitor_runs', { limit: limit ?? null });
+/** Every alert filed over the last `days` days (14 by default), oldest first, unbucketed: the page
+ *  groups them by its own local day. */
+export type AlertStamp = { at: number; kind: AlertKind };
+export const alertsByDay = (days?: number) =>
+	invoke<AlertStamp[]>('alerts_by_day', { days: days ?? null });
 /** A sync's progress: `current` is the playlist being read, null once it is done. */
 export type SyncProgress = { done: number; total: number; current: string | null };
 export const onPlaylistSyncProgress = (cb: (p: SyncProgress) => void): Promise<UnlistenFn> =>
