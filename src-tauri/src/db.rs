@@ -255,6 +255,18 @@ impl Db {
                 created_at   INTEGER NOT NULL,
                 undone_at    INTEGER
             );
+            -- Tracks that went missing from your playlists, or that YouTube can no longer play,
+            -- found by comparing a sync with the one before (`playlist_tools::monitor`). One row per
+            -- playlist, track and kind; dismissing keeps the row so the same alert never returns.
+            CREATE TABLE IF NOT EXISTS playlist_alert (
+                playlist_id TEXT NOT NULL,
+                video_id    TEXT NOT NULL,
+                kind        TEXT NOT NULL,
+                song_json   TEXT,
+                at          INTEGER NOT NULL,
+                dismissed   INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (playlist_id, video_id, kind)
+            ) WITHOUT ROWID;
             -- Spotify import (#375): what each Spotify track turned out to be on YouTube Music,
             -- keyed by Spotify's track id. A cache, apart from the `manual` rows: those are the
             -- user's own picks, which every later import and "Update from Spotify" reuses.
@@ -328,6 +340,9 @@ impl Db {
             let _ = conn.execute("DELETE FROM lyrics_cache", []);
             let _ = conn.execute_batch("PRAGMA user_version = 2");
         }
+        // The index keeps each track's metadata too (the "in your playlists" view and the
+        // monitor read it). NULL until the next sync fills it in.
+        let _ = conn.execute("ALTER TABLE playlist_track ADD COLUMN song_json TEXT", []);
         // Local playlists became reorderable: rows sort by `position`, which older files lack.
         // The column is added once; the backfill runs every open, since a row an older build
         // appended after a downgrade has no position either. `id` is the order they had.
@@ -921,6 +936,7 @@ impl Db {
     pub fn forget_playlist(&self, playlist_id: &str) {
         let conn = self.0.lock().unwrap();
         let _ = conn.execute("DELETE FROM playlist_track WHERE playlist_id = ?1", [playlist_id]);
+        let _ = conn.execute("DELETE FROM playlist_alert WHERE playlist_id = ?1", [playlist_id]);
     }
 
     /// Drop every playlist the crawl no longer saw: deleted, unsaved, or no longer owned. An
@@ -929,13 +945,17 @@ impl Db {
         let conn = self.0.lock().unwrap();
         if keep.is_empty() {
             let _ = conn.execute("DELETE FROM playlist_track", []);
+            let _ = conn.execute(ACCOUNT_ALERTS_DELETE, []);
             return;
         }
         let holes = vec!["?"; keep.len()].join(",");
-        let params = rusqlite::params_from_iter(keep.iter());
         let _ = conn.execute(
             &format!("DELETE FROM playlist_track WHERE playlist_id NOT IN ({holes})"),
-            params,
+            rusqlite::params_from_iter(keep.iter()),
+        );
+        let _ = conn.execute(
+            &format!("{ACCOUNT_ALERTS_DELETE} AND playlist_id NOT IN ({holes})"),
+            rusqlite::params_from_iter(keep.iter()),
         );
     }
 
@@ -970,6 +990,110 @@ impl Db {
     pub fn clear_playlist_index(&self) {
         let conn = self.0.lock().unwrap();
         let _ = conn.execute("DELETE FROM playlist_track", []);
+        let _ = conn.execute(ACCOUNT_ALERTS_DELETE, []);
+    }
+
+    // --- songs in the index, and the monitor's alerts (playlist_tools::monitor) ---------------
+
+    /// What the index holds for one playlist: `(videoId, song_json)`, json NULL until a sync wrote
+    /// it. The monitor compares a fresh crawl against this before it replaces it.
+    pub fn playlist_songs(&self, playlist_id: &str) -> Vec<(String, Option<String>)> {
+        let conn = self.0.lock().unwrap();
+        let mut out = Vec::new();
+        if let Ok(mut stmt) =
+            conn.prepare("SELECT video_id, song_json FROM playlist_track WHERE playlist_id = ?1")
+        {
+            if let Ok(rows) = stmt.query_map([playlist_id], |r| Ok((r.get(0)?, r.get(1)?))) {
+                out.extend(rows.flatten());
+            }
+        }
+        out
+    }
+
+    /// Replace one playlist's index rows with these songs, metadata included.
+    pub fn set_playlist_songs(&self, playlist_id: &str, songs: &[(String, String)]) {
+        let mut conn = self.0.lock().unwrap();
+        let Ok(tx) = conn.transaction() else { return };
+        let _ = tx.execute("DELETE FROM playlist_track WHERE playlist_id = ?1", [playlist_id]);
+        for (video_id, json) in songs {
+            let _ = tx.execute(
+                "INSERT OR IGNORE INTO playlist_track(playlist_id, video_id, song_json) \
+                 VALUES(?1, ?2, ?3)",
+                [playlist_id, video_id.as_str(), json.as_str()],
+            );
+        }
+        let _ = tx.commit();
+    }
+
+    /// One track now in a playlist, with its metadata (an add made in this app).
+    pub fn put_playlist_song(&self, playlist_id: &str, video_id: &str, json: &str) {
+        let conn = self.0.lock().unwrap();
+        let _ = conn.execute(
+            "INSERT INTO playlist_track(playlist_id, video_id, song_json) VALUES(?1, ?2, ?3) \
+             ON CONFLICT(playlist_id, video_id) DO UPDATE SET song_json = excluded.song_json",
+            [playlist_id, video_id, json],
+        );
+    }
+
+    /// Every track in every playlist of yours that has its metadata, the ones on this machine
+    /// included: `(videoId, playlist id, song_json)`.
+    pub fn indexed_songs(&self) -> Vec<(String, String, String)> {
+        let conn = self.0.lock().unwrap();
+        let sql = format!(
+            "SELECT video_id, playlist_id, song_json FROM playlist_track WHERE song_json IS NOT NULL \
+             UNION ALL SELECT video_id, '{}' || playlist_id, song_json FROM local_playlist_tracks",
+            crate::state::LOCAL_PLAYLIST_PREFIX
+        );
+        let mut out = Vec::new();
+        if let Ok(mut stmt) = conn.prepare(&sql) {
+            if let Ok(rows) = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))) {
+                out.extend(rows.flatten());
+            }
+        }
+        out
+    }
+
+    /// Record an alert unless the same one is already there (dismissed ones included).
+    pub fn add_playlist_alert(
+        &self,
+        playlist_id: &str,
+        video_id: &str,
+        kind: &str,
+        song_json: Option<&str>,
+        at: i64,
+    ) {
+        let conn = self.0.lock().unwrap();
+        let _ = conn.execute(
+            "INSERT OR IGNORE INTO playlist_alert(playlist_id, video_id, kind, song_json, at) \
+             VALUES(?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![playlist_id, video_id, kind, song_json, at],
+        );
+    }
+
+    /// The alerts not dismissed, newest first: `(playlist id, videoId, kind, song_json, at)`.
+    pub fn playlist_alerts(&self) -> Vec<(String, String, String, Option<String>, i64)> {
+        let conn = self.0.lock().unwrap();
+        let mut out = Vec::new();
+        if let Ok(mut stmt) = conn.prepare(
+            "SELECT playlist_id, video_id, kind, song_json, at FROM playlist_alert \
+             WHERE dismissed = 0 ORDER BY at DESC, playlist_id, video_id",
+        ) {
+            if let Ok(rows) =
+                stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))
+            {
+                out.extend(rows.flatten());
+            }
+        }
+        out
+    }
+
+    pub fn dismiss_playlist_alert(&self, playlist_id: &str, video_id: &str, kind: &str) {
+        let conn = self.0.lock().unwrap();
+        let _ = conn.execute(
+            "UPDATE playlist_alert SET dismissed = 1 \
+             WHERE playlist_id = ?1 AND video_id = ?2 AND kind = ?3",
+            [playlist_id, video_id, kind],
+        );
     }
 
     // --- playlists on this machine (issue #251) -----------------------------------------------
@@ -1384,6 +1508,11 @@ pub struct LocalPlaylist {
     pub first_song: Option<String>,
 }
 
+/// Alerts about account playlists: what an account change or a full re-index clears. The ones
+/// about playlists on this machine belong to no account and stay.
+const ACCOUNT_ALERTS_DELETE: &str =
+    "DELETE FROM playlist_alert WHERE playlist_id NOT LIKE 'LOCALPLAYLIST:%'";
+
 /// How many playlist-tool operations the journal keeps (the undo history's length).
 pub const PLAYLIST_OPS_KEPT: i64 = 20;
 
@@ -1561,6 +1690,38 @@ mod tests {
         // A new track goes after the last position, not by row id.
         d.add_local_playlist_tracks(a, &[song("w")], 40).unwrap();
         assert_eq!(order(&d), ["z", "x", "y", "w"]);
+    }
+
+    #[test]
+    fn indexed_songs_and_alerts() {
+        let d = db();
+        d.set_playlist_songs("VL1", &[("a".into(), "{\"t\":1}".into()), ("b".into(), "{}".into())]);
+        d.set_playlist_tracks("VL2", &["a".into()]); // no metadata: left out of the view
+        d.put_playlist_song("VL2", "c", "{\"t\":3}");
+        let local = d.create_local_playlist("Here", 1).unwrap();
+        d.add_local_playlist_tracks(local, &[("a".into(), "{}".into())], 1).unwrap();
+        let mut got: Vec<(String, String)> =
+            d.indexed_songs().into_iter().map(|(v, p, _)| (v, p)).collect();
+        got.sort();
+        let here = format!("{}{local}", crate::state::LOCAL_PLAYLIST_PREFIX);
+        let want: Vec<(String, String)> =
+            [("a", here.as_str()), ("a", "VL1"), ("b", "VL1"), ("c", "VL2")]
+                .iter()
+                .map(|(v, p)| (v.to_string(), p.to_string()))
+                .collect();
+        assert_eq!(got, want);
+        assert_eq!(d.playlist_songs("VL1").len(), 2);
+
+        d.add_playlist_alert("VL1", "a", "gone", Some("{}"), 5);
+        d.add_playlist_alert("VL1", "a", "gone", None, 6); // the same alert: ignored
+        d.add_playlist_alert(&here, "a", "unavailable", None, 7);
+        assert_eq!(d.playlist_alerts().len(), 2);
+        d.dismiss_playlist_alert("VL1", "a", "gone");
+        d.add_playlist_alert("VL1", "a", "gone", None, 8); // dismissed stays dismissed
+        assert_eq!(d.playlist_alerts().len(), 1);
+        // An account change clears the account's alerts, not the local playlist's.
+        d.clear_playlist_index();
+        assert_eq!(d.playlist_alerts().iter().map(|a| a.0.clone()).collect::<Vec<_>>(), [here]);
     }
 
     #[test]

@@ -60,6 +60,8 @@ export interface SongItem {
 	/** One of the user's own YouTube Music uploads. Set by Rust and passed straight back on play:
 	 *  only an authenticated client can stream one, and the row is where that is known. */
 	is_upload?: boolean;
+	/** A playlist row YouTube greys out: taken down, made private, or blocked where you are. */
+	unavailable?: boolean;
 }
 
 export interface NowPlaying {
@@ -820,6 +822,40 @@ export const exportPlaylist = (
 export type BuildProgress = { done: number; total: number; current: string };
 export const onPlaylistOpProgress = (cb: (p: BuildProgress) => void): Promise<UnlistenFn> =>
 	listen<BuildProgress>('playlist-op-progress', (e) => cb(e.payload));
+/** A song in your playlists, once, with the ids of the playlists that hold it. */
+export type Everywhere = { song: SongItem; playlists: string[] };
+/** Every song across your playlists, from the index (no network). */
+export const songsEverywhere = () => invoke<Everywhere[]>('songs_everywhere');
+export type Kept = { added: number; removed: number; failed: string[]; op: PlaylistOp | null };
+/** Keep `songs` only in `target` (added there if missing), or with no target, out of every
+ *  playlist. `titles` names the playlists for the history. */
+export const keepOnlyIn = async (
+	songs: SongItem[],
+	target: { id: string; title: string } | null,
+	titles: Record<string, string>
+) => {
+	const r = await invoke<Omit<Kept, 'op'> & { op: RawPlaylistOp | null }>('keep_only_in', {
+		songs,
+		target,
+		titles
+	});
+	return { ...r, op: r.op && op(r.op) };
+};
+/** A track that left a playlist of yours, or turned unavailable in it, since the sync before. */
+export type PlaylistAlert = {
+	playlist_id: string;
+	video_id: string;
+	kind: 'gone' | 'unavailable';
+	song: SongItem | null;
+	at: number;
+};
+export const playlistAlerts = () => invoke<PlaylistAlert[]>('playlist_alerts');
+export const dismissPlaylistAlert = (a: PlaylistAlert) =>
+	invoke<void>('dismiss_playlist_alert', {
+		playlistId: a.playlist_id,
+		videoId: a.video_id,
+		kind: a.kind
+	});
 export const playlistHistory = async () =>
 	(await invoke<RawPlaylistOp[]>('playlist_history')).map(op);
 export const undoPlaylistOp = async (id: number) =>

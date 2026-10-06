@@ -19,12 +19,15 @@
 		SpotifyIcon,
 		SquareStackIcon,
 		UserCheck01Icon,
-		UserSharingIcon
+		UserSharingIcon,
+		LeftToRightListBulletIcon
 	} from '@hugeicons/core-free-icons';
 	import { Button } from '$lib/components/ui/button';
 	import * as Tabs from '$lib/components/ui/tabs';
 	import * as Tooltip from '$lib/components/ui/tooltip';
 	import LibrarySongs from '$lib/components/LibrarySongs.svelte';
+	import PlaylistSongs from '$lib/components/PlaylistSongs.svelte';
+	import * as api from '$lib/api';
 	import LocalMusic from '$lib/components/LocalMusic.svelte';
 	import MediaCard from '$lib/components/MediaCard.svelte';
 	import MediaCardSkeleton from '$lib/components/MediaCardSkeleton.svelte';
@@ -56,6 +59,14 @@
 	// Uploads splits three ways (all / songs / albums): YouTube Music takes uploaded albums too, and
 	// they are a card grid rather than rows, so they can't just join the track list.
 	let uploadTab = $state('all');
+	// Tracks the monitor flagged (`playlist_tools/monitor.rs`), counted on the tab so they are seen
+	// without opening it.
+	let alertCount = $state(0);
+	onMount(() => {
+		api.playlistAlerts()
+			.then((a) => (alertCount = a.length))
+			.catch(() => {});
+	});
 	// Artists splits like YouTube Music's: the artists behind your songs, or the ones you subscribe
 	// to. Only the second can be taken out of the library (an unsubscribe); the first leaves with
 	// its songs.
@@ -240,6 +251,14 @@
 			<Tabs.Trigger value="local">
 				<HugeiconsIcon icon={DriveIcon} class="h-4 w-4" /> {t('library.local_tab')}
 			</Tabs.Trigger>
+			<Tabs.Trigger value="everywhere">
+				<HugeiconsIcon icon={LeftToRightListBulletIcon} class="h-4 w-4" /> {t('everywhere.tab')}
+				{#if alertCount}
+					<span class="ml-1 rounded-full bg-destructive px-1.5 text-[10px] font-semibold text-white tabular-nums">
+						{alertCount > 99 ? '99+' : alertCount}
+					</span>
+				{/if}
+			</Tabs.Trigger>
 		</Tabs.List>
 		<!-- Every branch below is gated on `tab`, because bits-ui never unmounts an inactive panel: it
 		     renders every one and hides the inactive ones. Left alone, opening Library builds each card twice
@@ -247,6 +266,11 @@
 		     for a panel you cannot see. -->
 		<!-- Songs, Uploads and Local stand apart: two are track lists rather than card grids, the
 		     third needs neither an account nor a connection, and the states below fit none of them. -->
+		<Tabs.Content value="everywhere">
+			{#if tab === 'everywhere'}
+				<PlaylistSongs onalerts={(n) => (alertCount = n)} />
+			{/if}
+		</Tabs.Content>
 		<Tabs.Content value="songs">
 			{#if tab === 'songs'}
 				{#if signedOut}

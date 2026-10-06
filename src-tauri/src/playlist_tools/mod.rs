@@ -7,10 +7,12 @@
 
 pub mod build;
 pub mod dedup;
+pub mod everywhere;
 pub mod export;
 pub mod journal;
 pub mod lis;
 pub mod merge;
+pub mod monitor;
 pub mod rows;
 pub mod split;
 pub mod transfer;

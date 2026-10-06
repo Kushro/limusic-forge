@@ -11,7 +11,7 @@ use tauri::{Emitter, Manager, State};
 
 use crate::blocked::BlockedArtist;
 use crate::playlist_tools::journal::{self, Named, OpRecord, Restore, Summary};
-use crate::playlist_tools::{build, dedup, export, merge, rows, split, transfer};
+use crate::playlist_tools::{self, build, dedup, everywhere, export, merge, rows, split, transfer};
 use crate::state::{
     is_local_playlist, AppState, LOCAL_PLAYLIST_PREFIX, ON_REPEAT_ID, ON_REPEAT_LIMIT,
     ON_REPEAT_WINDOW_SECS,
@@ -1153,7 +1153,7 @@ pub(crate) fn editable_playlist<'a>(
 /// us nothing: `search` responses carry no `likeStatus` at all (live-checked 2026-08-28), so
 /// membership of this list is the only way a result can draw its heart filled. Not shown in the
 /// "saved in" chip, though: the thumbs-up already says it (the UI filters it out there).
-const LIKED_MUSIC_ID: &str = "VLLM";
+pub(crate) const LIKED_MUSIC_ID: &str = "VLLM";
 /// How long the membership index is trusted before a re-crawl. Adds and removes made in this app
 /// patch it as they happen, so this window only ever covers edits made somewhere else.
 const PLAYLIST_INDEX_TTL_SECS: i64 = 6 * 3600;
@@ -1187,9 +1187,10 @@ pub async fn sync_playlist_index(
     }
     let fresh_until = state
         .db
-        // `_v2`: the key changed when Liked Music joined the index, so an install with a fresh
-        // stamp re-crawls once instead of showing hearts empty for another six hours.
-        .get_setting("playlist_index_synced_at_v2")
+        // The key changes whenever the index learns to hold something new, so an install with a
+        // fresh stamp re-crawls once: `_v2` when Liked Music joined it, `_v3` when each track's
+        // metadata did (the "in your playlists" view and the monitor read it).
+        .get_setting("playlist_index_synced_at_v3")
         .and_then(|at| at.parse::<i64>().ok())
         .map(|at| at + PLAYLIST_INDEX_TTL_SECS);
     if fresh_until.is_some_and(|until| now_secs() < until) {
@@ -1222,19 +1223,47 @@ pub async fn sync_playlist_index(
         if item.id != LIKED_MUSIC_ID && !page.owned && !page.collaborative {
             continue;
         }
-        let mut video_ids: Vec<String> = page.items.into_iter().map(|song| song.video_id).collect();
+        let mut songs: Vec<SongItem> = page.items;
         let mut token = page.continuation;
+        // Read to the end, not cut short by a failed page or the page cap: only then may the
+        // monitor read a track missing from it as gone.
+        let mut complete = token.is_none();
         for _ in 0..PLAYLIST_INDEX_MAX_PAGES {
-            let Some(next) = token.take() else { break };
+            let Some(next) = token.take() else {
+                complete = true;
+                break;
+            };
             let Ok(more) = state.it.playlist_continuation(client, &next).await else { break };
-            video_ids.extend(more.items.into_iter().map(|song| song.video_id));
+            songs.extend(more.items);
             token = more.continuation;
         }
-        state.db.set_playlist_tracks(&item.id, &video_ids);
+        complete = complete || token.is_none();
+        // Liked Music changes every time you like or unlike something anywhere: not news.
+        if complete && item.id != LIKED_MUSIC_ID {
+            let before = state.db.playlist_songs(&item.id);
+            for c in playlist_tools::monitor::diff(&before, &songs) {
+                let json = c.song.and_then(|s| serde_json::to_string(&s).ok());
+                state.db.add_playlist_alert(
+                    &item.id,
+                    &c.video_id,
+                    c.kind,
+                    json.as_deref(),
+                    now_secs(),
+                );
+            }
+        }
+        let rows: Vec<(String, String)> = songs
+            .into_iter()
+            .map(|s| {
+                let json = serde_json::to_string(&playlist_row(s.clone())).unwrap_or_default();
+                (s.video_id, json)
+            })
+            .collect();
+        state.db.set_playlist_songs(&item.id, &rows);
         indexed.push(item.id);
     }
     state.db.retain_playlists(&indexed);
-    state.db.set_setting("playlist_index_synced_at_v2", &now_secs().to_string());
+    state.db.set_setting("playlist_index_synced_at_v3", &now_secs().to_string());
     Ok(state.db.playlist_memberships())
 }
 
@@ -1742,6 +1771,55 @@ pub async fn export_playlist(
     let text = export::render(format, &title, &rows)?;
     std::fs::write(&path, text).map_err(|e| e.to_string())?;
     Ok(rows.len())
+}
+
+/// Every song in your playlists, once each, with the playlists holding it. From the index: no
+/// network, and empty until the first sync after sign-in has filled in the metadata.
+#[tauri::command]
+pub fn songs_everywhere(state: St<'_>) -> Vec<everywhere::Everywhere> {
+    everywhere::group(state.db.indexed_songs())
+}
+
+/// Keep these songs in `target` only, or with no target, take them out of every playlist.
+#[tauri::command]
+pub async fn keep_only_in(
+    state: St<'_>,
+    songs: Vec<SongItem>,
+    target: Option<Named>,
+    titles: std::collections::HashMap<String, String>,
+) -> Result<everywhere::Kept, String> {
+    everywhere::keep_only_in(&state, songs, target, titles).await
+}
+
+/// A track that left one of your playlists, or turned unavailable in it, since the sync before.
+#[derive(serde::Serialize)]
+pub struct PlaylistAlert {
+    playlist_id: String,
+    video_id: String,
+    kind: String,
+    song: Option<SongItem>,
+    at: i64,
+}
+
+#[tauri::command]
+pub fn playlist_alerts(state: St<'_>) -> Vec<PlaylistAlert> {
+    state
+        .db
+        .playlist_alerts()
+        .into_iter()
+        .map(|(playlist_id, video_id, kind, json, at)| PlaylistAlert {
+            playlist_id,
+            video_id,
+            kind,
+            song: json.and_then(|j| serde_json::from_str(&j).ok()),
+            at,
+        })
+        .collect()
+}
+
+#[tauri::command]
+pub fn dismiss_playlist_alert(state: St<'_>, playlist_id: String, video_id: String, kind: String) {
+    state.db.dismiss_playlist_alert(&playlist_id, &video_id, &kind);
 }
 
 /// The undo history, newest first.

@@ -197,10 +197,11 @@ pub async fn add_rows(
                 }
                 for song in piece {
                     let set = by_video.get_mut(&song.video_id).and_then(VecDeque::pop_front);
-                    state.db.add_playlist_track(playlist_id, &song.video_id);
-                    added
-                        .rows
-                        .push(SongItem { set_video_id: set, ..playlist_row((*song).clone()) });
+                    let row = playlist_row((*song).clone());
+                    if let Ok(json) = serde_json::to_string(&row) {
+                        state.db.put_playlist_song(playlist_id, &song.video_id, &json);
+                    }
+                    added.rows.push(SongItem { set_video_id: set, ..row });
                 }
             }
             Err(e) if is_pushback(&e) => return Err(playlist_write_error(state, e)),
