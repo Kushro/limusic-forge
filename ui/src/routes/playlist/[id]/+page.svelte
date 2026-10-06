@@ -50,7 +50,8 @@
 	import { rowWindow } from '$lib/rows';
 	import { rowScroller } from '$lib/rows.svelte';
 	import { anchorsFor, moveBlock, movedCount, nudge, seededShuffle } from '$lib/reorder';
-	import { dragScroll, isDragRows, setDragRows, TRACK_ROWS_MIME } from '$lib/dnd';
+	import { dragScroll, isDragRows, setDragRows, TRACK_ROWS_MIME, type TrackRowsDrag } from '$lib/dnd';
+	import MoveToPlaylist from '$lib/components/MoveToPlaylist.svelte';
 	import { endRowDrag, startRowDrag } from '$lib/rowdrag.svelte';
 	import { announceOp } from '$lib/playlistops.svelte';
 	import { t } from '$lib/i18n.svelte';
@@ -1109,6 +1110,14 @@
 		endRowDrag();
 	}
 
+	// "Move to…" from the selection bar: the same transfer a drop on a sidebar playlist makes.
+	// Not counted as an own edit: the rows leaving this list is what the reload shows.
+	let moveRows = $state<TrackRowsDrag | null>(null);
+	function openMove(songs: SongItem[]) {
+		if (!pl) return;
+		moveRows = { from: id, fromTitle: pl.title ?? '', rows: rowRefs(pl.items, songs) };
+	}
+
 	// Alt+↑/↓ moves the selected rows one step, staged like a drag. Not while typing.
 	function onReorderKey(e: KeyboardEvent) {
 		if (!e.altKey || (e.key !== 'ArrowUp' && e.key !== 'ArrowDown')) return;
@@ -1296,6 +1305,7 @@
 				{selection}
 				from={pl.title}
 				onRemove={isLiked || editable ? removeSelected : undefined}
+				onMove={reorderable ? openMove : undefined}
 			/>
 			{#if stagedFrom}
 				<!-- Unsaved order. Sticky, so Save is in reach wherever the last drag ended. -->
@@ -1422,6 +1432,8 @@
 </div>
 
 <svelte:window ondragend={endDrag} onkeydown={onReorderKey} />
+
+<MoveToPlaylist bind:drag={moveRows} ondone={() => selection.clear()} />
 
 {#if sortOpen}
 	<button

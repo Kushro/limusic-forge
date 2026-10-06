@@ -31,7 +31,9 @@
 	import { HELP_COMBO } from '$lib/shortcuts';
 	import { copyText } from '$lib/clipboard';
 	import * as api from '$lib/api';
-	import { blocked, prefs, refreshView, setAutoplay, ui, toast, unblockArtist } from '$lib/player.svelte';
+	import { blocked, prefs, refreshView, setAutoplay, ui, toast, unblockArtist, type DropMode } from '$lib/player.svelte';
+	import { rememberDrop } from '$lib/transfer.svelte';
+	const DROP_MODES: DropMode[] = ['ask', 'copy', 'move'];
 	import { win } from '$lib/win.svelte';
 	import { lt } from '$lib/lt.svelte';
 	import ColorPicker from '$lib/components/ColorPicker.svelte';
@@ -887,6 +889,17 @@
 							</div>
 						</section>
 						<section class={GROUP}>
+							<h3 class={LABEL}>{t('settings.sections.playlists')}</h3>
+							<div class={CARD}>
+								{@render row({
+									title: t('drop.settings_title'),
+									desc: t('drop.settings_desc'),
+									control: dropModeSelect,
+									tall: true
+								})}
+							</div>
+						</section>
+						<section class={GROUP}>
 							<h3 class={LABEL}>{t('settings.sections.blocked')}</h3>
 							<div class={CARD}>
 								{@render row({
@@ -1257,6 +1270,23 @@
 			{effective.radius.toFixed(2)}
 		</span>
 	</div>
+{/snippet}
+
+{#snippet dropModeSelect()}
+	<Select.Root
+		type="single"
+		value={prefs.dropMode}
+		onValueChange={(v) => rememberDrop(v as DropMode, prefs.dropDupes)}
+	>
+		<Select.Trigger class="w-44 shrink-0" aria-label={t('drop.settings_title')}>
+			<span class="flex-1 text-left">{t(`drop.mode_${prefs.dropMode}`)}</span>
+		</Select.Trigger>
+		<Select.Content>
+			{#each DROP_MODES as mode (mode)}
+				<Select.Item value={mode} label={t(`drop.mode_${mode}`)}>{t(`drop.mode_${mode}`)}</Select.Item>
+			{/each}
+		</Select.Content>
+	</Select.Root>
 {/snippet}
 
 {#snippet zoomSelect()}

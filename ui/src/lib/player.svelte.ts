@@ -66,8 +66,14 @@ export const prefs = $state({
 	ambient: false,
 	/** `autoplay`: the queue keeps going with similar songs. Switched from the queue panel as well
 	 *  as Settings, so both read it here. */
-	autoplay: true
+	autoplay: true,
+	/** `drop_mode`: what dropping tracks on a sidebar playlist does (`transfer.svelte.ts`). */
+	dropMode: 'ask' as DropMode,
+	/** `drop_dupes`: what a copy or move does with a track the target already holds. */
+	dropDupes: 'skip' as DropDupes
 });
+export type DropMode = 'ask' | 'copy' | 'move';
+export type DropDupes = 'skip' | 'allow' | 'consolidate';
 
 /** Rust drops the upcoming autoplay tracks when this goes off, and tops a short queue up when it
  *  comes on, so the queue shows what will actually play. */
@@ -1645,6 +1651,8 @@ export function initApp(mini = false): () => void {
 			prefs.ambient = s.ambient_light === 'true';
 			prefs.discordRpc = s.discord_rpc === 'true';
 			prefs.autoplay = s.autoplay !== 'false';
+			if (s.drop_mode === 'copy' || s.drop_mode === 'move') prefs.dropMode = s.drop_mode;
+			if (s.drop_dupes === 'allow' || s.drop_dupes === 'consolidate') prefs.dropDupes = s.drop_dupes;
 			// Half of what the app shows is YouTube's own text, and Rust asks for it in the language
 			// this setting holds (#274). It reads the setting at startup, before the SPA exists to
 			// tell it anything, so the two disagree on a fresh install, on a language taken from the

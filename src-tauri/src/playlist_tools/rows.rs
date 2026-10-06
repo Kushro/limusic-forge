@@ -126,8 +126,11 @@ pub async fn reorder(
 #[derive(Debug, Default)]
 pub struct Added {
     pub rows: Vec<SongItem>,
-    /// Already in the playlist (and duplicates weren't allowed), or refused by YouTube.
-    pub skipped: Vec<SongItem>,
+    /// Already in the playlist, and duplicates weren't allowed.
+    pub duplicates: Vec<SongItem>,
+    /// Refused for another reason: a file on this computer bound for YouTube, a track YouTube
+    /// won't take (taken down, blocked in the region).
+    pub refused: Vec<SongItem>,
 }
 
 /// Append `songs`. Without `allow_duplicates` a song the playlist already holds is skipped, the
@@ -165,7 +168,7 @@ pub async fn add_rows(
                 let set = new_ids.remove(&song.video_id);
                 added.rows.push(SongItem { set_video_id: set, ..playlist_row(song.clone()) });
             } else {
-                added.skipped.push(song.clone());
+                added.duplicates.push(song.clone());
             }
         }
         return Ok(added);
@@ -175,7 +178,7 @@ pub async fn add_rows(
     let mut added = Added::default();
     let (files, songs): (Vec<&SongItem>, Vec<&SongItem>) =
         songs.iter().partition(|s| s.video_id.starts_with(SONG_PREFIX));
-    added.skipped.extend(files.into_iter().cloned());
+    added.refused.extend(files.into_iter().cloned());
     let mut todo: VecDeque<Vec<&SongItem>> =
         songs.chunks(ACTIONS_PER_REQUEST).map(<[&SongItem]>::to_vec).collect();
     let mut first = true;
@@ -204,11 +207,11 @@ pub async fn add_rows(
             Err(e) if is_pushback(&e) => return Err(playlist_write_error(state, e)),
             Err(innertube::Error::AlreadyInPlaylist) if piece.len() == 1 => {
                 state.db.add_playlist_track(playlist_id, &piece[0].video_id);
-                added.skipped.push(piece[0].clone());
+                added.duplicates.push(piece[0].clone());
             }
             Err(e) if piece.len() == 1 => {
                 tracing::warn!(error = %e, video_id = %piece[0].video_id, "playlist tools: YouTube won't take this track");
-                added.skipped.push(piece[0].clone());
+                added.refused.push(piece[0].clone());
             }
             Err(_) => {
                 let (a, b) = piece.split_at(piece.len() / 2);

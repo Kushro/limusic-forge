@@ -7,6 +7,7 @@
 		ArrowDownWideNarrowIcon,
 		PlayListAddIcon,
 		PlayListRemoveIcon,
+		SquareArrowRightDoubleIcon,
 		Cancel01Icon
 	} from '@hugeicons/core-free-icons';
 	import { Button } from './ui/button';
@@ -15,19 +16,22 @@
 	import { t } from '$lib/i18n.svelte';
 	import type { TrackSelection } from '$lib/selection.svelte';
 
-	// `onRemove` is only given where the list is one the user can edit (a playlist page they own);
-	// everywhere else there is nothing to remove from and the button is absent.
+	// `onRemove` and `onMove` are only given where the list is one the user can edit (a playlist page
+	// they own); everywhere else there is nothing to take the rows out of and the buttons are absent.
 	let {
 		selection,
 		from,
-		onRemove
+		onRemove,
+		onMove
 	}: {
 		selection: TrackSelection;
 		from?: string;
 		onRemove?: (songs: SongItem[]) => Promise<void>;
+		onMove?: (songs: SongItem[]) => void;
 	} = $props();
 	let busy = $state(false);
-	// Second click confirms: a bulk removal is not undoable, and the button sits next to Clear.
+	// Second click confirms: the button sits next to Clear, and although the toast offers an undo,
+	// a removal that went unnoticed would have nothing to remind you to.
 	let confirmRemove = $state(false);
 	// Any change to what is selected drops a half-made confirmation, so the destructive button
 	// never carries over onto a different set of rows.
@@ -107,6 +111,13 @@
 						title={t('player.add_to_playlist')} aria-label={t('player.add_to_playlist')}
 						onclick={() => openAddManyToPlaylist([...selection.songs])}>
 						<HugeiconsIcon icon={PlayListAddIcon} class="h-4 w-4" />
+					</Button>
+				{/if}
+				{#if onMove}
+					<Button variant="ghost" size="icon" disabled={blocked} onkeydown={onKey}
+						title={t('drop.move_to')} aria-label={t('drop.move_to')}
+						onclick={() => onMove([...selection.songs])}>
+						<HugeiconsIcon icon={SquareArrowRightDoubleIcon} class="h-4 w-4" />
 					</Button>
 				{/if}
 				{#if onRemove}

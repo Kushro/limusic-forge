@@ -727,6 +727,35 @@ export const removeTracks = async (playlistId: string, title: string, rows: RowR
 	});
 	return r && op(r);
 };
+/** What a copy or move did. `duplicates`: already in the target; `refused`: YouTube wouldn't take
+ *  them (or files on this computer bound for an account playlist). */
+export type Transferred = {
+	added: number;
+	duplicates: number;
+	refused: number;
+	removed: number;
+	op: PlaylistOp | null;
+};
+/** Copy or move rows into `target`. `source` is null for a list that isn't a playlist of yours,
+ *  which can only copy. See `playlist_tools/transfer.rs` for the duplicate policies. */
+export const transferTracks = async (args: {
+	source: { id: string; title: string } | null;
+	target: { id: string; title: string };
+	rows: RowRef[];
+	mode: 'copy' | 'move';
+	duplicates: 'skip' | 'allow' | 'consolidate';
+}) => {
+	const r = await invoke<Omit<Transferred, 'op'> & { op: RawPlaylistOp | null }>('transfer_tracks', {
+		source: args.source?.id ?? null,
+		sourceTitle: args.source?.title ?? null,
+		target: args.target.id,
+		targetTitle: args.target.title,
+		rows: args.rows.map((r) => ({ song: r.song, before: r.before })),
+		mode: args.mode,
+		duplicates: args.duplicates
+	});
+	return { ...r, op: r.op && op(r.op) };
+};
 export const playlistHistory = async () =>
 	(await invoke<RawPlaylistOp[]>('playlist_history')).map(op);
 export const undoPlaylistOp = async (id: number) =>

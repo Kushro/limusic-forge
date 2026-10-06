@@ -906,6 +906,7 @@ pub fn run() {
             commands::remove_many_from_playlist,
             commands::reorder_playlist,
             commands::remove_tracks,
+            commands::transfer_tracks,
             commands::playlist_history,
             commands::undo_playlist_op,
             commands::create_playlist,

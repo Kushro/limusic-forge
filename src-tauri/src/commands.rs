@@ -11,7 +11,7 @@ use tauri::{Emitter, Manager, State};
 
 use crate::blocked::BlockedArtist;
 use crate::playlist_tools::journal::{self, Named, OpRecord, Restore, Summary};
-use crate::playlist_tools::rows;
+use crate::playlist_tools::{rows, transfer};
 use crate::state::{
     is_local_playlist, AppState, LOCAL_PLAYLIST_PREFIX, ON_REPEAT_ID, ON_REPEAT_LIMIT,
     ON_REPEAT_WINDOW_SECS,
@@ -224,7 +224,7 @@ pub async fn get_queue(state: St<'_>) -> Result<serde_json::Value, String> {
 /// `visitor_data`) and internal blobs (`queue_json`, `queue_index`, `queue_position`) never cross
 /// into the webview: they'd otherwise ship the login credential to the renderer on every open, and
 /// the webview can't overwrite them either.
-const UI_SETTINGS: [&str; 28] = [
+const UI_SETTINGS: [&str; 30] = [
     "volume",
     "proxy",
     "quality",
@@ -253,6 +253,8 @@ const UI_SETTINGS: [&str; 28] = [
     "crossfade",
     "crossfade_secs",
     "locale",
+    "drop_mode",
+    "drop_dupes",
 ];
 
 /// Resolve the music video for `video_id` and hand back a `limusicvideo://` URL the player view
@@ -1618,6 +1620,30 @@ pub async fn remove_tracks(
     Ok(journal::record(&state, "remove", &summary, &undo))
 }
 
+/// Copy or move tracks into another playlist: a drop on a sidebar playlist, or "Move to…".
+/// `source` is the playlist they came from (`None` for a list that isn't one, which can only copy).
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn transfer_tracks(
+    state: St<'_>,
+    source: Option<String>,
+    source_title: Option<String>,
+    target: String,
+    target_title: String,
+    rows: Vec<Restore>,
+    mode: transfer::Mode,
+    duplicates: transfer::Duplicates,
+) -> Result<transfer::Transferred, String> {
+    let req = transfer::Request {
+        source: source.map(|id| Named { id, title: source_title.unwrap_or_default() }),
+        target: Named { id: target, title: target_title },
+        rows,
+        mode,
+        duplicates,
+    };
+    transfer::run(&state, req).await
+}
+
 /// The undo history, newest first.
 #[tauri::command]
 pub fn playlist_history(state: St<'_>) -> Vec<OpRecord> {
@@ -2383,5 +2409,50 @@ mod tests {
             SongItem { video_id: "abc".into(), title: "Grace".into(), ..Default::default() }
         );
         assert_eq!(row.title, played.title, "the song itself survives");
+    }
+
+    /// `set_setting` rejects any key outside `UI_SETTINGS`, and the UI swallows most of those
+    /// errors, so a key added on the UI side alone silently never persists (`drop_mode` and
+    /// `drop_dupes` did exactly that). Every literal `setSetting('<key>'` under `ui/src` has to be
+    /// on the list.
+    #[test]
+    fn ui_settings_allow_every_key_the_ui_writes() {
+        fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    walk(&path, out);
+                } else if matches!(path.extension().and_then(|e| e.to_str()), Some("ts" | "svelte"))
+                {
+                    out.push(path);
+                }
+            }
+        }
+        let root = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../ui/src"));
+        let mut files = Vec::new();
+        walk(root, &mut files);
+
+        let needle = "setSetting(";
+        let mut seen = Vec::new();
+        for file in &files {
+            let src = std::fs::read_to_string(file).unwrap();
+            for (at, _) in src.match_indices(needle) {
+                let rest = &src[at + needle.len()..];
+                let Some(quote) = rest.chars().next().filter(|c| *c == '\'' || *c == '"') else {
+                    continue; // a computed key or the definition itself, nothing literal to check
+                };
+                let rest = &rest[1..];
+                let key = &rest[..rest.find(quote).unwrap()];
+                assert!(
+                    UI_SETTINGS.contains(&key),
+                    "{} writes setting `{key}`, which set_setting rejects",
+                    file.display()
+                );
+                seen.push(key.to_owned());
+            }
+        }
+        // Guards the scan itself: a moved ui/src or a renamed call would otherwise pass vacuously.
+        assert!(seen.iter().any(|k| k == "drop_mode"), "scan found no setSetting calls");
+        assert!(seen.iter().any(|k| k == "drop_dupes"));
     }
 }
