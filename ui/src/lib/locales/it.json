@@ -84,7 +84,7 @@
 		"history": "Cronologia",
 		"add_account": "Aggiungi account",
 		"remove_account": "Rimuovi account",
-		"remove_account_title": "Rimuovere da Limusic?",
+		"remove_account_title": "Rimuovere da LiMusic Forge?",
 		"remove_account_desc": "{name} verrà rimosso solo da questo elenco. L'account Google non subirà modifiche e potrai accedere di nuovo con lo stesso account in qualsiasi momento.",
 		"saved_accounts_hint": "Seleziona un account salvato per cambiare account.",
 		"no_channels": "YouTube non ha restituito alcun canale selezionabile."
@@ -314,26 +314,26 @@
 			"language_hint": "Seleziona la lingua di visualizzazione dell'interfaccia.",
 			"shortcuts_hint": "Apri le scorciatoie da tastiera con {key}",
 			"autostart": "Avvia all'avvio del sistema",
-			"autostart_hint": "Avvia automaticamente Limusic all'accensione del sistema.",
+			"autostart_hint": "Avvia automaticamente LiMusic Forge all'accensione del sistema.",
 			"close_to_tray": "Riduci nell'area di notifica alla chiusura",
-			"close_to_tray_hint": "Mantieni Limusic in esecuzione in background quando chiudi la finestra.",
+			"close_to_tray_hint": "Mantieni LiMusic Forge in esecuzione in background quando chiudi la finestra.",
 			"discord_rpc": "Discord Rich Presence",
 			"discord_rpc_hint": "Mostra il brano attualmente in riproduzione sul tuo profilo Discord.",
 			"update_banner": "Notifiche degli aggiornamenti",
-			"update_banner_hint": "Mostra un banner quando è disponibile una nuova versione di Limusic.",
+			"update_banner_hint": "Mostra un banner quando è disponibile una nuova versione di LiMusic Forge.",
 			"proxy": "Proxy HTTP/HTTPS",
 			"proxy_hint": "Reindirizza tutte le richieste di rete attraverso un server proxy personalizzato.",
 			"proxy_placeholder": "http://host:porta (vuoto = nessuno)",
 			"stream_clients": "Client di streaming",
 			"stream_clients_hint": "Disattiva un client per ignorarlo durante la risoluzione degli stream. Sovrascritto dalla variabile d'ambiente {var}.",
 			"language_search": "Cerca lingue",
-			"language_contribute": "Aiuta a tradurre Limusic",
+			"language_contribute": "Aiuta a tradurre LiMusic Forge",
 			"track_notifications": "Notifiche dei brani",
-			"track_notifications_hint": "Mostra una notifica quando inizia un nuovo brano mentre Limusic è in background.",
+			"track_notifications_hint": "Mostra una notifica quando inizia un nuovo brano mentre LiMusic Forge è in background.",
 			"start_minimized": "Avvia ridotto nell'area di notifica",
-			"start_minimized_hint": "Quando Limusic si avvia con il sistema, rimane nell'area di notifica finché non lo apri. Aprendolo manualmente verrà sempre mostrata la finestra.",
+			"start_minimized_hint": "Quando LiMusic Forge si avvia con il sistema, rimane nell'area di notifica finché non lo apri. Aprendolo manualmente verrà sempre mostrata la finestra.",
 			"system_titlebar": "Usa la barra del titolo di sistema",
-			"system_titlebar_hint": "Consenti al desktop di disegnare la cornice della finestra e i relativi pulsanti. Limusic manterrà la propria barra degli strumenti sottostante."
+			"system_titlebar_hint": "Consenti al desktop di disegnare la cornice della finestra e i relativi pulsanti. LiMusic Forge manterrà la propria barra degli strumenti sottostante."
 		},
 		"themes": {
 			"interface_font": "Carattere interfaccia",
@@ -459,12 +459,12 @@
 			"beta": "Versioni beta",
 			"beta_hint": "Ricevi le nuove versioni con qualche giorno di anticipo rispetto a tutti gli altri. Sono testate meno a fondo. Se disattivato, manterrai la versione corrente fino al rilascio di un aggiornamento stabile successivo.",
 			"kofi": "Offrimi un caffè",
-			"kofi_hint": "Limusic è gratuito e rimarrà sempre tale. Ko-fi è a disposizione se desideri sostenere il progetto.",
+			"kofi_hint": "LiMusic Forge è gratuito e rimarrà sempre tale. Ko-fi è a disposizione se desideri sostenere il progetto.",
 			"kofi_button": "Apri Ko-fi"
 		},
 		"hotkeys": {
 			"title": "Scorciatoie globali",
-			"description": "Controlla la riproduzione con scorciatoie da tastiera personalizzabili anche quando Limusic è ridotto a icona o in esecuzione in background.",
+			"description": "Controlla la riproduzione con scorciatoie da tastiera personalizzabili anche quando LiMusic Forge è ridotto a icona o in esecuzione in background.",
 			"enable": "Attiva scorciatoie globali",
 			"enable_hint": "Le scorciatoie globali sono disattivate. Attivale per abilitare le scorciatoie a livello di sistema.",
 			"off": "Disattivato",
@@ -499,7 +499,7 @@
 			"action_toggle_repeat": "Cambia modalità di ripetizione",
 			"action_toggle_repeat_hint": "Alterna tra: disattivata, ripeti tutto, ripeti brano.",
 			"action_show_app": "Mostra applicazione",
-			"action_show_app_hint": "Porta la finestra di Limusic in primo piano."
+			"action_show_app_hint": "Porta la finestra di LiMusic Forge in primo piano."
 		},
 		"discord": {
 			"enable": "Rich Presence",
@@ -515,8 +515,8 @@
 			"status_line1": "Riga 1",
 			"status_line2": "Riga 2",
 			"app_name": "Nome applicazione",
-			"app_name_hint": "Sostituisce \"Limusic\" ovunque appaia il nome dell'applicazione. Lascia vuoto per mantenerlo originale.",
-			"app_name_placeholder": "Limusic",
+			"app_name_hint": "Sostituisce \"LiMusic Forge\" ovunque appaia il nome dell'applicazione. Lascia vuoto per mantenerlo originale.",
+			"app_name_placeholder": "LiMusic Forge",
 			"line1": "Riga 1",
 			"line1_hint": "La riga in grassetto, subito sotto l'intestazione.",
 			"line2": "Riga 2",
@@ -529,7 +529,7 @@
 			"cover": "Copertina album",
 			"cover_hint": "Mostra la copertina dell'album accanto al brano.",
 			"badge": "Badge provider",
-			"badge_hint": "Contrassegna la copertina con una piccola icona di Limusic, come accade per le schede di Spotify e Apple Music.",
+			"badge_hint": "Contrassegna la copertina con una piccola icona di LiMusic Forge, come accade per le schede di Spotify e Apple Music.",
 			"line3": "Riga 3",
 			"line3_hint": "L'ultima riga. Discord la usa anche come testo alternativo al passaggio del mouse sulla copertina, quindi richiede che la copertina dell'album sia abilitata.",
 			"timestamps": "Barra di avanzamento",
@@ -544,7 +544,7 @@
 			"button_listen": "Ascolta su YouTube Music",
 			"button_album": "Vedi album",
 			"button_artist": "Vedi artista",
-			"button_app": "Ottieni Limusic",
+			"button_app": "Ottieni LiMusic Forge",
 			"button_off": "Nessuno",
 			"preview": "Anteprima",
 			"preview_live": "In riproduzione",
@@ -682,7 +682,7 @@
 		"discord_tooltip_off": "Mostra cosa ascolti su Discord",
 		"lastfm_scrobbling_as": "Scrobbling attivo come {user}",
 		"lastfm_disconnected": "Last.fm disconnesso",
-		"lastfm_approve_in_browser": "Autorizza Limusic nel tuo browser",
+		"lastfm_approve_in_browser": "Autorizza LiMusic Forge nel tuo browser",
 		"lastfm_connecting": "Connessione a Last.fm in corso — fai clic per annullare",
 		"lastfm_scrobble_to": "Invia scrobble a Last.fm",
 		"disconnect": "Disconnetti"
@@ -919,7 +919,7 @@
 	"errors": {
 		"unreachable": "Impossibile raggiungere YouTube Music. Controlla la tua connessione.",
 		"offline_title": "Nessuna connessione",
-		"offline_body": "Limusic non riesce a raggiungere YouTube Music. Controlla la tua connessione Internet e riprova.",
+		"offline_body": "LiMusic Forge non riesce a raggiungere YouTube Music. Controlla la tua connessione Internet e riprova.",
 		"generic_title": "Si è verificato un errore"
 	}
 }

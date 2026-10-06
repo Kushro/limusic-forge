@@ -56,7 +56,7 @@ const SECRET_ENV_KEYS: &[&str] =
 pub fn report(app: &AppHandle, db: &Db) -> String {
     let mut out = String::new();
     out.push_str(
-        "# Limusic diagnostics. Paste this into your bug report.\n\
+        "# LiMusic Forge diagnostics. Paste this into your bug report.\n\
          # Cookies, tokens, signed URLs, file paths and IP addresses have been removed.\n\n",
     );
     out.push_str(&redact(&header(app, db)));
@@ -88,7 +88,7 @@ fn header(app: &AppHandle, db: &Db) -> String {
     let mut out = String::new();
     let _ = writeln!(
         out,
-        "Limusic {} ({} {}, {})",
+        "LiMusic Forge {} ({} {}, {})",
         env!("CARGO_PKG_VERSION"),
         std::env::consts::OS,
         std::env::consts::ARCH,
@@ -334,14 +334,14 @@ mod tests {
     #[test]
     fn redaction_leaves_the_header_readable() {
         let header = concat!(
-            "Limusic 0.7.3 (linux x86_64, AppImage)\n",
+            "LiMusic Forge 0.7.3 (linux x86_64, AppImage)\n",
             "System: Fedora Linux 44 (KDE Plasma), kernel 7.1.8-200.fc44.x86_64, wayland session on KDE\n",
             "WebKitGTK: 2.50.6, NVIDIA: yes\n",
             "Signed in: yes | Proxy: no | Quality: HIGH | Normalize: yes | Music videos: yes | Disabled clients: none\n",
         );
         let out = redact(header);
         for kept in [
-            "Limusic 0.7.3",
+            "LiMusic Forge 0.7.3",
             "Fedora Linux 44",
             "7.1.8-200.fc44.x86_64",
             "WebKitGTK: 2.50.6",

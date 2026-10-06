@@ -46,7 +46,7 @@ use discord_rich_presence::{activity, DiscordIpc, DiscordIpcClient};
 use innertube::SongItem;
 
 /// Discord application id (a snowflake — digits only). **Must be set before rich presence does
-/// anything.** Register an app named "Limusic" at <https://discord.com/developers/applications> and
+/// anything.** Register an app named "LiMusic Forge" at <https://discord.com/developers/applications> and
 /// paste its Application ID here — the app's *name* is what renders after "Listening to", and its
 /// icon is the fallback artwork. Nothing else in the portal needs configuring: no bot user, no
 /// OAuth redirect, no client secret. (Metrolist needs all of that only because Android has no
@@ -103,7 +103,7 @@ const MAX_BUTTON_URL: usize = 512;
 pub struct RpcConfig {
     /// Which slot Discord renders after "Listening to": `app` | `line1` | `line2`.
     status_line: String,
-    /// Replaces the registered application name in that slot. Empty keeps "Limusic".
+    /// Replaces the registered application name in that slot. Empty keeps "LiMusic Forge".
     app_name: String,
     /// What the card's first line (`details`) carries: `title` | `artist` | `album`.
     line1: String,
@@ -653,7 +653,7 @@ impl Presence {
             // Only ever alongside the artwork: `small_image` on its own is not a badge, it becomes
             // the card's image.
             if cfg.badge {
-                let name = if cfg.app_name.is_empty() { "Limusic" } else { &cfg.app_name };
+                let name = if cfg.app_name.is_empty() { "LiMusic Forge" } else { &cfg.app_name };
                 assets = assets.small_image(BADGE_URL).small_text(field(name));
             }
             act = act.assets(assets);
@@ -802,7 +802,7 @@ fn button_for(kind: &str, t: &Track) -> Option<activity::Button<'static>> {
         "listen" => ("Listen on YouTube Music", link_for("title", t)?),
         "album" => ("View album", link_for("album", t)?),
         "artist" => ("View artist", link_for("artist", t)?),
-        "app" => ("Get Limusic", REPO_URL.to_owned()),
+        "app" => ("Get LiMusic Forge", REPO_URL.to_owned()),
         _ => return None,
     };
     (url.len() <= MAX_BUTTON_URL).then(|| activity::Button::new(label, url))

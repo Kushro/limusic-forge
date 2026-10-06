@@ -112,7 +112,7 @@
 	"errors": {
 		"unreachable": "YouTube Musicに接続できません。通信環境を確認してください。",
 		"offline_title": "接続されていません",
-		"offline_body": "LimusicからYouTube Musicに接続できません。インターネット接続を確認してから、もう一度お試しください。",
+		"offline_body": "LiMusic ForgeからYouTube Musicに接続できません。インターネット接続を確認してから、もう一度お試しください。",
 		"generic_title": "問題が発生しました"
 	},
 	"nav": {
@@ -132,7 +132,7 @@
 		"sign_in_hint": "Googleアカウントでログインすると、YouTube Musicのライブラリやプレイリストを利用できます。",
 		"add_account": "アカウントを追加",
 		"remove_account": "アカウントを削除",
-		"remove_account_title": "Limusicから削除しますか？",
+		"remove_account_title": "LiMusic Forgeから削除しますか？",
 		"remove_account_desc": "{name} はこの一覧からのみ削除されます。Googleアカウント自体には影響せず、いつでも再度ログインできます。",
 		"saved_accounts_hint": "保存されたアカウントを選択して切り替えます。",
 		"history": "履歴",
@@ -340,7 +340,7 @@
 			"hotkeys_hint": "システム全体で使える再生コントロールのショートカット。",
 			"data": "データとストレージ",
 			"data_hint": "ネットワークとキャッシュファイル。",
-			"about": "Limusicについて",
+			"about": "LiMusic Forgeについて",
 			"about_hint": "バージョン、アップデート情報、更新履歴。"
 		},
 		"sections": {
@@ -371,14 +371,14 @@
 			"language": "表示言語",
 			"language_hint": "インターフェースの表示言語を選択します。",
 			"language_search": "言語を検索",
-			"language_contribute": "Limusicの翻訳に参加する",
+			"language_contribute": "LiMusic Forgeの翻訳に参加する",
 			"shortcuts_hint": "{key} でキーボードショートカットを開く",
 			"autostart": "システム起動時に自動実行",
-			"autostart_hint": "パソコンの起動時にLimusicを自動的に開始します。",
+			"autostart_hint": "パソコンの起動時にLiMusic Forgeを自動的に開始します。",
 			"close_to_tray": "システムトレイに最小化",
-			"close_to_tray_hint": "ウィンドウを閉じた後もバックグラウンドでLimusicを実行し続けます。",
+			"close_to_tray_hint": "ウィンドウを閉じた後もバックグラウンドでLiMusic Forgeを実行し続けます。",
 			"track_notifications": "曲の通知",
-			"track_notifications_hint": "Limusicがバックグラウンドにあるときに新しい曲が始まると通知を表示します。",
+			"track_notifications_hint": "LiMusic Forgeがバックグラウンドにあるときに新しい曲が始まると通知を表示します。",
 			"start_minimized": "システム起動時にトレイに最小化して起動",
 			"start_minimized_hint": "自動起動時、開くまでトレイに格納されます。手動で開いた場合は通常通りウィンドウが表示されます。",
 			"system_titlebar": "システムのタイトルバーを使用",
@@ -386,7 +386,7 @@
 			"discord_rpc": "Discordリッチプレゼンス",
 			"discord_rpc_hint": "Discordのプロフィールに現在再生中の曲を表示します。",
 			"update_banner": "アップデート通知",
-			"update_banner_hint": "Limusicの新しいバージョンが利用可能になったときにバナーを表示します。",
+			"update_banner_hint": "LiMusic Forgeの新しいバージョンが利用可能になったときにバナーを表示します。",
 			"proxy": "HTTP/HTTPSプロキシ",
 			"proxy_hint": "すべてのネットワークリクエストを指定したプロキシサーバー経由でルーティングします。",
 			"proxy_placeholder": "http://host:port (空欄 = なし)",
@@ -488,7 +488,7 @@
 		},
 		"hotkeys": {
 			"title": "グローバルホットキー",
-			"description": "Limusicが最小化されている時やバックグラウンドにある時でも、カスタマイズ可能なショートカットキーで再生を操作できます。",
+			"description": "LiMusic Forgeが最小化されている時やバックグラウンドにある時でも、カスタマイズ可能なショートカットキーで再生を操作できます。",
 			"enable": "グローバルホットキーを有効化",
 			"enable_hint": "グローバルホットキーは無効です。オンにするとシステム全体でショートカットが機能します。",
 			"off": "オフ",
@@ -523,7 +523,7 @@
 			"action_toggle_repeat": "リピートの切り替え",
 			"action_toggle_repeat_hint": "リピートモードを切り替えます: オフ、全曲、1曲。",
 			"action_show_app": "アプリを表示",
-			"action_show_app_hint": "Limusicのウィンドウを最前面に表示します。"
+			"action_show_app_hint": "LiMusic Forgeのウィンドウを最前面に表示します。"
 		},
 		"data": {
 			"clear_cache": "画像とストリームのキャッシュを消去",
@@ -556,7 +556,7 @@
 			"report_issue_hint": "ブラウザでGitHubを開き、バージョンとシステム情報を事前入力します。",
 			"report_issue_button": "報告する",
 			"kofi": "Ko-fiで開発者を支援",
-			"kofi_hint": "Limusicは完全無料です。もし応援していただける場合は、Ko-fiから支援できます。",
+			"kofi_hint": "LiMusic Forgeは完全無料です。もし応援していただける場合は、Ko-fiから支援できます。",
 			"kofi_button": "Ko-fiを開く"
 		},
 		"discord": {
@@ -573,8 +573,8 @@
 			"status_line1": "1行目",
 			"status_line2": "2行目",
 			"app_name": "アプリ名",
-			"app_name_hint": "「Limusic」と表示される箇所を置き換えます。空欄にするとデフォルトのままになります。",
-			"app_name_placeholder": "Limusic",
+			"app_name_hint": "「LiMusic Forge」と表示される箇所を置き換えます。空欄にするとデフォルトのままになります。",
+			"app_name_placeholder": "LiMusic Forge",
 			"line1": "1行目",
 			"line1_hint": "ヘッダーのすぐ下の太字の行。",
 			"line2": "2行目",
@@ -587,7 +587,7 @@
 			"cover": "アルバムアート",
 			"cover_hint": "トラックの横にジャケット写真を表示します。",
 			"badge": "プロバイダーバッジ",
-			"badge_hint": "SpotifyやApple Musicのように、アートワークに小さなLimusicアイコンを付けます。",
+			"badge_hint": "SpotifyやApple Musicのように、アートワークに小さなLiMusic Forgeアイコンを付けます。",
 			"line3": "3行目",
 			"line3_hint": "最後の行です。Discordではアートワークにカーソルを合わせた時のホバーテキストとしても使用されるため、アルバムアートをオンにする必要があります。",
 			"timestamps": "プログレスバー",
@@ -602,7 +602,7 @@
 			"button_listen": "YouTube Musicで聴く",
 			"button_album": "アルバムを表示",
 			"button_artist": "アーティストを表示",
-			"button_app": "Limusicを入手",
+			"button_app": "LiMusic Forgeを入手",
 			"button_off": "なし",
 			"preview": "プレビュー",
 			"preview_live": "再生中",
@@ -740,7 +740,7 @@
 		"discord_tooltip_off": "再生中の曲をDiscordに表示",
 		"lastfm_scrobbling_as": "{user} としてScrobble中",
 		"lastfm_disconnected": "Last.fm 未接続",
-		"lastfm_approve_in_browser": "ブラウザでLimusicを承認してください",
+		"lastfm_approve_in_browser": "ブラウザでLiMusic Forgeを承認してください",
 		"lastfm_connecting": "Last.fmに接続中 — クリックしてキャンセル",
 		"lastfm_scrobble_to": "Last.fmにScrobble",
 		"disconnect": "連携を解除"
