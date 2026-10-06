@@ -203,7 +203,7 @@
 		"empty_signed_out": "Sign in, or make a playlist on this device, and its songs show up here.",
 		"alerts_one": "1 track needs a look",
 		"alerts": "{count} tracks need a look",
-		"kind_gone": "Gone",
+		"kind_removed": "Removed",
 		"kind_unavailable": "Unavailable",
 		"find": "Find it again",
 		"dismiss": "Dismiss"
@@ -322,7 +322,8 @@
 		"unreachable": "Can't reach YouTube Music. Check your connection.",
 		"offline_title": "No connection",
 		"offline_body": "LiMusic Forge can't reach YouTube Music. Check your internet connection, then try again.",
-		"generic_title": "Something went wrong"
+		"generic_title": "Something went wrong",
+		"db_upgrade_failed": "The database couldn't be upgraded; monitor, backups and downloads may not work. Details are in the log."
 	},
 	"nav": {
 		"home": "Home",

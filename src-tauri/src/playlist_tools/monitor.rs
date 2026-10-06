@@ -36,7 +36,7 @@ pub fn diff(before: &[(String, Option<String>)], now: &[SongItem]) -> Vec<Change
     let mut out: Vec<Change> = before
         .iter()
         .filter(|(v, _)| !present.contains(v.as_str()))
-        .map(|(v, j)| Change { video_id: v.clone(), kind: "gone", song: parse(j) })
+        .map(|(v, j)| Change { video_id: v.clone(), kind: "removed", song: parse(j) })
         .collect();
     let mut seen = HashSet::new();
     for s in now.iter().filter(|s| s.unavailable) {
@@ -83,7 +83,7 @@ mod tests {
         assert_eq!(
             got,
             [
-                ("a".to_string(), "gone", true),
+                ("a".to_string(), "removed", true),
                 ("b".to_string(), "unavailable", true), // greyed out since
                 ("d".to_string(), "unavailable", true), // no metadata last time: say it
             ]

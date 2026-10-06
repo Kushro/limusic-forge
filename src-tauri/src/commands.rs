@@ -377,6 +377,13 @@ pub async fn get_settings(state: St<'_>) -> Result<serde_json::Value, String> {
     Ok(serde_json::Value::Object(map))
 }
 
+/// Why the database's schema upgrade failed at startup, or `None`. The app runs at the old
+/// schema then (the monitor, backups and downloads may not work); the UI warns about it once.
+#[tauri::command]
+pub fn db_migration_error(state: St<'_>) -> Option<String> {
+    state.db.migration_error()
+}
+
 #[tauri::command]
 pub async fn set_setting(
     app: tauri::AppHandle,

@@ -4,7 +4,7 @@
 use std::sync::Mutex;
 
 use md5::{Digest, Md5};
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 
 /// Clearing the lyrics cache spares songs whose source was picked by hand in the lyrics footer (or
 /// their timing nudged): those are the user's choices, not a cache.
@@ -12,7 +12,9 @@ use rusqlite::Connection;
 const CLEAR_LYRICS: &str =
     "DELETE FROM lyrics_cache WHERE lyrics IS NULL OR json_extract(lyrics, '$.pinned') IS NOT 1";
 
-pub struct Db(Mutex<Connection>);
+/// The connection, and why the schema migration failed on open, if it did (see
+/// [`Db::migration_error`]).
+pub struct Db(Mutex<Connection>, Option<String>);
 
 /// The stored-account key (multi-account support): a stable per-Google-account identifier derived
 /// from the long-lived `SAPISID` cookie value, the one piece of the jar Google does not rotate.
@@ -160,6 +162,8 @@ impl Db {
         // is a query rather than a `pragma_update`.
         let _ = conn.query_row("PRAGMA journal_mode=WAL", [], |r| r.get::<_, String>(0));
         let _ = conn.pragma_update(None, "synchronous", "NORMAL");
+        // `downloads.video_id` references `videos`; SQLite only holds it to that when asked.
+        let _ = conn.pragma_update(None, "foreign_keys", "ON");
         conn.execute_batch(
             r#"
             CREATE TABLE IF NOT EXISTS settings (
@@ -255,18 +259,7 @@ impl Db {
                 created_at   INTEGER NOT NULL,
                 undone_at    INTEGER
             );
-            -- Tracks that went missing from your playlists, or that YouTube can no longer play,
-            -- found by comparing a sync with the one before (`playlist_tools::monitor`). One row per
-            -- playlist, track and kind; dismissing keeps the row so the same alert never returns.
-            CREATE TABLE IF NOT EXISTS playlist_alert (
-                playlist_id TEXT NOT NULL,
-                video_id    TEXT NOT NULL,
-                kind        TEXT NOT NULL,
-                song_json   TEXT,
-                at          INTEGER NOT NULL,
-                dismissed   INTEGER NOT NULL DEFAULT 0,
-                PRIMARY KEY (playlist_id, video_id, kind)
-            ) WITHOUT ROWID;
+            -- `playlist_alert` and the monitor's other tables are created by `migrate_v3`.
             -- Spotify import (#375): what each Spotify track turned out to be on YouTube Music,
             -- keyed by Spotify's track id. A cache, apart from the `manual` rows: those are the
             -- user's own picks, which every later import and "Update from Spotify" reuses.
@@ -349,6 +342,19 @@ impl Db {
         let _ = conn.execute("ALTER TABLE local_playlist_tracks ADD COLUMN position INTEGER", []);
         let _ = conn
             .execute("UPDATE local_playlist_tracks SET position = id WHERE position IS NULL", []);
+        // v3: the monitor's history (snapshots, runs, per-playlist sync), alerts with an id, a
+        // dedupe key and a seen flag, `first_seen`, and the download queue. After the
+        // `song_json` ALTER above, which the rebuilt index rows rely on. `user_version` alone is
+        // not trusted: upstream LiMusic numbers its own schema with it, so a file it raised to 3
+        // (or past it) on its own and then copied over would skip the migration. The artefact
+        // check catches that; `migrate_v3` is idempotent and never lowers the version.
+        let mut migration_error = None;
+        if version < 3 || !v3_complete(&conn) {
+            if let Err(e) = migrate_v3(&conn) {
+                tracing::error!("schema v3 migration failed, rolled back: {e}");
+                migration_error = Some(format!("schema v3 migration failed: {e}"));
+            }
+        }
         // One-time migration of the pre-multi-account single session into `accounts`. The legacy
         // settings rows stay in place as projections of the active account (see `StoredAccount`).
         let legacy_cookie = conn
@@ -442,7 +448,13 @@ impl Db {
                 let _ = tx.commit();
             }
         }
-        Ok(Db(Mutex::new(conn)))
+        Ok(Db(Mutex::new(conn), migration_error))
+    }
+
+    /// Why the schema migration failed when this file was opened, or `None` if it did not (or had
+    /// nothing to do). The file still opens at its old schema; the next launch tries again.
+    pub fn migration_error(&self) -> Option<String> {
+        self.1.clone()
     }
 
     // --- settings ---------------------------------------------------------------------------
@@ -902,26 +914,26 @@ impl Db {
     // "saved" mark on its first row instead of after a round-trip per song.
 
     /// Replace one playlist's tracks. Delete-then-insert, not an upsert: a removal made on another
-    /// device only disappears if the rows the crawl no longer saw go away with it.
+    /// device only disappears if the rows the crawl no longer saw go away with it. `first_seen`
+    /// survives the rewrite (see [`replace_playlist_rows`]).
     pub fn set_playlist_tracks(&self, playlist_id: &str, video_ids: &[String]) {
+        let rows: Vec<(&str, Option<&str>)> =
+            video_ids.iter().map(|v| (v.as_str(), None)).collect();
         let mut conn = self.0.lock().unwrap();
         let Ok(tx) = conn.transaction() else { return };
-        let _ = tx.execute("DELETE FROM playlist_track WHERE playlist_id = ?1", [playlist_id]);
-        for video_id in video_ids {
-            let _ = tx.execute(
-                "INSERT OR IGNORE INTO playlist_track(playlist_id, video_id) VALUES(?1, ?2)",
-                [playlist_id, video_id.as_str()],
-            );
+        if replace_playlist_rows(&tx, playlist_id, &rows, now_secs()).is_ok() {
+            let _ = tx.commit();
         }
-        let _ = tx.commit();
     }
 
     /// One track added to one playlist, so an add made here shows its mark without a re-crawl.
+    /// Added here, so it was first seen now; a row the index already had keeps its date.
     pub fn add_playlist_track(&self, playlist_id: &str, video_id: &str) {
         let conn = self.0.lock().unwrap();
         let _ = conn.execute(
-            "INSERT OR IGNORE INTO playlist_track(playlist_id, video_id) VALUES(?1, ?2)",
-            [playlist_id, video_id],
+            "INSERT OR IGNORE INTO playlist_track(playlist_id, video_id, first_seen) \
+             VALUES(?1, ?2, ?3)",
+            rusqlite::params![playlist_id, video_id, now_secs()],
         );
     }
 
@@ -933,19 +945,24 @@ impl Db {
         );
     }
 
+    /// Forget one playlist's index rows, alerts and sync record. Its snapshots stay: they are the
+    /// playlist's history (and its backups' source), which outlives the playlist itself.
     pub fn forget_playlist(&self, playlist_id: &str) {
         let conn = self.0.lock().unwrap();
         let _ = conn.execute("DELETE FROM playlist_track WHERE playlist_id = ?1", [playlist_id]);
         let _ = conn.execute("DELETE FROM playlist_alert WHERE playlist_id = ?1", [playlist_id]);
+        let _ = conn.execute("DELETE FROM playlist_sync WHERE playlist_id = ?1", [playlist_id]);
     }
 
     /// Drop every playlist the crawl no longer saw: deleted, unsaved, or no longer owned. An
     /// empty list means nothing was indexed, which is the same thing as an empty index.
+    /// Snapshots are kept, as in [`Db::forget_playlist`].
     pub fn retain_playlists(&self, keep: &[String]) {
         let conn = self.0.lock().unwrap();
         if keep.is_empty() {
             let _ = conn.execute("DELETE FROM playlist_track", []);
             let _ = conn.execute(ACCOUNT_ALERTS_DELETE, []);
+            let _ = conn.execute(ACCOUNT_SYNC_DELETE, []);
             return;
         }
         let holes = vec!["?"; keep.len()].join(",");
@@ -955,6 +972,10 @@ impl Db {
         );
         let _ = conn.execute(
             &format!("{ACCOUNT_ALERTS_DELETE} AND playlist_id NOT IN ({holes})"),
+            rusqlite::params_from_iter(keep.iter()),
+        );
+        let _ = conn.execute(
+            &format!("{ACCOUNT_SYNC_DELETE} AND playlist_id NOT IN ({holes})"),
             rusqlite::params_from_iter(keep.iter()),
         );
     }
@@ -986,11 +1007,13 @@ impl Db {
     }
 
     /// The index is per-account, so signing out or switching channel empties it. The playlists on
-    /// this machine belong to no account and are not in that table.
+    /// this machine belong to no account and are not in that table. Snapshots are kept: they are
+    /// history, filed under the account they were taken with.
     pub fn clear_playlist_index(&self) {
         let conn = self.0.lock().unwrap();
         let _ = conn.execute("DELETE FROM playlist_track", []);
         let _ = conn.execute(ACCOUNT_ALERTS_DELETE, []);
+        let _ = conn.execute(ACCOUNT_SYNC_DELETE, []);
     }
 
     // --- songs in the index, and the monitor's alerts (playlist_tools::monitor) ---------------
@@ -1010,28 +1033,34 @@ impl Db {
         out
     }
 
-    /// Replace one playlist's index rows with these songs, metadata included.
+    /// Replace one playlist's index rows with these songs, metadata included. `first_seen`
+    /// survives (see [`replace_playlist_rows`]).
     pub fn set_playlist_songs(&self, playlist_id: &str, songs: &[(String, String)]) {
-        let mut conn = self.0.lock().unwrap();
-        let Ok(tx) = conn.transaction() else { return };
-        let _ = tx.execute("DELETE FROM playlist_track WHERE playlist_id = ?1", [playlist_id]);
-        for (video_id, json) in songs {
-            let _ = tx.execute(
-                "INSERT OR IGNORE INTO playlist_track(playlist_id, video_id, song_json) \
-                 VALUES(?1, ?2, ?3)",
-                [playlist_id, video_id.as_str(), json.as_str()],
-            );
-        }
-        let _ = tx.commit();
+        self.set_playlist_songs_at(playlist_id, songs, now_secs());
     }
 
-    /// One track now in a playlist, with its metadata (an add made in this app).
+    /// [`Db::set_playlist_songs`] with the clock passed in. A track new to the playlist is first
+    /// seen `now` only when the playlist was synced before; on its first read nobody knows when
+    /// its tracks arrived, so they stay NULL. Write the index before `set_playlist_sync`.
+    pub fn set_playlist_songs_at(&self, playlist_id: &str, songs: &[(String, String)], now: i64) {
+        let rows: Vec<(&str, Option<&str>)> =
+            songs.iter().map(|(v, j)| (v.as_str(), Some(j.as_str()))).collect();
+        let mut conn = self.0.lock().unwrap();
+        let Ok(tx) = conn.transaction() else { return };
+        if replace_playlist_rows(&tx, playlist_id, &rows, now).is_ok() {
+            let _ = tx.commit();
+        }
+    }
+
+    /// One track now in a playlist, with its metadata (an add made in this app), first seen now
+    /// unless the index already had it.
     pub fn put_playlist_song(&self, playlist_id: &str, video_id: &str, json: &str) {
         let conn = self.0.lock().unwrap();
         let _ = conn.execute(
-            "INSERT INTO playlist_track(playlist_id, video_id, song_json) VALUES(?1, ?2, ?3) \
+            "INSERT INTO playlist_track(playlist_id, video_id, song_json, first_seen) \
+             VALUES(?1, ?2, ?3, ?4) \
              ON CONFLICT(playlist_id, video_id) DO UPDATE SET song_json = excluded.song_json",
-            [playlist_id, video_id, json],
+            rusqlite::params![playlist_id, video_id, json, now_secs()],
         );
     }
 
@@ -1053,7 +1082,9 @@ impl Db {
         out
     }
 
-    /// Record an alert unless the same one is already there (dismissed ones included).
+    /// Record an alert unless the same one is already there (dismissed ones included): one per
+    /// playlist, track and kind, keyed by [`alert_dedupe_key`] with no scope. The pre-v3 `gone`
+    /// is filed as `removed`.
     pub fn add_playlist_alert(
         &self,
         playlist_id: &str,
@@ -1062,12 +1093,18 @@ impl Db {
         song_json: Option<&str>,
         at: i64,
     ) {
-        let conn = self.0.lock().unwrap();
-        let _ = conn.execute(
-            "INSERT OR IGNORE INTO playlist_alert(playlist_id, video_id, kind, song_json, at) \
-             VALUES(?1, ?2, ?3, ?4, ?5)",
-            rusqlite::params![playlist_id, video_id, kind, song_json, at],
-        );
+        let kind = alert_kind(kind);
+        let key = alert_dedupe_key(playlist_id, video_id, kind, None);
+        self.insert_alert(&NewAlert {
+            playlist_id,
+            video_id,
+            kind,
+            song_json,
+            at,
+            from_pos: None,
+            to_pos: None,
+            dedupe_key: &key,
+        });
     }
 
     /// The alerts not dismissed, newest first: `(playlist id, videoId, kind, song_json, at)`.
@@ -1076,7 +1113,7 @@ impl Db {
         let mut out = Vec::new();
         if let Ok(mut stmt) = conn.prepare(
             "SELECT playlist_id, video_id, kind, song_json, at FROM playlist_alert \
-             WHERE dismissed = 0 ORDER BY at DESC, playlist_id, video_id",
+             WHERE dismissed = 0 ORDER BY at DESC, playlist_id, video_id, id DESC",
         ) {
             if let Ok(rows) =
                 stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))
@@ -1087,12 +1124,14 @@ impl Db {
         out
     }
 
+    /// Dismiss every alert of this kind about this track in this playlist (a repeated event can
+    /// have several rows). Dismissed is seen too.
     pub fn dismiss_playlist_alert(&self, playlist_id: &str, video_id: &str, kind: &str) {
         let conn = self.0.lock().unwrap();
         let _ = conn.execute(
-            "UPDATE playlist_alert SET dismissed = 1 \
+            "UPDATE playlist_alert SET dismissed = 1, seen = 1 \
              WHERE playlist_id = ?1 AND video_id = ?2 AND kind = ?3",
-            [playlist_id, video_id, kind],
+            [playlist_id, video_id, alert_kind(kind)],
         );
     }
 
@@ -1513,6 +1552,11 @@ pub struct LocalPlaylist {
 const ACCOUNT_ALERTS_DELETE: &str =
     "DELETE FROM playlist_alert WHERE playlist_id NOT LIKE 'LOCALPLAYLIST:%'";
 
+/// The account playlists' sync records, cleared along with their alerts. Snapshots are not: they
+/// are history, and outlive both the playlist and the sign-in.
+const ACCOUNT_SYNC_DELETE: &str =
+    "DELETE FROM playlist_sync WHERE playlist_id NOT LIKE 'LOCALPLAYLIST:%'";
+
 /// How many playlist-tool operations the journal keeps (the undo history's length).
 pub const PLAYLIST_OPS_KEPT: i64 = 20;
 
@@ -1528,6 +1572,977 @@ pub struct PlaylistOpRow {
     pub created_at: i64,
     pub undone_at: Option<i64>,
 }
+
+// --- schema v3: the monitor's history, alerts with ids, downloads --------------------------------
+
+/// `playlist_alert` as v3 has it, under `name` (the migration builds it beside the old one).
+/// `dedupe_key` decides whether an event is new (see [`alert_dedupe_key`]); `from_pos`/`to_pos`
+/// are the positions a `moved` row went between.
+fn alert_table_sql(name: &str) -> String {
+    format!(
+        "CREATE TABLE IF NOT EXISTS {name} (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            dedupe_key  TEXT UNIQUE,
+            playlist_id TEXT NOT NULL,
+            video_id    TEXT NOT NULL,
+            kind        TEXT NOT NULL
+                        CHECK (kind IN ('added', 'removed', 'moved', 'unavailable', 'restored')),
+            song_json   TEXT,
+            at          INTEGER NOT NULL,
+            from_pos    INTEGER,
+            to_pos      INTEGER,
+            seen        INTEGER NOT NULL DEFAULT 0 CHECK (seen IN (0, 1)),
+            dismissed   INTEGER NOT NULL DEFAULT 0 CHECK (dismissed IN (0, 1))
+        );"
+    )
+}
+
+/// Copies the pre-v3 alerts (keyed by playlist, track and kind) into `playlist_alert_v3` and
+/// swaps it in. The dedupe key is that same triple, so no alert already filed can come back;
+/// `gone` becomes `removed`, and a dismissed row counts as seen.
+const LEGACY_ALERTS_COPY: &str = "
+    INSERT OR IGNORE INTO playlist_alert_v3(dedupe_key, playlist_id, video_id, kind, song_json,
+        at, seen, dismissed)
+    SELECT playlist_id || char(31) || video_id || char(31) || k, playlist_id, video_id, k,
+        song_json, at, dismissed != 0, dismissed != 0
+    FROM (SELECT *, CASE kind WHEN 'gone' THEN 'removed' ELSE kind END AS k FROM playlist_alert)
+    WHERE k IN ('added', 'removed', 'moved', 'unavailable', 'restored')
+    ORDER BY at, playlist_id, video_id;
+    DROP TABLE playlist_alert;
+    ALTER TABLE playlist_alert_v3 RENAME TO playlist_alert;";
+
+/// Everything else v3 adds. Epoch seconds, except `downloads`, whose dates are RFC 3339 text as
+/// PlaylistForge stores them.
+const V3_TABLES: &str = r#"
+    CREATE INDEX IF NOT EXISTS playlist_alert_pl ON playlist_alert(playlist_id, at DESC);
+    CREATE INDEX IF NOT EXISTS playlist_alert_unseen ON playlist_alert(seen, dismissed);
+    -- One playlist's content each time it changed (`put_snapshot_if_changed`). Kept when the
+    -- playlist is forgotten or the account signs out: it is the playlist's history.
+    CREATE TABLE IF NOT EXISTS playlist_snapshot (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        playlist_id TEXT NOT NULL,
+        account_id  TEXT,
+        title       TEXT,
+        taken_at    INTEGER NOT NULL,
+        item_count  INTEGER NOT NULL,
+        hash        TEXT NOT NULL,
+        items_json  TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS playlist_snapshot_pl
+        ON playlist_snapshot(playlist_id, taken_at DESC);
+    CREATE TABLE IF NOT EXISTS monitor_runs (
+        id               INTEGER PRIMARY KEY AUTOINCREMENT,
+        started_at       INTEGER NOT NULL,
+        finished_at      INTEGER NOT NULL,
+        "trigger"        TEXT NOT NULL CHECK ("trigger" IN ('manual_ui', 'scheduler', 'headless')),
+        outcome          TEXT NOT NULL
+                         CHECK (outcome IN ('ok', 'partial', 'failed', 'lock_busy', 'cancelled')),
+        playlists_ok     INTEGER NOT NULL DEFAULT 0,
+        playlists_failed INTEGER NOT NULL DEFAULT 0,
+        alerts_new       INTEGER NOT NULL DEFAULT 0,
+        units_spent      INTEGER NOT NULL DEFAULT 0,
+        detail_json      TEXT NOT NULL DEFAULT '{}'
+    );
+    CREATE INDEX IF NOT EXISTS monitor_runs_started ON monitor_runs(started_at DESC);
+    -- The last complete sync of each account playlist and what it found.
+    CREATE TABLE IF NOT EXISTS playlist_sync (
+        playlist_id TEXT PRIMARY KEY,
+        synced_at   INTEGER NOT NULL,
+        item_count  INTEGER NOT NULL,
+        added       INTEGER NOT NULL DEFAULT 0,
+        removed     INTEGER NOT NULL DEFAULT 0,
+        moved       INTEGER NOT NULL DEFAULT 0
+    );
+    CREATE TABLE IF NOT EXISTS videos (
+        video_id   TEXT PRIMARY KEY,
+        title      TEXT,
+        channel    TEXT,
+        duration_s INTEGER,
+        updated_at INTEGER NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS downloads (
+        video_id          TEXT NOT NULL REFERENCES videos(video_id),
+        format            TEXT NOT NULL CHECK (format IN ('audio', 'video')),
+        status            TEXT NOT NULL
+                          CHECK (status IN ('queued', 'running', 'available', 'error', 'missing')),
+        requested_quality TEXT NOT NULL,
+        thumbnail_mode    TEXT NOT NULL DEFAULT 'embed',
+        dest_dir          TEXT NOT NULL,
+        file_path         TEXT,
+        file_size_bytes   INTEGER,
+        container         TEXT,
+        error             TEXT,
+        attempts          INTEGER NOT NULL DEFAULT 0,
+        created_at        TEXT NOT NULL,
+        completed_at      TEXT,
+        last_verified_at  TEXT,
+        PRIMARY KEY (video_id, format)
+    );
+    CREATE INDEX IF NOT EXISTS idx_downloads_status ON downloads(status);
+"#;
+
+/// Schema v3, in one transaction: a failure leaves the file exactly as v2 had it, and the next
+/// launch tries again. Every step looks before it acts, so running it twice changes nothing.
+fn migrate_v3(conn: &Connection) -> rusqlite::Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    // NULL = in the playlist since before anything kept track.
+    if !has_column(&tx, "playlist_track", "first_seen")? {
+        tx.execute("ALTER TABLE playlist_track ADD COLUMN first_seen INTEGER", [])?;
+    }
+    let legacy_alerts = has_column(&tx, "playlist_alert", "kind")?
+        && !(has_column(&tx, "playlist_alert", "dedupe_key")?
+            && has_column(&tx, "playlist_alert", "seen")?);
+    if legacy_alerts {
+        let rebuild = format!("{}{LEGACY_ALERTS_COPY}", alert_table_sql("playlist_alert_v3"));
+        tx.execute_batch(&rebuild)?;
+    }
+    tx.execute_batch(&alert_table_sql("playlist_alert"))?;
+    tx.execute_batch(V3_TABLES)?;
+    // Only ever raised: a file some later schema already numbered past 3 keeps its number.
+    let version: i64 = tx.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+    if version < 3 {
+        tx.execute_batch("PRAGMA user_version = 3")?;
+    }
+    tx.commit()
+}
+
+/// Whether every table and column v3 adds is there. Cheap (a handful of catalog lookups), so it
+/// runs on every open; any lookup error counts as "not complete" and lets `migrate_v3` decide.
+fn v3_complete(conn: &Connection) -> bool {
+    let tables = ["playlist_snapshot", "monitor_runs", "playlist_sync", "videos", "downloads"];
+    let columns = [
+        ("playlist_alert", "dedupe_key"),
+        ("playlist_alert", "seen"),
+        ("playlist_track", "first_seen"),
+    ];
+    let has_table = |name: &str| {
+        conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+            [name],
+            |r| r.get::<_, i64>(0),
+        )
+        .is_ok_and(|n| n > 0)
+    };
+    tables.iter().all(|t| has_table(t))
+        && columns.iter().all(|(t, c)| has_column(conn, t, c).unwrap_or(false))
+}
+
+fn has_column(conn: &Connection, table: &str, column: &str) -> rusqlite::Result<bool> {
+    conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info(?1) WHERE name = ?2",
+        [table, column],
+        |r| r.get::<_, i64>(0),
+    )
+    .map(|n| n > 0)
+}
+
+/// Rewrite one playlist's index rows, keeping each surviving track's `first_seen`. A track new
+/// to the playlist gets `now`, but only when the playlist has synced before (it has a
+/// `playlist_sync` row): on its first read nobody knows when its tracks arrived.
+fn replace_playlist_rows(
+    conn: &Connection,
+    playlist_id: &str,
+    rows: &[(&str, Option<&str>)],
+    now: i64,
+) -> rusqlite::Result<()> {
+    let synced: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM playlist_sync WHERE playlist_id = ?1)",
+        [playlist_id],
+        |r| r.get(0),
+    )?;
+    let known: std::collections::HashMap<String, Option<i64>> = {
+        let mut stmt =
+            conn.prepare("SELECT video_id, first_seen FROM playlist_track WHERE playlist_id = ?1")?;
+        let found = stmt
+            .query_map([playlist_id], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        found
+    };
+    conn.execute("DELETE FROM playlist_track WHERE playlist_id = ?1", [playlist_id])?;
+    let fresh = synced.then_some(now);
+    for (video_id, json) in rows {
+        let first_seen = known.get(*video_id).copied().unwrap_or(fresh);
+        conn.execute(
+            "INSERT OR IGNORE INTO playlist_track(playlist_id, video_id, song_json, first_seen) \
+             VALUES(?1, ?2, ?3, ?4)",
+            rusqlite::params![playlist_id, video_id, json, first_seen],
+        )?;
+    }
+    Ok(())
+}
+
+/// The kind as v3 files it. The pre-v3 `gone` is `removed`; any other unknown kind is refused by
+/// the table's CHECK.
+fn alert_kind(kind: &str) -> &str {
+    match kind {
+        "gone" => "removed",
+        other => other,
+    }
+}
+
+/// An alert's dedupe key: playlist, track and kind, joined by U+001F, plus a scope (a snapshot or
+/// run id) for an event that can happen again and should then file a row of its own. With no
+/// scope it is the pre-v3 identity, one alert per playlist, track and kind ever, which is the
+/// key the migration gave every existing row.
+pub fn alert_dedupe_key(
+    playlist_id: &str,
+    video_id: &str,
+    kind: &str,
+    scope: Option<&str>,
+) -> String {
+    let mut key = format!("{playlist_id}\u{1f}{video_id}\u{1f}{kind}");
+    if let Some(scope) = scope {
+        key.push('\u{1f}');
+        key.push_str(scope);
+    }
+    key
+}
+
+/// One alert to file.
+#[derive(Debug, Clone)]
+pub struct NewAlert<'a> {
+    pub playlist_id: &'a str,
+    pub video_id: &'a str,
+    pub kind: &'a str,
+    pub song_json: Option<&'a str>,
+    pub at: i64,
+    /// The positions a `moved` row went between (0-based), where known.
+    pub from_pos: Option<i64>,
+    pub to_pos: Option<i64>,
+    pub dedupe_key: &'a str,
+}
+
+/// One filed alert, flags included.
+#[allow(dead_code)] // read by the alerts page (commit 15)
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct AlertRow {
+    pub id: i64,
+    pub playlist_id: String,
+    pub video_id: String,
+    pub kind: String,
+    pub song_json: Option<String>,
+    pub at: i64,
+    pub from_pos: Option<i64>,
+    pub to_pos: Option<i64>,
+    pub seen: bool,
+    pub dismissed: bool,
+}
+
+/// One playlist row as a snapshot keeps it, compact because a snapshot is taken on every change
+/// of every playlist: `v` videoId, `s` setVideoId, `t` title, `a` artists, `d` duration as
+/// YouTube writes it, `u` unavailable, `th` thumbnail.
+#[allow(dead_code)] // built by the monitor (commit 13)
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SnapItem {
+    pub v: String,
+    #[serde(default)]
+    pub s: Option<String>,
+    pub t: String,
+    #[serde(default)]
+    pub a: String,
+    #[serde(default)]
+    pub d: Option<String>,
+    #[serde(default)]
+    pub u: bool,
+    #[serde(default)]
+    pub th: Option<String>,
+}
+
+#[allow(dead_code)] // the monitor (commit 13)
+impl SnapItem {
+    pub fn from_song(song: &innertube::SongItem) -> Self {
+        SnapItem {
+            v: song.video_id.clone(),
+            s: song.set_video_id.clone(),
+            t: song.title.clone(),
+            a: song.artists.clone(),
+            d: song.duration.clone(),
+            u: song.unavailable,
+            th: song.thumbnail.clone(),
+        }
+    }
+}
+
+/// A snapshot's content hash: MD5 hex over each item's `v`, `s`, `t` and `u`, fields joined by
+/// U+001F and items ended by U+001E. MD5 for the reason [`account_key`] gives: a stored value
+/// must not change with the toolchain, which `DefaultHasher` does not promise. Order counts, so
+/// a move is a change; artists, duration and artwork do not.
+#[allow(dead_code)]
+pub fn snapshot_hash(items: &[SnapItem]) -> String {
+    let mut digest = Md5::new();
+    for item in items {
+        digest.update(item.v.as_bytes());
+        digest.update(b"\x1f");
+        digest.update(item.s.as_deref().unwrap_or("").as_bytes());
+        digest.update(b"\x1f");
+        digest.update(item.t.as_bytes());
+        digest.update(b"\x1f");
+        digest.update(if item.u { b"1" } else { b"0" });
+        digest.update(b"\x1e");
+    }
+    format!("{:x}", digest.finalize())
+}
+
+/// One stored snapshot, newest-first in every list.
+#[allow(dead_code)] // the monitor, backups and timeline (commits 13-15)
+#[derive(Debug, Clone, PartialEq)]
+pub struct Snapshot {
+    pub id: i64,
+    pub playlist_id: String,
+    pub account_id: Option<String>,
+    pub title: Option<String>,
+    pub taken_at: i64,
+    pub item_count: i64,
+    pub hash: String,
+    pub items: Vec<SnapItem>,
+}
+
+#[allow(dead_code)]
+const SNAPSHOT_SELECT: &str = "SELECT id, playlist_id, account_id, title, taken_at, item_count, \
+     hash, items_json FROM playlist_snapshot";
+#[allow(dead_code)]
+const SNAPSHOT_ORDER: &str = "ORDER BY taken_at DESC, id DESC";
+
+#[allow(dead_code)]
+fn snapshot_row(r: &rusqlite::Row) -> rusqlite::Result<Snapshot> {
+    let items_json: String = r.get(7)?;
+    Ok(Snapshot {
+        id: r.get(0)?,
+        playlist_id: r.get(1)?,
+        account_id: r.get(2)?,
+        title: r.get(3)?,
+        taken_at: r.get(4)?,
+        item_count: r.get(5)?,
+        hash: r.get(6)?,
+        items: serde_json::from_str(&items_json).unwrap_or_default(),
+    })
+}
+
+#[allow(dead_code)]
+fn prune_snapshots_in(conn: &Connection, keep: i64) -> rusqlite::Result<Vec<i64>> {
+    let doomed: Vec<i64> = {
+        let mut stmt = conn.prepare(
+            "SELECT id FROM (SELECT id, ROW_NUMBER() OVER (PARTITION BY playlist_id \
+             ORDER BY taken_at DESC, id DESC) AS n FROM playlist_snapshot) WHERE n > ?1",
+        )?;
+        let ids = stmt.query_map([keep], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
+        ids
+    };
+    for id in &doomed {
+        conn.execute("DELETE FROM playlist_snapshot WHERE id = ?1", [id])?;
+    }
+    Ok(doomed)
+}
+
+/// One monitor run. `trigger` is `manual_ui`, `scheduler` or `headless`; `outcome` is `ok`,
+/// `partial`, `failed`, `lock_busy` or `cancelled` (the table refuses anything else).
+#[allow(dead_code)] // the monitor and its page (commits 13, 16)
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct MonitorRun {
+    pub id: i64,
+    pub started_at: i64,
+    pub finished_at: i64,
+    pub trigger: String,
+    pub outcome: String,
+    pub playlists_ok: i64,
+    pub playlists_failed: i64,
+    pub alerts_new: i64,
+    pub units_spent: i64,
+    pub detail_json: String,
+}
+
+/// One account playlist's last complete sync and what it found.
+#[allow(dead_code)] // the monitor and the library (commits 13, 17)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub struct PlaylistSync {
+    pub synced_at: i64,
+    pub item_count: i64,
+    pub added: i64,
+    pub removed: i64,
+    pub moved: i64,
+}
+
+/// What the `videos` table knows about a video. `None` leaves a known value as it is.
+#[allow(dead_code)] // the download queue and the importer (commits 20-21)
+#[derive(Debug, Clone, Copy)]
+pub struct VideoMeta<'a> {
+    pub video_id: &'a str,
+    pub title: Option<&'a str>,
+    pub channel: Option<&'a str>,
+    pub duration_s: Option<i64>,
+}
+
+/// A download to queue. `format` is `audio` or `video` (the table refuses anything else).
+#[allow(dead_code)] // the download queue (commit 20)
+#[derive(Debug, Clone, Copy)]
+pub struct NewDownload<'a> {
+    pub video: VideoMeta<'a>,
+    pub format: &'a str,
+    pub requested_quality: &'a str,
+    pub thumbnail_mode: &'a str,
+    pub dest_dir: &'a str,
+    /// Queue it again even when it is already downloaded.
+    pub redownload: bool,
+}
+
+/// What [`Db::enqueue_download`] did.
+#[allow(dead_code)] // the download queue (commit 20)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EnqueueOutcome {
+    /// A new row.
+    Queued,
+    /// An errored, missing or (with `redownload`) available row, queued again.
+    Requeued,
+    /// Already queued, running or available: nothing changed.
+    Already,
+}
+
+/// One `downloads` row. The dates are RFC 3339 UTC text ([`rfc3339_utc`]).
+#[allow(dead_code)] // the download queue (commits 20-21)
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct DownloadRow {
+    pub video_id: String,
+    pub format: String,
+    pub status: String,
+    pub requested_quality: String,
+    pub thumbnail_mode: String,
+    pub dest_dir: String,
+    pub file_path: Option<String>,
+    pub file_size_bytes: Option<i64>,
+    pub container: Option<String>,
+    pub error: Option<String>,
+    pub attempts: i64,
+    pub created_at: String,
+    pub completed_at: Option<String>,
+    pub last_verified_at: Option<String>,
+}
+
+#[allow(dead_code)]
+const DOWNLOAD_SELECT: &str = "SELECT video_id, format, status, requested_quality, \
+     thumbnail_mode, dest_dir, file_path, file_size_bytes, container, error, attempts, \
+     created_at, completed_at, last_verified_at FROM downloads";
+
+#[allow(dead_code)]
+fn download_row(r: &rusqlite::Row) -> rusqlite::Result<DownloadRow> {
+    Ok(DownloadRow {
+        video_id: r.get(0)?,
+        format: r.get(1)?,
+        status: r.get(2)?,
+        requested_quality: r.get(3)?,
+        thumbnail_mode: r.get(4)?,
+        dest_dir: r.get(5)?,
+        file_path: r.get(6)?,
+        file_size_bytes: r.get(7)?,
+        container: r.get(8)?,
+        error: r.get(9)?,
+        attempts: r.get(10)?,
+        created_at: r.get(11)?,
+        completed_at: r.get(12)?,
+        last_verified_at: r.get(13)?,
+    })
+}
+
+#[allow(dead_code)]
+fn upsert_video_in(conn: &Connection, video: &VideoMeta<'_>, now: i64) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT INTO videos(video_id, title, channel, duration_s, updated_at) \
+         VALUES(?1, ?2, ?3, ?4, ?5) ON CONFLICT(video_id) DO UPDATE SET \
+         title = COALESCE(excluded.title, title), channel = COALESCE(excluded.channel, channel), \
+         duration_s = COALESCE(excluded.duration_s, duration_s), updated_at = excluded.updated_at",
+        rusqlite::params![video.video_id, video.title, video.channel, video.duration_s, now],
+    )?;
+    Ok(())
+}
+
+/// Unix seconds as RFC 3339 UTC (`2023-11-14T22:13:20Z`), the form `downloads` stores its dates
+/// in. Sorts as text in time order. Days to civil date after Howard Hinnant's `civil_from_days`.
+#[allow(dead_code)]
+pub fn rfc3339_utc(secs: i64) -> String {
+    let days = secs.div_euclid(86_400);
+    let rem = secs.rem_euclid(86_400);
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
+        rem / 3_600,
+        rem % 3_600 / 60,
+        rem % 60
+    )
+}
+
+#[allow(dead_code)] // the monitor, backups, alerts and downloads (commits 13-21)
+impl Db {
+    // --- alerts (v3) --------------------------------------------------------------------------
+
+    /// File an alert unless one with its dedupe key is already there (dismissed ones included).
+    /// Answers the new row's id; `None` for a repeat, or a kind the table refuses.
+    pub fn insert_alert(&self, alert: &NewAlert<'_>) -> Option<i64> {
+        let conn = self.0.lock().unwrap();
+        let inserted = conn.execute(
+            "INSERT OR IGNORE INTO playlist_alert(dedupe_key, playlist_id, video_id, kind, \
+             song_json, at, from_pos, to_pos) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            rusqlite::params![
+                alert.dedupe_key,
+                alert.playlist_id,
+                alert.video_id,
+                alert.kind,
+                alert.song_json,
+                alert.at,
+                alert.from_pos,
+                alert.to_pos
+            ],
+        );
+        match inserted {
+            Ok(n) if n > 0 => Some(conn.last_insert_rowid()),
+            _ => None,
+        }
+    }
+
+    /// Alerts newest first, with their ids and flags. Dismissed ones only when asked for.
+    pub fn alert_rows(&self, include_dismissed: bool) -> Vec<AlertRow> {
+        let conn = self.0.lock().unwrap();
+        let sql = format!(
+            "SELECT id, playlist_id, video_id, kind, song_json, at, from_pos, to_pos, seen, \
+             dismissed FROM playlist_alert {} ORDER BY at DESC, id DESC",
+            if include_dismissed { "" } else { "WHERE dismissed = 0" }
+        );
+        let mut out = Vec::new();
+        if let Ok(mut stmt) = conn.prepare(&sql) {
+            if let Ok(rows) = stmt.query_map([], |r| {
+                Ok(AlertRow {
+                    id: r.get(0)?,
+                    playlist_id: r.get(1)?,
+                    video_id: r.get(2)?,
+                    kind: r.get(3)?,
+                    song_json: r.get(4)?,
+                    at: r.get(5)?,
+                    from_pos: r.get(6)?,
+                    to_pos: r.get(7)?,
+                    seen: r.get::<_, i64>(8)? != 0,
+                    dismissed: r.get::<_, i64>(9)? != 0,
+                })
+            }) {
+                out.extend(rows.flatten());
+            }
+        }
+        out
+    }
+
+    /// Mark these alerts seen, or every alert with `None`. Answers how many rows it touched.
+    pub fn mark_alerts_seen(&self, ids: Option<&[i64]>) -> usize {
+        let conn = self.0.lock().unwrap();
+        let done = match ids {
+            None => conn.execute("UPDATE playlist_alert SET seen = 1 WHERE seen = 0", []),
+            Some([]) => Ok(0),
+            Some(ids) => {
+                let holes = vec!["?"; ids.len()].join(",");
+                conn.execute(
+                    &format!("UPDATE playlist_alert SET seen = 1 WHERE id IN ({holes})"),
+                    rusqlite::params_from_iter(ids.iter()),
+                )
+            }
+        };
+        done.unwrap_or(0)
+    }
+
+    /// Alerts neither seen nor dismissed: the sidebar badge.
+    pub fn unseen_alert_count(&self) -> u32 {
+        let conn = self.0.lock().unwrap();
+        conn.query_row(
+            "SELECT COUNT(*) FROM playlist_alert WHERE seen = 0 AND dismissed = 0",
+            [],
+            |r| r.get::<_, u32>(0),
+        )
+        .unwrap_or(0)
+    }
+
+    // --- snapshots ----------------------------------------------------------------------------
+
+    /// Store a snapshot of a playlist unless its newest one holds the same content
+    /// ([`snapshot_hash`]: a new title alone is no change). Answers the new snapshot's id, or
+    /// `None` when nothing changed (or the write failed).
+    pub fn put_snapshot_if_changed(
+        &self,
+        playlist_id: &str,
+        account_id: Option<&str>,
+        title: Option<&str>,
+        at: i64,
+        items: &[SnapItem],
+    ) -> Option<i64> {
+        let hash = snapshot_hash(items);
+        let items_json = serde_json::to_string(items).ok()?;
+        let conn = self.0.lock().unwrap();
+        let latest: Option<String> = conn
+            .query_row(
+                "SELECT hash FROM playlist_snapshot WHERE playlist_id = ?1 \
+                 ORDER BY taken_at DESC, id DESC LIMIT 1",
+                [playlist_id],
+                |r| r.get(0),
+            )
+            .ok();
+        if latest.as_deref() == Some(hash.as_str()) {
+            return None;
+        }
+        conn.execute(
+            "INSERT INTO playlist_snapshot(playlist_id, account_id, title, taken_at, item_count, \
+             hash, items_json) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            rusqlite::params![
+                playlist_id,
+                account_id,
+                title,
+                at,
+                items.len() as i64,
+                hash,
+                items_json
+            ],
+        )
+        .ok()?;
+        Some(conn.last_insert_rowid())
+    }
+
+    /// A playlist's newest snapshot: the "before" its next sync is compared against.
+    pub fn latest_snapshot(&self, playlist_id: &str) -> Option<Snapshot> {
+        let conn = self.0.lock().unwrap();
+        let sql = format!("{SNAPSHOT_SELECT} WHERE playlist_id = ?1 {SNAPSHOT_ORDER} LIMIT 1");
+        conn.query_row(&sql, [playlist_id], snapshot_row).ok()
+    }
+
+    /// Every snapshot of a playlist, newest first.
+    pub fn snapshots(&self, playlist_id: &str) -> Vec<Snapshot> {
+        let conn = self.0.lock().unwrap();
+        let sql = format!("{SNAPSHOT_SELECT} WHERE playlist_id = ?1 {SNAPSHOT_ORDER}");
+        let mut out = Vec::new();
+        if let Ok(mut stmt) = conn.prepare(&sql) {
+            if let Ok(rows) = stmt.query_map([playlist_id], snapshot_row) {
+                out.extend(rows.flatten());
+            }
+        }
+        out
+    }
+
+    pub fn snapshot(&self, id: i64) -> Option<Snapshot> {
+        let conn = self.0.lock().unwrap();
+        conn.query_row(&format!("{SNAPSHOT_SELECT} WHERE id = ?1"), [id], snapshot_row).ok()
+    }
+
+    /// Keep each playlist's newest `keep` snapshots and delete the rest, answering the deleted
+    /// ids. Never fewer than two per playlist: the current one (the next sync's "before") and the
+    /// one before it (the reference its latest changes were computed against) always stay.
+    pub fn prune_snapshots(&self, keep: usize) -> Vec<i64> {
+        let mut conn = self.0.lock().unwrap();
+        let Ok(tx) = conn.transaction() else { return Vec::new() };
+        let Ok(gone) = prune_snapshots_in(&tx, keep.max(2) as i64) else { return Vec::new() };
+        if tx.commit().is_err() {
+            return Vec::new();
+        }
+        gone
+    }
+
+    // --- monitor runs and per-playlist sync -----------------------------------------------------
+
+    /// Log one monitor run (its `id` is ignored) and answer the new id.
+    pub fn record_monitor_run(&self, run: &MonitorRun) -> rusqlite::Result<i64> {
+        let conn = self.0.lock().unwrap();
+        conn.execute(
+            "INSERT INTO monitor_runs(started_at, finished_at, \"trigger\", outcome, \
+             playlists_ok, playlists_failed, alerts_new, units_spent, detail_json) \
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            rusqlite::params![
+                run.started_at,
+                run.finished_at,
+                run.trigger,
+                run.outcome,
+                run.playlists_ok,
+                run.playlists_failed,
+                run.alerts_new,
+                run.units_spent,
+                run.detail_json
+            ],
+        )?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    /// The newest `limit` monitor runs, newest first.
+    pub fn monitor_runs(&self, limit: usize) -> Vec<MonitorRun> {
+        let conn = self.0.lock().unwrap();
+        let mut out = Vec::new();
+        if let Ok(mut stmt) = conn.prepare(
+            "SELECT id, started_at, finished_at, \"trigger\", outcome, playlists_ok, \
+             playlists_failed, alerts_new, units_spent, detail_json FROM monitor_runs \
+             ORDER BY started_at DESC, id DESC LIMIT ?1",
+        ) {
+            if let Ok(rows) = stmt.query_map([limit as i64], |r| {
+                Ok(MonitorRun {
+                    id: r.get(0)?,
+                    started_at: r.get(1)?,
+                    finished_at: r.get(2)?,
+                    trigger: r.get(3)?,
+                    outcome: r.get(4)?,
+                    playlists_ok: r.get(5)?,
+                    playlists_failed: r.get(6)?,
+                    alerts_new: r.get(7)?,
+                    units_spent: r.get(8)?,
+                    detail_json: r.get(9)?,
+                })
+            }) {
+                out.extend(rows.flatten());
+            }
+        }
+        out
+    }
+
+    /// Record a playlist's complete sync. Write its index rows first: whether a track is new
+    /// enough to get a `first_seen` depends on there being no sync record yet.
+    pub fn set_playlist_sync(
+        &self,
+        playlist_id: &str,
+        sync: &PlaylistSync,
+    ) -> rusqlite::Result<()> {
+        let conn = self.0.lock().unwrap();
+        conn.execute(
+            "INSERT INTO playlist_sync(playlist_id, synced_at, item_count, added, removed, moved) \
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT(playlist_id) DO UPDATE SET \
+             synced_at = excluded.synced_at, item_count = excluded.item_count, \
+             added = excluded.added, removed = excluded.removed, moved = excluded.moved",
+            rusqlite::params![
+                playlist_id,
+                sync.synced_at,
+                sync.item_count,
+                sync.added,
+                sync.removed,
+                sync.moved
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Playlist id → its last complete sync.
+    pub fn playlist_syncs(&self) -> std::collections::HashMap<String, PlaylistSync> {
+        let conn = self.0.lock().unwrap();
+        let mut out = std::collections::HashMap::new();
+        if let Ok(mut stmt) = conn.prepare(
+            "SELECT playlist_id, synced_at, item_count, added, removed, moved FROM playlist_sync",
+        ) {
+            if let Ok(rows) = stmt.query_map([], |r| {
+                let sync = PlaylistSync {
+                    synced_at: r.get(1)?,
+                    item_count: r.get(2)?,
+                    added: r.get(3)?,
+                    removed: r.get(4)?,
+                    moved: r.get(5)?,
+                };
+                Ok((r.get::<_, String>(0)?, sync))
+            }) {
+                out.extend(rows.flatten());
+            }
+        }
+        out
+    }
+
+    // --- videos and downloads -------------------------------------------------------------------
+
+    /// Insert or refresh what is known about a video.
+    pub fn upsert_video(&self, video: &VideoMeta<'_>, now: i64) -> rusqlite::Result<()> {
+        let conn = self.0.lock().unwrap();
+        upsert_video_in(&conn, video, now)
+    }
+
+    /// Queue a download, recording its video first. A new row is `queued`; an `error` or
+    /// `missing` row is queued again, and an `available` one too with `redownload`; a row already
+    /// `queued` or `running` (or available without `redownload`) is left alone. A requeue takes
+    /// the request's quality, thumbnail mode and folder, and goes to the back of the queue.
+    pub fn enqueue_download(
+        &self,
+        req: &NewDownload<'_>,
+        now: i64,
+    ) -> rusqlite::Result<EnqueueOutcome> {
+        let mut conn = self.0.lock().unwrap();
+        let tx = conn.transaction()?;
+        upsert_video_in(&tx, &req.video, now)?;
+        let status: Option<String> = tx
+            .query_row(
+                "SELECT status FROM downloads WHERE video_id = ?1 AND format = ?2",
+                [req.video.video_id, req.format],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let outcome = match status.as_deref() {
+            None => EnqueueOutcome::Queued,
+            Some("error" | "missing") => EnqueueOutcome::Requeued,
+            Some("available") if req.redownload => EnqueueOutcome::Requeued,
+            Some(_) => EnqueueOutcome::Already,
+        };
+        if outcome != EnqueueOutcome::Already {
+            let sql = match outcome {
+                EnqueueOutcome::Queued => DOWNLOAD_INSERT,
+                _ => DOWNLOAD_REQUEUE,
+            };
+            tx.execute(
+                sql,
+                rusqlite::params![
+                    req.video.video_id,
+                    req.format,
+                    req.requested_quality,
+                    req.thumbnail_mode,
+                    req.dest_dir,
+                    rfc3339_utc(now)
+                ],
+            )?;
+        }
+        tx.commit()?;
+        Ok(outcome)
+    }
+
+    /// The runner picked it up: `queued` → `running`, one more attempt. `false` when it was not
+    /// queued (cancelled, removed, or taken already).
+    pub fn mark_download_running(&self, video_id: &str, format: &str) -> bool {
+        self.update_download(
+            "UPDATE downloads SET status = 'running', attempts = attempts + 1, error = NULL \
+             WHERE video_id = ?1 AND format = ?2 AND status = 'queued'",
+            rusqlite::params![video_id, format],
+        )
+    }
+
+    /// Downloaded (or found on disk by the verifier): the file, its size and container.
+    pub fn mark_download_available(
+        &self,
+        video_id: &str,
+        format: &str,
+        file_path: &str,
+        file_size_bytes: Option<i64>,
+        container: Option<&str>,
+        now: i64,
+    ) -> bool {
+        let stamp = rfc3339_utc(now);
+        self.update_download(
+            "UPDATE downloads SET status = 'available', file_path = ?3, file_size_bytes = ?4, \
+             container = ?5, error = NULL, completed_at = ?6, last_verified_at = ?6 \
+             WHERE video_id = ?1 AND format = ?2",
+            rusqlite::params![video_id, format, file_path, file_size_bytes, container, stamp],
+        )
+    }
+
+    pub fn mark_download_error(&self, video_id: &str, format: &str, error: &str) -> bool {
+        self.update_download(
+            "UPDATE downloads SET status = 'error', error = ?3 \
+             WHERE video_id = ?1 AND format = ?2",
+            rusqlite::params![video_id, format, error],
+        )
+    }
+
+    /// An `available` download whose file is gone from disk.
+    pub fn mark_download_missing(&self, video_id: &str, format: &str, now: i64) -> bool {
+        let stamp = rfc3339_utc(now);
+        self.update_download(
+            "UPDATE downloads SET status = 'missing', last_verified_at = ?3 \
+             WHERE video_id = ?1 AND format = ?2 AND status = 'available'",
+            rusqlite::params![video_id, format, stamp],
+        )
+    }
+
+    /// An `available` download whose file is still there.
+    pub fn mark_download_verified(&self, video_id: &str, format: &str, now: i64) -> bool {
+        let stamp = rfc3339_utc(now);
+        self.update_download(
+            "UPDATE downloads SET last_verified_at = ?3 \
+             WHERE video_id = ?1 AND format = ?2 AND status = 'available'",
+            rusqlite::params![video_id, format, stamp],
+        )
+    }
+
+    /// Retry: an `error`, `missing` or `available` row back to `queued`, at the back of the
+    /// queue. `false` for one already queued or running.
+    pub fn requeue_download(&self, video_id: &str, format: &str, now: i64) -> bool {
+        let stamp = rfc3339_utc(now);
+        self.update_download(
+            "UPDATE downloads SET status = 'queued', error = NULL, completed_at = NULL, \
+             created_at = ?3 WHERE video_id = ?1 AND format = ?2 \
+             AND status IN ('error', 'missing', 'available')",
+            rusqlite::params![video_id, format, stamp],
+        )
+    }
+
+    /// Forget a download. The row only: the file, if any, is never touched.
+    pub fn delete_download(&self, video_id: &str, format: &str) -> bool {
+        self.update_download(
+            "DELETE FROM downloads WHERE video_id = ?1 AND format = ?2",
+            rusqlite::params![video_id, format],
+        )
+    }
+
+    /// The oldest queued download (FIFO by `created_at`).
+    pub fn next_queued_download(&self) -> Option<DownloadRow> {
+        let conn = self.0.lock().unwrap();
+        let sql = format!("{DOWNLOAD_SELECT} WHERE status = 'queued' {DOWNLOAD_FIFO} LIMIT 1");
+        conn.query_row(&sql, [], download_row).ok()
+    }
+
+    /// Every download row of these videos, both formats.
+    pub fn downloads_for(&self, video_ids: &[String]) -> Vec<DownloadRow> {
+        if video_ids.is_empty() {
+            return Vec::new();
+        }
+        let conn = self.0.lock().unwrap();
+        let holes = vec!["?"; video_ids.len()].join(",");
+        let sql = format!("{DOWNLOAD_SELECT} WHERE video_id IN ({holes}) ORDER BY created_at");
+        let mut out = Vec::new();
+        if let Ok(mut stmt) = conn.prepare(&sql) {
+            if let Ok(rows) = stmt.query_map(rusqlite::params_from_iter(video_ids), download_row) {
+                out.extend(rows.flatten());
+            }
+        }
+        out
+    }
+
+    /// The newest `limit` downloads, by completion (or, until then, queueing) date.
+    pub fn recent_downloads(&self, limit: usize) -> Vec<DownloadRow> {
+        let conn = self.0.lock().unwrap();
+        let sql = format!(
+            "{DOWNLOAD_SELECT} ORDER BY COALESCE(completed_at, created_at) DESC, rowid DESC \
+             LIMIT ?1"
+        );
+        let mut out = Vec::new();
+        if let Ok(mut stmt) = conn.prepare(&sql) {
+            if let Ok(rows) = stmt.query_map([limit as i64], download_row) {
+                out.extend(rows.flatten());
+            }
+        }
+        out
+    }
+
+    /// Downloads left `running` by a run that never finished (the app quit or crashed) go back
+    /// to `queued`. Answers how many. For the runner's start.
+    pub fn reset_orphaned_downloads(&self) -> usize {
+        let conn = self.0.lock().unwrap();
+        let sql = "UPDATE downloads SET status = 'queued' WHERE status = 'running'";
+        conn.execute(sql, []).unwrap_or(0)
+    }
+
+    fn update_download(&self, sql: &str, params: impl rusqlite::Params) -> bool {
+        let conn = self.0.lock().unwrap();
+        conn.execute(sql, params).map(|n| n > 0).unwrap_or(false)
+    }
+}
+
+#[allow(dead_code)]
+const DOWNLOAD_FIFO: &str = "ORDER BY created_at, rowid";
+
+#[allow(dead_code)]
+const DOWNLOAD_INSERT: &str = "INSERT INTO downloads(video_id, format, status, \
+     requested_quality, thumbnail_mode, dest_dir, created_at) \
+     VALUES(?1, ?2, 'queued', ?3, ?4, ?5, ?6)";
+
+#[allow(dead_code)]
+const DOWNLOAD_REQUEUE: &str = "UPDATE downloads SET status = 'queued', requested_quality = ?3, \
+     thumbnail_mode = ?4, dest_dir = ?5, error = NULL, completed_at = NULL, created_at = ?6 \
+     WHERE video_id = ?1 AND format = ?2";
 
 #[cfg(test)]
 mod tests {
@@ -1712,12 +2727,14 @@ mod tests {
         assert_eq!(got, want);
         assert_eq!(d.playlist_songs("VL1").len(), 2);
 
-        d.add_playlist_alert("VL1", "a", "gone", Some("{}"), 5);
-        d.add_playlist_alert("VL1", "a", "gone", None, 6); // the same alert: ignored
+        d.add_playlist_alert("VL1", "a", "removed", Some("{}"), 5);
+        d.add_playlist_alert("VL1", "a", "removed", None, 6); // the same alert: ignored
+        d.add_playlist_alert("VL1", "a", "gone", None, 6); // its pre-v3 name: the same alert
         d.add_playlist_alert(&here, "a", "unavailable", None, 7);
         assert_eq!(d.playlist_alerts().len(), 2);
-        d.dismiss_playlist_alert("VL1", "a", "gone");
-        d.add_playlist_alert("VL1", "a", "gone", None, 8); // dismissed stays dismissed
+        assert!(d.playlist_alerts().iter().all(|a| a.2 != "gone"));
+        d.dismiss_playlist_alert("VL1", "a", "removed");
+        d.add_playlist_alert("VL1", "a", "removed", None, 8); // dismissed stays dismissed
         assert_eq!(d.playlist_alerts().len(), 1);
         // An account change clears the account's alerts, not the local playlist's.
         d.clear_playlist_index();
@@ -2541,6 +3558,471 @@ mod tests {
         assert_eq!(d.get_setting("selected_identity_json"), None);
         assert_eq!(d.get_setting("data_sync_id"), None);
         assert_eq!(d.get_setting("account_json"), None);
+    }
+
+    // --- schema v3 ------------------------------------------------------------------------------
+
+    /// The monitor's tables as a v2 file has them, pinned like the release schemas above, with a
+    /// few rows. `Db::open` creates everything else.
+    const SCHEMA_V2_MONITOR: &str = r#"
+            CREATE TABLE settings (
+                key   TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
+            CREATE TABLE playlist_track (
+                playlist_id TEXT NOT NULL,
+                video_id    TEXT NOT NULL,
+                song_json   TEXT,
+                PRIMARY KEY (playlist_id, video_id)
+            ) WITHOUT ROWID;
+            CREATE TABLE playlist_alert (
+                playlist_id TEXT NOT NULL,
+                video_id    TEXT NOT NULL,
+                kind        TEXT NOT NULL,
+                song_json   TEXT,
+                at          INTEGER NOT NULL,
+                dismissed   INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (playlist_id, video_id, kind)
+            ) WITHOUT ROWID;
+            INSERT INTO playlist_track VALUES('VL1', 'a', '{}');
+            INSERT INTO playlist_alert VALUES('VL1', 'a', 'gone', '{}', 5, 0);
+            INSERT INTO playlist_alert VALUES('VL1', 'b', 'gone', NULL, 6, 1);
+            INSERT INTO playlist_alert VALUES('VL2', 'c', 'unavailable', NULL, 7, 0);
+            PRAGMA user_version = 2;
+            "#;
+
+    fn snap(v: &str) -> SnapItem {
+        SnapItem {
+            v: v.to_owned(),
+            s: Some(format!("S{v}")),
+            t: v.to_uppercase(),
+            a: "Artist".into(),
+            d: Some("3:00".into()),
+            u: false,
+            th: None,
+        }
+    }
+
+    fn run(started_at: i64, trigger: &str, outcome: &str) -> MonitorRun {
+        MonitorRun {
+            id: 0,
+            started_at,
+            finished_at: started_at + 5,
+            trigger: trigger.into(),
+            outcome: outcome.into(),
+            playlists_ok: 3,
+            playlists_failed: 0,
+            alerts_new: 1,
+            units_spent: 0,
+            detail_json: "{}".into(),
+        }
+    }
+
+    fn user_version(d: &Db) -> i64 {
+        d.0.lock().unwrap().query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap()
+    }
+
+    fn first_seen(d: &Db, playlist_id: &str, video_id: &str) -> Option<i64> {
+        let conn = d.0.lock().unwrap();
+        conn.query_row(
+            "SELECT first_seen FROM playlist_track WHERE playlist_id = ?1 AND video_id = ?2",
+            [playlist_id, video_id],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn a_v2_database_migrates_to_v3_once_and_keeps_its_alerts() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("limusic.sqlite");
+        rusqlite::Connection::open(&path).unwrap().execute_batch(SCHEMA_V2_MONITOR).unwrap();
+
+        let d = Db::open(&path).unwrap();
+        assert_eq!(user_version(&d), 3);
+        let rows = d.alert_rows(true);
+        let kinds: Vec<(&str, &str, bool, bool)> = rows
+            .iter()
+            .map(|r| (r.video_id.as_str(), r.kind.as_str(), r.seen, r.dismissed))
+            .collect();
+        assert_eq!(
+            kinds,
+            [
+                ("c", "unavailable", false, false),
+                ("b", "removed", true, true),
+                ("a", "removed", false, false),
+            ],
+            "newest first, `gone` is `removed`, and dismissed counts as seen"
+        );
+        assert_eq!(d.unseen_alert_count(), 2);
+        // The migrated key is the old identity, so an alert already filed does not come back.
+        d.add_playlist_alert("VL1", "a", "removed", None, 9);
+        assert_eq!(d.alert_rows(true).len(), 3);
+        assert_eq!(first_seen(&d, "VL1", "a"), None, "in the playlist since before tracking");
+        assert!(d.put_snapshot_if_changed("VL1", None, None, 10, &[snap("a")]).is_some());
+        d.record_monitor_run(&run(10, "manual_ui", "ok")).unwrap();
+        drop(d);
+
+        // Opening again is a no-op, and so is running the whole migration again.
+        let d = Db::open(&path).unwrap();
+        assert_eq!(d.alert_rows(true).len(), 3);
+        d.0.lock().unwrap().execute_batch("PRAGMA user_version = 2").unwrap();
+        drop(d);
+        let d = Db::open(&path).unwrap();
+        assert_eq!(user_version(&d), 3);
+        assert_eq!(d.alert_rows(true).len(), 3);
+        assert_eq!(d.snapshots("VL1").len(), 1);
+        assert_eq!(d.monitor_runs(10).len(), 1);
+    }
+
+    #[test]
+    fn a_file_upstream_numbered_v3_without_our_tables_still_migrates() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("limusic.sqlite");
+        let schema = SCHEMA_V2_MONITOR.replace("user_version = 2", "user_version = 3");
+        rusqlite::Connection::open(&path).unwrap().execute_batch(&schema).unwrap();
+
+        let d = Db::open(&path).unwrap();
+        assert_eq!(d.migration_error(), None);
+        assert_eq!(user_version(&d), 3);
+        {
+            let conn = d.0.lock().unwrap();
+            assert!(v3_complete(&conn), "every v3 table and column is there");
+            for (table, column) in [
+                ("playlist_alert", "dedupe_key"),
+                ("playlist_alert", "seen"),
+                ("playlist_track", "first_seen"),
+            ] {
+                assert!(has_column(&conn, table, column).unwrap(), "{table}.{column}");
+            }
+        }
+        let rows = d.alert_rows(true);
+        let kinds: Vec<(&str, &str)> =
+            rows.iter().map(|r| (r.video_id.as_str(), r.kind.as_str())).collect();
+        assert_eq!(
+            kinds,
+            [("c", "unavailable"), ("b", "removed"), ("a", "removed")],
+            "rows kept, `gone` is `removed`"
+        );
+        let conn = d.0.lock().unwrap();
+        let tracks: i64 =
+            conn.query_row("SELECT COUNT(*) FROM playlist_track", [], |r| r.get(0)).unwrap();
+        assert_eq!(tracks, 1);
+        drop(conn);
+        assert!(d.put_snapshot_if_changed("VL1", None, None, 10, &[snap("a")]).is_some());
+        d.record_monitor_run(&run(10, "manual_ui", "ok")).unwrap();
+    }
+
+    #[test]
+    fn a_complete_v3_file_numbered_past_3_keeps_its_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("limusic.sqlite");
+        let d = Db::open(&path).unwrap();
+        d.record_monitor_run(&run(10, "manual_ui", "ok")).unwrap();
+        d.0.lock().unwrap().execute_batch("PRAGMA user_version = 4").unwrap();
+        drop(d);
+
+        let d = Db::open(&path).unwrap();
+        assert_eq!(d.migration_error(), None);
+        assert_eq!(user_version(&d), 4, "never lowered");
+        assert_eq!(d.monitor_runs(10).len(), 1);
+        // Even a run of the migration itself leaves the number alone.
+        migrate_v3(&d.0.lock().unwrap()).unwrap();
+        assert_eq!(user_version(&d), 4);
+    }
+
+    #[test]
+    fn opening_a_migrated_file_twice_changes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("limusic.sqlite");
+        let schema = SCHEMA_V2_MONITOR.replace("user_version = 2", "user_version = 3");
+        rusqlite::Connection::open(&path).unwrap().execute_batch(&schema).unwrap();
+        let dump = |d: &Db| -> Vec<(String, Option<String>)> {
+            let conn = d.0.lock().unwrap();
+            let mut stmt =
+                conn.prepare("SELECT name, sql FROM sqlite_master ORDER BY name").unwrap();
+            let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+            rows.collect::<rusqlite::Result<_>>().unwrap()
+        };
+
+        let d = Db::open(&path).unwrap();
+        let (schema_once, alerts_once) = (dump(&d), d.alert_rows(true));
+        drop(d);
+        let d = Db::open(&path).unwrap();
+        assert_eq!(d.migration_error(), None);
+        assert_eq!(user_version(&d), 3);
+        assert_eq!(dump(&d), schema_once);
+        assert_eq!(d.alert_rows(true), alerts_once);
+    }
+
+    #[test]
+    fn a_failed_migration_is_kept_for_the_ui_and_rolled_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("limusic.sqlite");
+        // A legacy alert table without `at`: the copy into the v3 table cannot run.
+        rusqlite::Connection::open(&path)
+            .unwrap()
+            .execute_batch(
+                "CREATE TABLE playlist_alert (playlist_id TEXT, video_id TEXT, kind TEXT);
+                 PRAGMA user_version = 2;",
+            )
+            .unwrap();
+
+        let d = Db::open(&path).unwrap();
+        let err = d.migration_error().expect("the failure is kept");
+        assert!(err.contains("schema v3 migration failed"), "{err}");
+        assert_eq!(user_version(&d), 2, "rolled back");
+        assert!(!v3_complete(&d.0.lock().unwrap()));
+    }
+
+    #[test]
+    fn v3_tables_refuse_values_outside_their_checks() {
+        let d = db();
+        assert_eq!(user_version(&d), 3, "a fresh file is created at v3");
+        let alert = |kind| NewAlert {
+            playlist_id: "VL1",
+            video_id: "a",
+            kind,
+            song_json: None,
+            at: 1,
+            from_pos: None,
+            to_pos: None,
+            dedupe_key: kind,
+        };
+        assert!(d.insert_alert(&alert("gone")).is_none(), "`gone` is retired");
+        assert!(d.insert_alert(&alert("bogus")).is_none());
+        assert!(d.insert_alert(&alert("moved")).is_some());
+        assert!(d.record_monitor_run(&run(1, "cron", "ok")).is_err());
+        assert!(d.record_monitor_run(&run(1, "scheduler", "maybe")).is_err());
+        assert!(d.record_monitor_run(&run(1, "headless", "lock_busy")).is_ok());
+        let video = VideoMeta { video_id: "a", title: None, channel: None, duration_s: None };
+        let flac = NewDownload {
+            video,
+            format: "flac",
+            requested_quality: "best",
+            thumbnail_mode: "embed",
+            dest_dir: "/m",
+            redownload: false,
+        };
+        assert!(d.enqueue_download(&flac, 1).is_err());
+        assert!(d.downloads_for(&["a".into()]).is_empty(), "nothing half-written");
+        // `downloads.video_id` has to name a known video.
+        let conn = d.0.lock().unwrap();
+        let orphan = conn.execute(
+            "INSERT INTO downloads(video_id, format, status, requested_quality, dest_dir, \
+             created_at) VALUES('nobody', 'audio', 'queued', 'best', '/m', 'x')",
+            [],
+        );
+        assert!(orphan.is_err());
+    }
+
+    #[test]
+    fn alerts_dedupe_by_key_and_track_what_was_seen() {
+        let d = db();
+        let key = |scope| alert_dedupe_key("VL1", "a", "removed", scope);
+        assert_eq!(key(None), "VL1\u{1f}a\u{1f}removed");
+        let file = |key: &str, at| {
+            d.insert_alert(&NewAlert {
+                playlist_id: "VL1",
+                video_id: "a",
+                kind: "removed",
+                song_json: None,
+                at,
+                from_pos: None,
+                to_pos: None,
+                dedupe_key: key,
+            })
+        };
+        let first = file(&key(Some("snap-1")), 1).unwrap();
+        assert_eq!(file(&key(Some("snap-1")), 2), None, "the same event twice is one alert");
+        let again = file(&key(Some("snap-7")), 3).unwrap();
+        assert_ne!(first, again, "the same change in a later snapshot is a new alert");
+        assert_eq!(d.unseen_alert_count(), 2);
+
+        assert_eq!(d.mark_alerts_seen(Some(&[first][..])), 1);
+        assert_eq!(d.unseen_alert_count(), 1);
+        assert_eq!(d.mark_alerts_seen(Some(&[] as &[i64])), 0);
+        d.mark_alerts_seen(None);
+        assert_eq!(d.unseen_alert_count(), 0);
+        assert!(d.alert_rows(false).iter().all(|a| a.seen));
+
+        // Dismissing takes every row of that alert out of the list, and keeps them.
+        d.dismiss_playlist_alert("VL1", "a", "removed");
+        assert!(d.alert_rows(false).is_empty());
+        assert_eq!(d.alert_rows(true).len(), 2);
+    }
+
+    #[test]
+    fn first_seen_survives_rewrites_and_starts_with_the_second_sync() {
+        let d = db();
+        let songs = |ids: &[&str]| -> Vec<(String, String)> {
+            ids.iter().map(|v| (v.to_string(), "{}".to_string())).collect()
+        };
+        d.set_playlist_songs_at("VL1", &songs(&["a", "b"]), 100);
+        assert_eq!(first_seen(&d, "VL1", "a"), None, "a first read cannot date anything");
+        let sync = PlaylistSync { synced_at: 1, item_count: 2, added: 0, removed: 0, moved: 0 };
+        d.set_playlist_sync("VL1", &sync).unwrap();
+
+        d.set_playlist_songs_at("VL1", &songs(&["b", "c"]), 200);
+        assert_eq!(first_seen(&d, "VL1", "b"), None, "still the pre-tracking row");
+        assert_eq!(first_seen(&d, "VL1", "c"), Some(200));
+        d.set_playlist_songs_at("VL1", &songs(&["c", "b"]), 300);
+        assert_eq!(first_seen(&d, "VL1", "c"), Some(200), "a rewrite keeps the date");
+        d.set_playlist_tracks("VL1", &["c".into()]);
+        assert_eq!(first_seen(&d, "VL1", "c"), Some(200));
+        d.put_playlist_song("VL1", "c", "{\"t\":1}");
+        assert_eq!(first_seen(&d, "VL1", "c"), Some(200), "so does an upsert");
+
+        // Adds made in the app are dated now.
+        d.add_playlist_track("VL1", "d");
+        d.put_playlist_song("VL2", "e", "{}");
+        assert!(first_seen(&d, "VL1", "d").is_some());
+        assert!(first_seen(&d, "VL2", "e").is_some());
+    }
+
+    #[test]
+    fn snapshots_are_kept_only_on_change_and_pruned_to_the_newest() {
+        let d = db();
+        assert_eq!(snapshot_hash(&[]), "d41d8cd98f00b204e9800998ecf8427e", "MD5 of nothing");
+        let first = [snap("a"), snap("b")];
+        let one = d.put_snapshot_if_changed("VL1", Some("acc"), Some("Mix"), 10, &first).unwrap();
+        assert_eq!(
+            d.put_snapshot_if_changed("VL1", Some("acc"), Some("Renamed"), 11, &first),
+            None,
+            "same content, no snapshot"
+        );
+        let mut art = first.clone();
+        art[0].th = Some("https://x/art.jpg".into());
+        art[1].a = "Someone else".into();
+        assert_eq!(d.put_snapshot_if_changed("VL1", None, None, 12, &art), None, "not content");
+        let moved = [snap("b"), snap("a")];
+        let two = d.put_snapshot_if_changed("VL1", None, None, 13, &moved).unwrap();
+        let mut greyed = snap("a");
+        greyed.u = true;
+        let greyed_out = [snap("b"), greyed];
+        let three = d.put_snapshot_if_changed("VL1", None, None, 14, &greyed_out).unwrap();
+        let other = d.put_snapshot_if_changed("VL2", None, None, 14, &[snap("z")]).unwrap();
+
+        let latest = d.latest_snapshot("VL1").unwrap();
+        assert_eq!((latest.id, latest.item_count, latest.taken_at), (three, 2, 14));
+        assert!(latest.items[1].u);
+        assert_eq!(latest.hash, snapshot_hash(&latest.items), "items round-trip");
+        let ids = |p: &str| d.snapshots(p).iter().map(|s| s.id).collect::<Vec<_>>();
+        assert_eq!(ids("VL1"), [three, two, one]);
+        assert_eq!(d.snapshot(one).unwrap().title.as_deref(), Some("Mix"));
+
+        // Asking for fewer than two still keeps the current one and its reference.
+        assert_eq!(d.prune_snapshots(0), [one]);
+        assert_eq!(ids("VL1"), [three, two]);
+        assert_eq!(ids("VL2"), [other]);
+        assert!(d.prune_snapshots(30).is_empty());
+        assert!(d.snapshot(one).is_none());
+    }
+
+    #[test]
+    fn snapshots_outlive_forget_retain_and_sign_out_but_sync_records_do_not() {
+        let d = db();
+        let sync = PlaylistSync { synced_at: 1, item_count: 1, added: 1, removed: 0, moved: 0 };
+        for pl in ["VL1", "VL2", "VL3"] {
+            d.put_snapshot_if_changed(pl, Some("acc"), None, 1, &[snap("a")]).unwrap();
+            d.set_playlist_sync(pl, &sync).unwrap();
+        }
+        d.record_monitor_run(&run(1, "scheduler", "ok")).unwrap();
+
+        d.forget_playlist("VL1");
+        assert!(!d.playlist_syncs().contains_key("VL1"));
+        d.retain_playlists(&["VL3".into()]);
+        assert_eq!(d.playlist_syncs().into_keys().collect::<Vec<_>>(), ["VL3"]);
+        assert_eq!(d.playlist_syncs()["VL3"], sync);
+        d.clear_playlist_index();
+        assert!(d.playlist_syncs().is_empty());
+
+        for pl in ["VL1", "VL2", "VL3"] {
+            assert_eq!(d.snapshots(pl).len(), 1, "{pl}'s history was dropped");
+        }
+        assert_eq!(d.monitor_runs(10).len(), 1);
+    }
+
+    #[test]
+    fn monitor_runs_come_back_newest_first() {
+        let d = db();
+        for at in [10, 30, 20] {
+            d.record_monitor_run(&run(at, "manual_ui", "partial")).unwrap();
+        }
+        let got = d.monitor_runs(2);
+        assert_eq!(got.iter().map(|r| r.started_at).collect::<Vec<_>>(), [30, 20]);
+        assert_eq!((got[0].finished_at, got[0].trigger.as_str()), (35, "manual_ui"));
+    }
+
+    #[test]
+    fn downloads_move_through_their_states() {
+        let d = db();
+        let req = |video_id, redownload| NewDownload {
+            video: VideoMeta {
+                video_id,
+                title: Some("T"),
+                channel: Some("C"),
+                duration_s: Some(200),
+            },
+            format: "audio",
+            requested_quality: "best",
+            thumbnail_mode: "embed",
+            dest_dir: "/music",
+            redownload,
+        };
+        let status = |v: &str| d.downloads_for(&[v.to_owned()])[0].status.clone();
+
+        assert_eq!(d.enqueue_download(&req("a", false), 100).unwrap(), EnqueueOutcome::Queued);
+        assert_eq!(d.enqueue_download(&req("b", false), 101).unwrap(), EnqueueOutcome::Queued);
+        assert_eq!(d.enqueue_download(&req("a", true), 102).unwrap(), EnqueueOutcome::Already);
+        assert_eq!(d.next_queued_download().unwrap().video_id, "a", "first in, first out");
+
+        assert!(d.mark_download_running("a", "audio"));
+        assert!(!d.mark_download_running("a", "audio"), "only a queued row starts");
+        assert_eq!(d.next_queued_download().unwrap().video_id, "b");
+        // A run that died mid-download leaves it running; the runner's start puts it back.
+        assert_eq!(d.reset_orphaned_downloads(), 1);
+        assert_eq!(status("a"), "queued");
+        assert!(d.mark_download_running("a", "audio"));
+        let file = "/music/a.m4a";
+        assert!(d.mark_download_available("a", "audio", file, Some(1234), Some("m4a"), 150));
+        let row = d.downloads_for(&["a".into()]).remove(0);
+        assert_eq!((row.status.as_str(), row.attempts), ("available", 2));
+        assert_eq!(row.completed_at.as_deref(), Some(rfc3339_utc(150).as_str()));
+        assert_eq!((row.file_path.as_deref(), row.file_size_bytes), (Some(file), Some(1234)));
+
+        assert_eq!(d.enqueue_download(&req("a", false), 160).unwrap(), EnqueueOutcome::Already);
+        assert_eq!(d.enqueue_download(&req("a", true), 161).unwrap(), EnqueueOutcome::Requeued);
+        assert_eq!(status("a"), "queued");
+
+        assert!(d.mark_download_error("b", "audio", "HTTP 403"));
+        assert_eq!(d.enqueue_download(&req("b", false), 170).unwrap(), EnqueueOutcome::Requeued);
+        assert!(d.mark_download_running("b", "audio"));
+        assert!(d.mark_download_available("b", "audio", "/music/b.m4a", None, None, 180));
+        assert!(d.mark_download_verified("b", "audio", 190));
+        assert!(d.mark_download_missing("b", "audio", 200));
+        assert!(!d.mark_download_verified("b", "audio", 210), "only an available row verifies");
+        assert_eq!(status("b"), "missing");
+        assert!(d.requeue_download("b", "audio", 220));
+        assert!(!d.requeue_download("b", "audio", 230), "already queued");
+
+        assert_eq!(d.downloads_for(&["a".into(), "b".into(), "zz".into()]).len(), 2);
+        assert_eq!(d.recent_downloads(1).len(), 1);
+        assert!(d.delete_download("a", "audio"));
+        assert!(d.downloads_for(&["a".into()]).is_empty());
+        let conn = d.0.lock().unwrap();
+        let title: Option<String> = conn
+            .query_row("SELECT title FROM videos WHERE video_id = 'a'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(title.as_deref(), Some("T"), "the video row stays");
+    }
+
+    #[test]
+    fn rfc3339_utc_formats_unix_seconds() {
+        assert_eq!(rfc3339_utc(0), "1970-01-01T00:00:00Z");
+        assert_eq!(rfc3339_utc(951_782_400), "2000-02-29T00:00:00Z");
+        assert_eq!(rfc3339_utc(1_700_000_000), "2023-11-14T22:13:20Z");
+        assert!(rfc3339_utc(99) < rfc3339_utc(1_000), "sorts as text in time order");
     }
 }
 

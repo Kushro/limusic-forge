@@ -162,7 +162,7 @@
 				<ul class="mt-2 space-y-1">
 					{#each alerts as a (a.playlist_id + a.video_id + a.kind)}
 						<li class="flex items-center gap-3 rounded-md px-1 py-1 text-sm">
-							<Badge variant={a.kind === 'gone' ? 'muted' : 'label'}>{t(`everywhere.kind_${a.kind}`)}</Badge>
+							<Badge variant={a.kind === 'removed' ? 'muted' : 'label'}>{t(`everywhere.kind_${a.kind}`)}</Badge>
 							<span class="min-w-0 flex-1 truncate">
 								{a.song?.title ?? a.video_id}
 								<span class="text-muted-foreground"> · {a.song?.artists ?? ''} · {nameOf(a.playlist_id)}</span>

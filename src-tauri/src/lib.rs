@@ -956,6 +956,7 @@ pub fn run() {
             commands::ambient_frame,
             commands::get_settings,
             commands::set_setting,
+            commands::db_migration_error,
             commands::get_global_hotkeys,
             commands::global_hotkeys_on_wayland,
             commands::set_global_hotkeys,

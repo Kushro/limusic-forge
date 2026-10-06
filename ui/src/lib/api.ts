@@ -441,6 +441,8 @@ export type Settings = Record<string, string> & {
 export const getSettings = () => invoke<Settings>('get_settings');
 export const setSetting = (key: string, value: string) =>
 	invoke<void>('set_setting', { key, value });
+/** Why the database's schema upgrade failed at startup, or `null` if it did not. */
+export const dbMigrationError = () => invoke<string | null>('db_migration_error');
 /** Streamable client keys for the "disabled clients" setting. */
 export const getStreamClients = () => invoke<string[]>('get_stream_clients');
 /** Wipe both cache tiers (URL cache + mpv on-disk audio cache). */
@@ -901,7 +903,7 @@ export const keepOnlyIn = async (
 export type PlaylistAlert = {
 	playlist_id: string;
 	video_id: string;
-	kind: 'gone' | 'unavailable';
+	kind: 'removed' | 'unavailable';
 	song: SongItem | null;
 	at: number;
 };
