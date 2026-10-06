@@ -10,6 +10,8 @@ use innertube::{
 use tauri::{Emitter, Manager, State};
 
 use crate::blocked::BlockedArtist;
+use crate::playlist_tools::journal::{self, Named, OpRecord, Restore, Summary};
+use crate::playlist_tools::rows;
 use crate::state::{
     is_local_playlist, AppState, LOCAL_PLAYLIST_PREFIX, ON_REPEAT_ID, ON_REPEAT_LIMIT,
     ON_REPEAT_WINDOW_SECS,
@@ -1127,7 +1129,7 @@ pub async fn set_album_saved(
 /// Login, plus the guard every playlist edit needs. Two ids never reach `edit_playlist`: On Repeat
 /// has no YouTube playlist behind it, and Liked Music is an auto-playlist YouTube edits through the
 /// rating endpoint instead. Both answer 400 there.
-fn editable_playlist<'a>(
+pub(crate) fn editable_playlist<'a>(
     state: &'a Arc<AppState>,
     playlist_id: &str,
 ) -> Result<&'a innertube::YouTubeClient, String> {
@@ -1553,19 +1555,78 @@ fn custom_cover(state: &Arc<AppState>, playlist_id: &str) -> Option<String> {
 
 #[tauri::command]
 pub async fn delete_playlist(state: St<'_>, playlist_id: String) -> Result<(), String> {
-    if is_local_playlist(&playlist_id) {
-        state.db.delete_local_playlist(local_key(&playlist_id)?).map_err(db_err)?;
+    delete_playlist_inner(&state, &playlist_id).await
+}
+
+/// `delete_playlist`, for the playlist tools' undo of a playlist they created.
+pub(crate) async fn delete_playlist_inner(
+    state: &Arc<AppState>,
+    playlist_id: &str,
+) -> Result<(), String> {
+    if is_local_playlist(playlist_id) {
+        state.db.delete_local_playlist(local_key(playlist_id)?).map_err(db_err)?;
         // Its artwork was a copy made for it, so it goes too.
-        if let Some(cover) = state.db.get_setting(&cover_key(&playlist_id)) {
+        if let Some(cover) = state.db.get_setting(&cover_key(playlist_id)) {
             let _ = std::fs::remove_file(cover);
-            state.db.delete_setting(&cover_key(&playlist_id));
+            state.db.delete_setting(&cover_key(playlist_id));
         }
         return Ok(());
     }
-    let client = editable_playlist(&state, &playlist_id)?;
-    state.it.delete_playlist(client, &playlist_id).await.map_err(|e| e.to_string())?;
-    state.db.forget_playlist(&playlist_id);
+    let client = editable_playlist(state, playlist_id)?;
+    state.it.delete_playlist(client, playlist_id).await.map_err(|e| e.to_string())?;
+    state.db.forget_playlist(playlist_id);
     Ok(())
+}
+
+// --- playlist tools (playlist_tools/) ----------------------------------------------------------
+// Each edit answers its journal entry (`OpRecord`), which the UI turns into an "Undo" toast, and
+// announces the playlists it touched (`playlists-edited`) so any open page re-reads them.
+
+/// Put a playlist in `order` (row handles: `set_video_id`s). `None` when nothing had to move.
+#[tauri::command]
+pub async fn reorder_playlist(
+    state: St<'_>,
+    playlist_id: String,
+    title: String,
+    order: Vec<String>,
+) -> Result<Option<OpRecord>, String> {
+    let (before, moved) = rows::reorder(&state, &playlist_id, &order, &|| false).await?;
+    if moved == 0 {
+        return Ok(None);
+    }
+    journal::announce(&state, std::slice::from_ref(&playlist_id));
+    let summary =
+        Summary { playlists: vec![Named { id: playlist_id.clone(), title }], count: moved };
+    Ok(journal::record(&state, "reorder", &summary, &journal::reorder_undo(&playlist_id, before)))
+}
+
+/// Take rows out of a playlist, undoably. Each row comes with the handle of the row after it that
+/// stays (`before`), which is where an undo puts it back.
+#[tauri::command]
+pub async fn remove_tracks(
+    state: St<'_>,
+    playlist_id: String,
+    title: String,
+    rows: Vec<Restore>,
+) -> Result<Option<OpRecord>, String> {
+    let songs: Vec<SongItem> = rows.iter().map(|r| r.song.clone()).collect();
+    rows::remove_rows(&state, &playlist_id, &songs, &|| false).await?;
+    journal::announce(&state, std::slice::from_ref(&playlist_id));
+    let summary =
+        Summary { playlists: vec![Named { id: playlist_id.clone(), title }], count: songs.len() };
+    let undo = [journal::restore_step(&playlist_id, &rows)];
+    Ok(journal::record(&state, "remove", &summary, &undo))
+}
+
+/// The undo history, newest first.
+#[tauri::command]
+pub fn playlist_history(state: St<'_>) -> Vec<OpRecord> {
+    journal::history(&state)
+}
+
+#[tauri::command]
+pub async fn undo_playlist_op(state: St<'_>, id: i64) -> Result<OpRecord, String> {
+    journal::undo(&state, id).await
 }
 
 // --- playlists on this machine (issue #251) --------------------------------------------------
@@ -1577,11 +1638,11 @@ const GONE: &str = "This playlist is no longer on this device.";
 
 /// `LOCALPLAYLIST:<n>` → n. An id with the prefix and no number is still not YouTube's, so it is
 /// an error rather than a fall-through to a browse YouTube would 400.
-fn local_key(id: &str) -> Result<i64, String> {
+pub(crate) fn local_key(id: &str) -> Result<i64, String> {
     id.strip_prefix(LOCAL_PLAYLIST_PREFIX).and_then(|n| n.parse().ok()).ok_or_else(|| GONE.into())
 }
 
-fn db_err(e: rusqlite::Error) -> String {
+pub(crate) fn db_err(e: rusqlite::Error) -> String {
     match e {
         rusqlite::Error::QueryReturnedNoRows => GONE.into(),
         e => e.to_string(),

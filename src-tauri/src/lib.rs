@@ -26,6 +26,7 @@ mod nativevideo;
 mod nativevideo;
 mod notify;
 mod orchestrator;
+mod playlist_tools;
 mod potoken;
 mod romanize;
 mod session;
@@ -903,6 +904,10 @@ pub fn run() {
             commands::local_playlists,
             commands::remove_from_playlist,
             commands::remove_many_from_playlist,
+            commands::reorder_playlist,
+            commands::remove_tracks,
+            commands::playlist_history,
+            commands::undo_playlist_op,
             commands::create_playlist,
             commands::edit_playlist_details,
             commands::set_playlist_cover,
