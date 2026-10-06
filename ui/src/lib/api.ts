@@ -977,7 +977,9 @@ export type BuildProgress = { done: number; total: number; current: string };
 export const onPlaylistOpProgress = (cb: (p: BuildProgress) => void): Promise<UnlistenFn> =>
 	listen<BuildProgress>('playlist-op-progress', (e) => cb(e.payload));
 /** A song in your playlists, once, with the ids of the playlists that hold it. */
-export type Everywhere = { song: SongItem; playlists: string[] };
+/** A song with the playlists holding it, and when it was first seen in any of them (epoch seconds;
+ *  null when they all held it from before tracking began). */
+export type Everywhere = { song: SongItem; playlists: string[]; first_seen: number | null };
 /** Every song across your playlists, from the index (no network). */
 export const songsEverywhere = () => invoke<Everywhere[]>('songs_everywhere');
 export type Kept = { added: number; removed: number; failed: string[]; op: PlaylistOp | null };

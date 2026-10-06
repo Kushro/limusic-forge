@@ -1102,17 +1102,22 @@ impl Db {
     }
 
     /// Every track in every playlist of yours that has its metadata, the ones on this machine
-    /// included: `(videoId, playlist id, song_json)`.
-    pub fn indexed_songs(&self) -> Vec<(String, String, String)> {
+    /// included: `(videoId, playlist id, song_json, first_seen)`. `first_seen` is in epoch seconds,
+    /// null for a track held since before tracking began; a local playlist's is when it was added.
+    pub fn indexed_songs(&self) -> Vec<(String, String, String, Option<i64>)> {
         let conn = self.0.lock().unwrap();
         let sql = format!(
-            "SELECT video_id, playlist_id, song_json FROM playlist_track WHERE song_json IS NOT NULL \
-             UNION ALL SELECT video_id, '{}' || playlist_id, song_json FROM local_playlist_tracks",
+            "SELECT video_id, playlist_id, song_json, first_seen FROM playlist_track \
+             WHERE song_json IS NOT NULL \
+             UNION ALL SELECT video_id, '{}' || playlist_id, song_json, added_at \
+             FROM local_playlist_tracks",
             crate::state::LOCAL_PLAYLIST_PREFIX
         );
         let mut out = Vec::new();
         if let Ok(mut stmt) = conn.prepare(&sql) {
-            if let Ok(rows) = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))) {
+            if let Ok(rows) =
+                stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+            {
                 out.extend(rows.flatten());
             }
         }
@@ -2885,6 +2890,21 @@ mod tests {
     }
 
     #[test]
+    fn indexed_songs_carry_first_seen() {
+        let d = db();
+        d.set_playlist_songs("VL1", &[("a".into(), "{}".into())]); // first read: undated
+        d.put_playlist_song("VL2", "a", "{}"); // added through the app: now
+        let local = d.create_local_playlist("Here", 1).unwrap();
+        d.add_local_playlist_tracks(local, &[("a".into(), "{}".into())], 42).unwrap();
+        let here = format!("{}{local}", crate::state::LOCAL_PLAYLIST_PREFIX);
+        let seen: std::collections::HashMap<String, Option<i64>> =
+            d.indexed_songs().into_iter().map(|(_, p, _, s)| (p, s)).collect();
+        assert_eq!(seen["VL1"], None);
+        assert!(seen["VL2"].is_some_and(|s| s > 1_000_000_000), "epoch seconds");
+        assert_eq!(seen[&here], Some(42), "a local track's date is when it was added");
+    }
+
+    #[test]
     fn indexed_songs_and_alerts() {
         let d = db();
         d.set_playlist_songs("VL1", &[("a".into(), "{\"t\":1}".into()), ("b".into(), "{}".into())]);
@@ -2893,7 +2913,7 @@ mod tests {
         let local = d.create_local_playlist("Here", 1).unwrap();
         d.add_local_playlist_tracks(local, &[("a".into(), "{}".into())], 1).unwrap();
         let mut got: Vec<(String, String)> =
-            d.indexed_songs().into_iter().map(|(v, p, _)| (v, p)).collect();
+            d.indexed_songs().into_iter().map(|(v, p, _, _)| (v, p)).collect();
         got.sort();
         let here = format!("{}{local}", crate::state::LOCAL_PLAYLIST_PREFIX);
         let want: Vec<(String, String)> =

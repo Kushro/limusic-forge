@@ -20,14 +20,30 @@ pub struct Everywhere {
     pub song: SongItem,
     /// The playlists holding it, in the order the index listed them.
     pub playlists: Vec<String>,
+    /// When it was first seen in any of them (epoch seconds), the earliest one known; null when
+    /// every one of them held it from before tracking began. An unknown date never wins over a
+    /// known one, so a song that sat in one playlist since before tracking began shows the date it
+    /// was later added to another playlist.
+    pub first_seen: Option<i64>,
 }
 
-/// Group `(videoId, playlist id, song_json)` rows by song. The ones in the most playlists first,
-/// then by title. Liked Music is left out: a like is not a playlist you filed a song in.
-pub fn group(rows: Vec<(String, String, String)>) -> Vec<Everywhere> {
+/// The earlier of two dates, either of which may be unknown. Unknown (`None`) means "held from
+/// before tracking began", not "older than everything": it is skipped rather than treated as the
+/// earliest, so the result is the earliest *known* date (see [`Everywhere::first_seen`]).
+fn earliest(a: Option<i64>, b: Option<i64>) -> Option<i64> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+    }
+}
+
+/// Group `(videoId, playlist id, song_json, first_seen)` rows by song. The ones in the most
+/// playlists first, then by title. Liked Music is left out: a like is not a playlist you filed a
+/// song in, and its date doesn't count either.
+pub fn group(rows: Vec<(String, String, String, Option<i64>)>) -> Vec<Everywhere> {
     let mut order: Vec<String> = Vec::new();
     let mut by: HashMap<String, Everywhere> = HashMap::new();
-    for (video_id, playlist, json) in rows {
+    for (video_id, playlist, json, seen) in rows {
         if playlist == LIKED_MUSIC_ID {
             continue;
         }
@@ -36,11 +52,13 @@ pub fn group(rows: Vec<(String, String, String)>) -> Vec<Everywhere> {
                 if !e.playlists.contains(&playlist) {
                     e.playlists.push(playlist);
                 }
+                e.first_seen = earliest(e.first_seen, seen);
             }
             None => {
                 let Ok(song) = serde_json::from_str::<SongItem>(&json) else { continue };
                 order.push(video_id.clone());
-                by.insert(video_id, Everywhere { song, playlists: vec![playlist] });
+                let e = Everywhere { song, playlists: vec![playlist], first_seen: seen };
+                by.insert(video_id, e);
             }
         }
     }
@@ -195,19 +213,48 @@ mod tests {
     #[test]
     fn grouped_by_song_most_playlists_first_liked_left_out() {
         let rows = vec![
-            ("a".into(), "VL1".into(), json("a", "Zeta")),
-            ("b".into(), "VL1".into(), json("b", "Alpha")),
-            ("a".into(), "VL2".into(), json("a", "Zeta")),
-            ("a".into(), "VLLM".into(), json("a", "Zeta")),
-            ("c".into(), "VL2".into(), json("c", "beta")),
-            ("x".into(), "VL2".into(), "not json".into()),
+            ("a".into(), "VL1".into(), json("a", "Zeta"), None),
+            ("b".into(), "VL1".into(), json("b", "Alpha"), Some(50)),
+            ("a".into(), "VL2".into(), json("a", "Zeta"), Some(300)),
+            ("a".into(), "VLLM".into(), json("a", "Zeta"), Some(10)),
+            ("c".into(), "VL2".into(), json("c", "beta"), None),
+            ("x".into(), "VL2".into(), "not json".into(), Some(1)),
         ];
         let g = group(rows);
-        let got: Vec<(&str, Vec<&str>)> = g
+        let got: Vec<(&str, Vec<&str>, Option<i64>)> = g
             .iter()
-            .map(|e| (e.song.video_id.as_str(), e.playlists.iter().map(String::as_str).collect()))
+            .map(|e| {
+                (
+                    e.song.video_id.as_str(),
+                    e.playlists.iter().map(String::as_str).collect(),
+                    e.first_seen,
+                )
+            })
             .collect();
-        assert_eq!(got, [("a", vec!["VL1", "VL2"]), ("b", vec!["VL1"]), ("c", vec!["VL2"])]);
+        assert_eq!(
+            got,
+            [
+                ("a", vec!["VL1", "VL2"], Some(300)),
+                ("b", vec!["VL1"], Some(50)),
+                ("c", vec!["VL2"], None),
+            ]
+        );
+    }
+
+    #[test]
+    fn first_seen_is_the_earliest_known_date() {
+        let rows = vec![
+            ("a".into(), "VL1".into(), json("a", "A"), Some(500)),
+            ("a".into(), "VL2".into(), json("a", "A"), None),
+            ("a".into(), "VL3".into(), json("a", "A"), Some(200)),
+            ("a".into(), "VL4".into(), json("a", "A"), Some(900)),
+        ];
+        let g = group(rows);
+        assert_eq!(g.len(), 1);
+        assert_eq!(g[0].first_seen, Some(200), "unknown dates don't win over known ones");
+        assert_eq!(earliest(None, None), None);
+        assert_eq!(earliest(Some(3), None), Some(3));
+        assert_eq!(earliest(None, Some(4)), Some(4));
     }
 
     #[test]

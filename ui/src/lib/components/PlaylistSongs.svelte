@@ -1,7 +1,9 @@
 <script lang="ts">
 	// Library ▸ In your playlists: every song across your playlists once, with a chip per playlist
 	// that holds it (PlaylistForge's global Videos screen). Tick songs to keep them in one playlist
-	// only, or to take them out of all of them; both undo from the toast. Above the list, the
+	// only, or to take them out of all of them; both undo from the toast. Drag rows onto a sidebar
+	// playlist to copy them there. The facet chips (`FilterChips` in its global mode) narrow by
+	// playlist, availability, first seen and spread, and the list sorts. Above the list, the
 	// monitor's alerts: tracks that left a playlist or turned unavailable since the last sync.
 	import { onMount } from 'svelte';
 	import { goto } from '$app/navigation';
@@ -12,7 +14,8 @@
 		MusicNote01Icon,
 		Search01Icon,
 		SquareArrowRightDoubleIcon,
-		Delete02Icon
+		Delete02Icon,
+		Sorting01Icon
 	} from '@hugeicons/core-free-icons';
 	import * as api from '$lib/api';
 	import type { BrowseItem, Everywhere, PlaylistAlert, SongItem } from '$lib/api';
@@ -20,15 +23,28 @@
 	import { mergeSaved, orderLibrary } from '$lib/personal';
 	import { canDropOn } from '$lib/transfer.svelte';
 	import { announceOp } from '$lib/playlistops.svelte';
-	import { fold } from '$lib/facets';
+	import {
+		applyFacets,
+		fold,
+		NO_FACETS,
+		playlistCounts,
+		regexFilter,
+		sortEverywhere,
+		type EverywhereSort,
+		type FacetContext,
+		type Facets
+	} from '$lib/facets';
+	import { setDragRows } from '$lib/dnd';
+	import { endRowDrag, startRowDrag } from '$lib/rowdrag.svelte';
 	import { thumb } from '$lib/thumb';
 	import { t } from '$lib/i18n.svelte';
 	import { Badge } from './ui/badge';
 	import { Button } from './ui/button';
 	import { Checkbox } from './ui/checkbox';
-	import { Switch } from './ui/switch';
 	import * as Popover from './ui/popover';
+	import * as Select from './ui/select';
 	import TrackFilter from './TrackFilter.svelte';
+	import FilterChips from './FilterChips.svelte';
 
 	let { onalerts }: { onalerts?: (n: number) => void } = $props();
 
@@ -36,7 +52,9 @@
 	let alerts = $state.raw<PlaylistAlert[]>([]);
 	let loading = $state(true);
 	let query = $state('');
-	let shared = $state(false);
+	let facets = $state<Facets>({ ...NO_FACETS });
+	let regex = $state(false);
+	let sort = $state<EverywhereSort>('playlists');
 	let limit = $state(200);
 	let picked = $state<Set<string>>(new Set());
 	let busy = $state(false);
@@ -65,18 +83,75 @@
 	const nameOf = (id: string) => names.get(id) ?? t('common.playlist_singular');
 	const targets = $derived(playlists.filter((p) => canDropOn(p, null)));
 
-	const shown = $derived.by(() => {
+	// Search box (plain, or a regex with `.*`), then the facet chips, then the chosen order.
+	const byId = $derived(new Map(songs.map((e) => [e.song.video_id, e])));
+	const allSongs = $derived(songs.map((e) => e.song));
+	const ctx: FacetContext = {
+		copies: new Map(),
+		elsewhere: (v) => (byId.get(v)?.playlists.length ?? 0) > 1,
+		playlistsOf: (v) => byId.get(v)?.playlists ?? [],
+		firstSeen: (v) => byId.get(v)?.first_seen ?? null
+	};
+	const searched = $derived.by((): { list: Everywhere[]; error: boolean } => {
+		if (regex) {
+			const r = regexFilter(allSongs, query);
+			const keep = new Set(r.items);
+			return { list: songs.filter((e) => keep.has(e.song)), error: r.error };
+		}
 		const q = fold(query.trim());
-		return songs.filter(
-			(e) =>
-				(!shared || e.playlists.length > 1) &&
-				(!q ||
+		if (!q) return { list: songs, error: false };
+		return {
+			list: songs.filter(
+				(e) =>
 					fold(e.song.title).includes(q) ||
 					fold(e.song.artists ?? '').includes(q) ||
-					e.playlists.some((p) => fold(nameOf(p)).includes(q)))
-		);
+					e.playlists.some((p) => fold(nameOf(p)).includes(q))
+			),
+			error: false
+		};
 	});
+	const shown = $derived.by(() => {
+		const keep = new Set(applyFacets(searched.list.map((e) => e.song), facets, ctx));
+		return sortEverywhere(searched.list.filter((e) => keep.has(e.song)), sort);
+	});
+	// The playlist facet's choices: the ones holding at least one song here, biggest first.
+	const facetPlaylists = $derived(
+		[...playlistCounts(songs)]
+			.map(([id, count]) => ({ id, title: nameOf(id), count }))
+			.sort((a, b) => b.count - a.count || a.title.localeCompare(b.title))
+	);
+	const SORTS = [
+		{ value: 'playlists', label: 'everywhere.sort_playlists' },
+		{ value: 'newest', label: 'sort.newest' },
+		{ value: 'oldest', label: 'sort.oldest' },
+		{ value: 'title', label: 'sort.title' },
+		{ value: 'artist', label: 'sort.artist' }
+	] as const satisfies readonly { value: EverywhereSort; label: string }[];
+	const sortLabel = $derived(t((SORTS.find((o) => o.value === sort) ?? SORTS[0]).label));
 	const pickedSongs = $derived(songs.filter((e) => picked.has(e.song.video_id)).map((e) => e.song));
+	const allShownPicked = $derived(shown.every((e) => picked.has(e.song.video_id)));
+
+	/** Tick every song the search and filters leave on screen (the ones not yet scrolled to too). */
+	function selectFiltered() {
+		picked = new Set(shown.map((e) => e.song.video_id));
+		confirmRemove = false;
+	}
+
+	// A row dragged onto a sidebar playlist copies there (`from: null`: these come from many
+	// playlists, so there is no one source to move them out of). Ticked rows go together, the ones
+	// filtered out of sight included, when the dragged one is among them.
+	function dragStart(e: DragEvent, song: SongItem) {
+		if (!e.dataTransfer) return;
+		const rows = picked.has(song.video_id) ? pickedSongs : [song];
+		setDragRows(e, {
+			from: null,
+			fromTitle: t('everywhere.title'),
+			// The index's row handle belongs to one playlist; a copy makes its own.
+			rows: rows.map((s) => ({ song: { ...s, set_video_id: undefined }, before: null }))
+		});
+		e.dataTransfer.effectAllowed = 'copy';
+		startRowDrag(rows.length, null);
+	}
 
 	function toggle(id: string, on: boolean) {
 		const next = new Set(picked);
@@ -200,11 +275,26 @@
 
 	<div class="mb-3 flex flex-wrap items-center gap-3">
 		<p class="text-sm text-muted-foreground">{t('everywhere.intro', { count: songs.length })}</p>
-		<label class="ml-auto flex items-center gap-2 text-sm">
-			<Switch bind:checked={shared} />
-			{t('everywhere.shared')}
-		</label>
+		<Select.Root type="single" value={sort} onValueChange={(v) => v && (sort = v as EverywhereSort)}>
+			<Select.Trigger size="sm" class="ml-auto w-48" aria-label={t('sort.label')}>
+				<HugeiconsIcon icon={Sorting01Icon} class="h-4 w-4 shrink-0" />
+				<span class="flex-1 truncate text-left">{sortLabel}</span>
+			</Select.Trigger>
+			<Select.Content>
+				{#each SORTS as o (o.value)}
+					<Select.Item value={o.value} label={t(o.label)}>{t(o.label)}</Select.Item>
+				{/each}
+			</Select.Content>
+		</Select.Root>
 		<TrackFilter bind:value={query} placeholder={t('everywhere.search')} />
+	</div>
+	<div class="mb-3 flex flex-wrap items-center gap-2">
+		<FilterChips bind:facets bind:regex regexError={searched.error} items={allSongs} global playlists={facetPlaylists} />
+		{#if shown.length && !allShownPicked}
+			<Button variant="ghost" size="sm" class="ml-auto" onclick={selectFiltered}>
+				{t('everywhere.select_filtered', { count: shown.length })}
+			</Button>
+		{/if}
 	</div>
 
 	{#if pickedSongs.length}
@@ -236,6 +326,7 @@
 					{t('everywhere.remove_all')}
 				</Button>
 			{/if}
+			<span class="hidden text-xs text-muted-foreground lg:inline">{t('everywhere.drag_hint')}</span>
 			<Button variant="ghost" size="sm" class="ml-auto" onclick={() => ((picked = new Set()), (confirmRemove = false))}>
 				{t('selection.clear')}
 			</Button>
@@ -256,6 +347,9 @@
 				{@const s = e.song}
 				<div
 					role="listitem"
+					draggable="true"
+					ondragstart={(ev) => dragStart(ev, s)}
+					ondragend={endRowDrag}
 					class="flex items-center gap-3 rounded-lg px-2 py-1.5 [content-visibility:auto] [contain-intrinsic-size:auto_3.5rem] hover:bg-accent/10 {s.video_id === playback.now?.videoId ? 'text-primary' : ''}"
 				>
 					<Checkbox
