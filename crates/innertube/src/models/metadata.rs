@@ -88,6 +88,10 @@ pub struct SongItem {
     /// reads false even when the same song shows the badge on an album page.
     #[serde(default)]
     pub explicit: bool,
+    /// YouTube greys this row out: taken down, made private, or blocked where you are. Only a
+    /// playlist row says so ([`is_greyed_out`]); everywhere else such a track simply isn't listed.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unavailable: bool,
     /// "Add to library" / "Remove from library" off this row's own menu ([`library_toggle`]).
     /// `None` on rows YouTube sent no such menu for, and on the ones this app builds itself (local
     /// files, On Repeat), where there is nothing to send.
@@ -565,8 +569,16 @@ pub(crate) fn parse_list_item(node: &Value) -> Option<SongItem> {
         is_video: is_video_row(node),
         is_upload: is_upload_row(node),
         explicit: is_explicit(node),
+        unavailable: is_greyed_out(node),
         library: library_toggle(node),
     })
+}
+
+/// A playlist row YouTube can't play any more renders greyed out, and says so in the row's display
+/// policy: the same signal ytmusicapi reads for `isAvailable`.
+pub(crate) fn is_greyed_out(node: &Value) -> bool {
+    node.get("musicItemRendererDisplayPolicy").and_then(Value::as_str)
+        == Some("MUSIC_ITEM_RENDERER_DISPLAY_POLICY_GREY_OUT")
 }
 
 /// A podcast episode row (`musicMultiRowListItemRenderer`), the only row a show page (`MPSP…`),
@@ -840,6 +852,7 @@ fn parse_panel_video(node: &Value) -> Option<SongItem> {
         // Queue-panel rows carry no badges today; asking anyway costs a map lookup and picks the
         // flag up for free if YouTube ever adds one.
         explicit: is_explicit(node),
+        unavailable: false,
         library: library_toggle(node),
     })
 }
@@ -1775,6 +1788,29 @@ mod tests {
     /// A row on a playlist you can't edit still carries a playlistSetVideoId, so the remove action
     /// in its own menu is what decides whether the row can be removed (issue #86: a collaborator
     /// can remove the tracks they added, and only those).
+    #[test]
+    fn a_greyed_out_row_is_unavailable() {
+        let row = |policy: Option<&str>| {
+            let mut r = serde_json::json!({
+                "playlistItemData": { "videoId": "abc" },
+                "flexColumns": [{ "musicResponsiveListItemFlexColumnRenderer": {
+                    "text": { "runs": [{ "text": "Gone song" }] } } }]
+            });
+            if let Some(p) = policy {
+                r["musicItemRendererDisplayPolicy"] = p.into();
+            }
+            r
+        };
+        let gone = parse_list_item(&row(Some("MUSIC_ITEM_RENDERER_DISPLAY_POLICY_GREY_OUT")))
+            .expect("a greyed-out row is still listed");
+        assert!(gone.unavailable);
+        assert!(!parse_list_item(&row(None)).unwrap().unavailable);
+        // Never written out when false, so every stored SongItem reads back the same.
+        assert!(!serde_json::to_string(&parse_list_item(&row(None)).unwrap())
+            .unwrap()
+            .contains("unavailable"));
+    }
+
     #[test]
     fn set_video_id_only_comes_from_a_row_that_may_be_removed() {
         let row = |menu: serde_json::Value| {

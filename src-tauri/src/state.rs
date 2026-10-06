@@ -3908,6 +3908,7 @@ fn track_to_song(t: &Track) -> SongItem {
         is_upload: false,
         // The Listen Together wire shape carries no badge, so a mirrored guest queue shows none.
         explicit: false,
+        unavailable: false,
         // Same: no menu came with a mirrored row, so there is no library token to offer.
         library: None,
     }
