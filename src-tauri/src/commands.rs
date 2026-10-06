@@ -226,7 +226,7 @@ pub async fn get_queue(state: St<'_>) -> Result<serde_json::Value, String> {
 /// `visitor_data`) and internal blobs (`queue_json`, `queue_index`, `queue_position`) never cross
 /// into the webview: they'd otherwise ship the login credential to the renderer on every open, and
 /// the webview can't overwrite them either.
-const UI_SETTINGS: [&str; 37] = [
+const UI_SETTINGS: [&str; 44] = [
     "volume",
     "proxy",
     "quality",
@@ -271,6 +271,15 @@ const UI_SETTINGS: [&str; 37] = [
     // Tools ▸ Extract into a new playlist: `build` (one undoable build, the default) or
     // `create_transfer` (make the playlist, then copy or move into it).
     "tools.extract_new_mode",
+    // Downloads (download/settings.rs): PF's keys, plus where the cookies come from
+    // (`session|none`) and which yt-dlp builds to install (`stable|nightly`).
+    "downloads.dir",
+    "downloads.default_format",
+    "downloads.audio_quality",
+    "downloads.video_quality",
+    "downloads.thumbnail_mode",
+    "downloads.cookies",
+    "downloads.ytdlp_channel",
 ];
 
 /// Resolve the music video for `video_id` and hand back a `limusicvideo://` URL the player view
@@ -1431,6 +1440,227 @@ pub async fn export_backups_now(state: St<'_>) -> Result<crate::backups::Outcome
 pub fn open_backups_dir(state: St<'_>) -> Result<(), String> {
     let data = crate::paths::data_dir(&state.app);
     crate::backups::open_dir(&crate::backups::backups_dir(&state.db, &data))
+}
+
+// --- downloads (download/) -----------------------------------------------------------------------
+
+type Downloads<'a> = State<'a, Arc<crate::download::runner::Runner>>;
+
+/// yt-dlp's version (`None`: missing or broken), whether ffmpeg is there, and whether the app
+/// manages them (Windows) or they come from PATH.
+#[tauri::command]
+pub async fn download_tools_status(
+    state: St<'_>,
+) -> Result<crate::download::tools::ToolsStatus, String> {
+    let data = crate::paths::data_dir(&state.app);
+    Ok(crate::download::tools::status(&data).await)
+}
+
+fn install_progress(
+    app: &tauri::AppHandle,
+) -> impl Fn(crate::download::tools::InstallProgress) + Send + Sync {
+    let app = app.clone();
+    move |p| {
+        let _ = app.emit("tools-install-progress", p);
+    }
+}
+
+/// Install or update yt-dlp from the `downloads.ytdlp_channel` releases, checked against the
+/// release's own `SHA2-256SUMS`. Answers the installed version. `Err("busy")` while another
+/// install runs, `Err("not_managed")` off Windows, `Err("checksum_mismatch")` when the bytes do
+/// not match. Progress goes out as `tools-install-progress`.
+#[tauri::command]
+pub async fn install_ytdlp(state: St<'_>, downloads: Downloads<'_>) -> Result<String, String> {
+    let Some(_installing) = downloads.begin_install() else { return Err("busy".into()) };
+    let data = crate::paths::data_dir(&state.app);
+    let repo = crate::download::settings::ytdlp_channel(&state.db).repo();
+    let progress = install_progress(&state.app);
+    let version = crate::download::tools::install_ytdlp(&data, repo, &progress).await?;
+    // A queue that was waiting for yt-dlp can go now.
+    downloads.nudge();
+    Ok(version)
+}
+
+/// Install or update ffmpeg (and ffprobe) from yt-dlp's FFmpeg-Builds, checked against the
+/// release's `checksums.sha256`. Errors as [`install_ytdlp`].
+#[tauri::command]
+pub async fn install_ffmpeg(state: St<'_>, downloads: Downloads<'_>) -> Result<(), String> {
+    let Some(_installing) = downloads.begin_install() else { return Err("busy".into()) };
+    let data = crate::paths::data_dir(&state.app);
+    let progress = install_progress(&state.app);
+    crate::download::tools::install_ffmpeg(&data, &progress).await
+}
+
+/// The download folder in use and the default one (`downloads.dir` empty).
+#[tauri::command]
+pub fn downloads_info(state: St<'_>) -> Value {
+    let data = crate::paths::data_dir(&state.app);
+    json!({
+        "dir": crate::download::settings::downloads_dir(&state.db, &data).to_string_lossy(),
+        "default_dir": crate::download::settings::default_dir(&data).to_string_lossy(),
+    })
+}
+
+/// Open the download folder in the file manager, creating it if it is not there yet.
+#[tauri::command]
+pub fn open_downloads_dir(state: St<'_>) -> Result<(), String> {
+    let data = crate::paths::data_dir(&state.app);
+    crate::backups::open_dir(&crate::download::settings::downloads_dir(&state.db, &data))
+}
+
+/// One song to download, with what the `videos` table keeps about it. A `SongItem` from the UI
+/// deserializes into this as it is.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct DownloadSong {
+    pub video_id: String,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub artists: Option<String>,
+    #[serde(default)]
+    pub duration: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+pub struct EnqueueResult {
+    /// New rows, and errored, missing or (with `redownload`) downloaded ones queued again.
+    pub queued: u32,
+    /// Already queued, running or downloaded: left as they were.
+    pub already: u32,
+    /// Not a YouTube video id (`^[A-Za-z0-9_-]{11}$`): dropped, never queued nor passed to
+    /// yt-dlp. Local songs are skipped without being counted here.
+    pub invalid: u32,
+}
+
+/// Queue `songs` in `format` (`audio`/`video`; the `downloads.default_format` setting when
+/// absent), with today's quality, cover and folder settings. Local files are skipped.
+/// `redownload` queues downloaded ones again. `Err("bad_format")` for any other format.
+#[tauri::command]
+pub async fn download_enqueue(
+    state: St<'_>,
+    downloads: Downloads<'_>,
+    songs: Vec<DownloadSong>,
+    format: Option<String>,
+    redownload: Option<bool>,
+) -> Result<EnqueueResult, String> {
+    use crate::download::settings;
+    let format = match format.as_deref() {
+        None => settings::default_format(&state.db),
+        Some(f) => settings::Format::parse(f).ok_or("bad_format")?,
+    };
+    let data = crate::paths::data_dir(&state.app);
+    let dest = settings::downloads_dir(&state.db, &data).to_string_lossy().into_owned();
+    let quality = settings::requested_quality(&state.db, format);
+    let thumbnail_mode = settings::thumbnail_mode(&state.db).as_str();
+    let now = crate::db::now_secs();
+
+    let mut result = EnqueueResult::default();
+    let mut ids = Vec::new();
+    for song in &songs {
+        if crate::local::is_local_song(&song.video_id) {
+            continue;
+        }
+        if !crate::download::ytdlp_args::is_valid_video_id(&song.video_id) {
+            result.invalid += 1;
+            continue;
+        }
+        let duration_s = song.duration.as_deref().and_then(crate::backups::duration_secs);
+        let request = crate::db::NewDownload {
+            video: crate::db::VideoMeta {
+                video_id: &song.video_id,
+                title: song.title.as_deref().filter(|t| !t.is_empty()),
+                channel: song.artists.as_deref().filter(|a| !a.is_empty()),
+                duration_s,
+            },
+            format: format.as_str(),
+            requested_quality: quality,
+            thumbnail_mode,
+            dest_dir: &dest,
+            redownload: redownload.unwrap_or(false),
+        };
+        match state.db.enqueue_download(&request, now).map_err(|e| e.to_string())? {
+            crate::db::EnqueueOutcome::Already => result.already += 1,
+            _ => {
+                result.queued += 1;
+                ids.push(song.video_id.clone());
+            }
+        }
+    }
+    if !ids.is_empty() {
+        crate::download::runner::emit_changed(&state.app, ids, None);
+        downloads.nudge();
+    }
+    Ok(result)
+}
+
+/// Stop the download that is running; its row goes (the file yt-dlp had started stays for a
+/// later resume). `false` when nothing runs.
+#[tauri::command]
+pub fn download_cancel(downloads: Downloads<'_>) -> bool {
+    downloads.cancel_active()
+}
+
+/// An errored, missing or downloaded row back into the queue, at the back. `false` for one
+/// already queued or running, or no row at all.
+#[tauri::command]
+pub fn download_retry(
+    state: St<'_>,
+    downloads: Downloads<'_>,
+    video_id: String,
+    format: String,
+) -> bool {
+    let requeued = state.db.requeue_download(&video_id, &format, crate::db::now_secs());
+    if requeued {
+        crate::download::runner::emit_changed(&state.app, vec![video_id], None);
+        downloads.nudge();
+    }
+    requeued
+}
+
+/// Forget a download: its row, and the run if it is the one running. Never the file.
+#[tauri::command]
+pub fn download_remove(
+    state: St<'_>,
+    downloads: Downloads<'_>,
+    video_id: String,
+    format: String,
+) -> bool {
+    // The runner drops the row of the run it stops.
+    if downloads.is_active(&video_id, &format) && downloads.cancel_active() {
+        return true;
+    }
+    let removed = state.db.delete_download(&video_id, &format);
+    if removed {
+        crate::download::runner::emit_changed(&state.app, vec![video_id], None);
+    }
+    removed
+}
+
+/// The download running now, as the last `download-progress` said; `None` when idle.
+#[tauri::command]
+pub fn download_active(downloads: Downloads<'_>) -> Option<crate::download::runner::Progress> {
+    downloads.active()
+}
+
+/// Every download row of these videos, grouped by video, after checking the files are still
+/// there (a moved file is found by its `[id]` marker; a deleted one goes `missing`).
+#[tauri::command]
+pub async fn downloads_for(
+    state: St<'_>,
+    video_ids: Vec<String>,
+) -> Result<std::collections::HashMap<String, Vec<crate::db::DownloadRow>>, String> {
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::download::verify::verify_for_video_ids(&db, &video_ids, crate::db::now_secs())
+    })
+    .await
+    .map_err(|e| e.to_string())
+}
+
+/// The newest downloads (50 by default), by completion or, until then, queueing date.
+#[tauri::command]
+pub fn downloads_recent(state: St<'_>, limit: Option<u32>) -> Vec<crate::db::DownloadRow> {
+    state.db.recent_downloads(limit.unwrap_or(50).clamp(1, 1000) as usize)
 }
 
 /// The whole crawl: every playlist you own, then the index pruned to them, the stamp, the summary
@@ -3473,6 +3703,33 @@ mod tests {
         // Guards the scan itself: a moved ui/src or a renamed call would otherwise pass vacuously.
         assert!(seen.iter().any(|k| k == "drop_mode"), "scan found no setSetting calls");
         assert!(seen.iter().any(|k| k == "drop_dupes"));
+    }
+
+    /// The Downloads tab writes its selects through a computed key, which the scan above skips.
+    #[test]
+    fn ui_settings_allow_every_download_setting() {
+        for key in crate::download::settings::KEYS {
+            assert!(UI_SETTINGS.contains(&key), "{key}");
+        }
+    }
+
+    #[test]
+    fn a_song_item_from_the_ui_deserializes_into_a_download_song() {
+        let song: DownloadSong = serde_json::from_value(json!({
+            "video_id": "abc",
+            "title": "Song",
+            "artists": "Artist",
+            "duration": "3:45",
+            "thumbnail": "https://example.invalid/t.jpg",
+            "album": "Album"
+        }))
+        .unwrap();
+        assert_eq!(song.video_id, "abc");
+        assert_eq!(song.title.as_deref(), Some("Song"));
+        assert_eq!(song.artists.as_deref(), Some("Artist"));
+        assert_eq!(song.duration.as_deref(), Some("3:45"));
+        let bare: DownloadSong = serde_json::from_value(json!({ "video_id": "xyz" })).unwrap();
+        assert_eq!(bare.title, None);
     }
 
     #[test]

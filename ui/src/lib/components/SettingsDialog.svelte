@@ -17,7 +17,8 @@
 		ArrowDown01Icon,
 		Alert02Icon,
 		LinkSquare02Icon,
-		DatabaseImportIcon
+		DatabaseImportIcon,
+		Download04Icon
 	} from '@hugeicons/core-free-icons';
 	import { Button } from '$lib/components/ui/button';
 	import { Input } from '$lib/components/ui/input';
@@ -82,14 +83,15 @@
 		recheckForUpdates
 	} from '$lib/updater.svelte';
 	import { getVersion } from '@tauri-apps/api/app';
-	import { t, setLocale, currentLocale, LOCALES } from '$lib/i18n.svelte';
+	import { t, setLocale, currentLocale, LOCALES, type TranslationKey } from '$lib/i18n.svelte';
 	import { appIcon, chooseAppIcon } from '$lib/appicon.svelte';
 	import GlobalHotkeysSettings from '$lib/components/GlobalHotkeysSettings.svelte';
 	import LyricsSourcesSettings from '$lib/components/LyricsSourcesSettings.svelte';
 	import LanguagePicker from '$lib/components/LanguagePicker.svelte';
 	import { APP_NAME, REPO_URL, UPSTREAM_VERSION } from '$lib/brand';
 
-	type TabId = SettingsTab;
+	// `downloads` is only reached from the rail, so it is not one of the tabs others open onto.
+	type TabId = SettingsTab | 'downloads';
 	const TABS = $derived<{ id: TabId; label: string; hint: string; icon: typeof Settings02Icon }[]>([
 		{ id: 'general', label: t('settings.tabs.general'), hint: t('settings.tabs.general_hint'), icon: Settings02Icon },
 		{ id: 'themes', label: t('settings.tabs.themes'), hint: t('settings.tabs.themes_hint'), icon: PaintBoardIcon },
@@ -97,6 +99,12 @@
 		{ id: 'hotkeys', label: t('settings.tabs.hotkeys'), hint: t('settings.tabs.hotkeys_hint'), icon: KeyboardIcon },
 		{ id: 'discord', label: t('settings.tabs.discord'), hint: t('settings.tabs.discord_hint'), icon: DiscordIcon },
 		{ id: 'data', label: t('settings.tabs.data'), hint: t('settings.tabs.data_hint'), icon: Database02Icon },
+		{
+			id: 'downloads',
+			label: t('settings.tabs.downloads'),
+			hint: t('settings.tabs.downloads_hint'),
+			icon: Download04Icon
+		},
 		{ id: 'import', label: t('settings.tabs.import'), hint: t('settings.tabs.import_hint'), icon: DatabaseImportIcon },
 		{ id: 'about', label: t('settings.tabs.about'), hint: t('settings.tabs.about_hint'), icon: InformationCircleIcon }
 	]);
@@ -717,6 +725,145 @@
 			backupsNote = { message: String(e), error: true };
 		}
 	}
+
+	// --- Downloads tab (Rust `download/`) ---
+	// yt-dlp and ffmpeg: installed into the app's folder on Windows (`managed`), from PATH
+	// elsewhere. The selects write the `downloads.*` settings; each falls back to the Rust default.
+	type DlSelect = { key: string; fallback: string; options: string[]; prefix: string };
+	const DL_SELECTS = {
+		format: { key: 'downloads.default_format', fallback: 'audio', options: ['audio', 'video'], prefix: 'format' },
+		audio: {
+			key: 'downloads.audio_quality',
+			fallback: 'mp3_320',
+			options: ['best', 'mp3_320', 'mp3_256', 'mp3_192'],
+			prefix: 'audio'
+		},
+		video: { key: 'downloads.video_quality', fallback: 'best', options: ['best', '1080p', '720p'], prefix: 'video' },
+		thumbnail: {
+			key: 'downloads.thumbnail_mode',
+			fallback: 'embed',
+			options: ['embed', 'file', 'both', 'none'],
+			prefix: 'thumbnail'
+		},
+		cookies: { key: 'downloads.cookies', fallback: 'session', options: ['session', 'none'], prefix: 'cookies' },
+		channel: { key: 'downloads.ytdlp_channel', fallback: 'stable', options: ['stable', 'nightly'], prefix: 'channel' }
+	} satisfies Record<string, DlSelect>;
+	const dlLabel = (prefix: string, value: string) =>
+		t(`settings.downloads.${prefix}_${value}` as TranslationKey);
+
+	let tools = $state<api.ToolsStatus | null>(null);
+	let dlInfo = $state<api.DownloadsInfo | null>(null);
+	let installing = $state<api.ToolsInstallProgress['tool'] | null>(null);
+	let installProgress = $state<api.ToolsInstallProgress | null>(null);
+	// Toasts render behind this modal, so the sections report on themselves.
+	let toolsNote = $state<{ message: string; error: boolean } | null>(null);
+	let dlNote = $state<{ message: string; error: boolean } | null>(null);
+
+	async function loadDownloads() {
+		try {
+			[tools, dlInfo] = await Promise.all([api.downloadToolsStatus(), api.downloadsInfo()]);
+		} catch (e) {
+			toolsNote = { message: String(e), error: true };
+		}
+	}
+	$effect(() => {
+		if (ui.settingsOpen && tab === 'downloads')
+			untrack(() => {
+				toolsNote = null;
+				dlNote = null;
+				loadDownloads();
+			});
+	});
+	$effect(() => {
+		if (!ui.settingsOpen || tab !== 'downloads') return;
+		let unlisten: (() => void) | undefined;
+		let gone = false;
+		api
+			.onToolsInstallProgress((p) => (installProgress = p))
+			.then((u) => (gone ? u() : (unlisten = u)))
+			.catch(() => {});
+		return () => {
+			gone = true;
+			unlisten?.();
+		};
+	});
+
+	function installError(e: unknown): string {
+		const code = String(e);
+		if (code === 'checksum_mismatch') return t('settings.downloads.err_checksum');
+		if (code === 'busy') return t('settings.downloads.err_busy');
+		if (code === 'not_managed') return t('settings.downloads.err_not_managed');
+		if (code === 'installed_but_does_not_run') return t('settings.downloads.err_broken');
+		return code;
+	}
+	async function installTool(tool: api.ToolsInstallProgress['tool']) {
+		toolsNote = null;
+		installing = tool;
+		installProgress = null;
+		try {
+			if (tool === 'yt-dlp') {
+				const version = await api.installYtdlp();
+				toolsNote = { message: t('settings.downloads.ytdlp_installed', { version }), error: false };
+			} else {
+				await api.installFfmpeg();
+				toolsNote = { message: t('settings.downloads.ffmpeg_installed'), error: false };
+			}
+		} catch (e) {
+			toolsNote = { message: installError(e), error: true };
+		} finally {
+			installing = null;
+			installProgress = null;
+			await loadDownloads();
+		}
+	}
+	function stageLabel(p: api.ToolsInstallProgress): string {
+		if (p.stage !== 'downloading') return t(`settings.downloads.stage_${p.stage}`);
+		const amount = p.total
+			? `${Math.round((p.received / p.total) * 100)}%`
+			: `${(p.received / 1048576).toFixed(1)} MB`;
+		return t('settings.downloads.stage_downloading', { progress: amount });
+	}
+
+	async function pickDownloadsDir() {
+		try {
+			const picked = await open({
+				directory: true,
+				title: t('settings.downloads.dir_dialog'),
+				defaultPath: dlInfo?.dir
+			});
+			if (typeof picked !== 'string') return;
+			await api.setSetting('downloads.dir', picked);
+			await loadDownloads();
+		} catch (e) {
+			dlNote = { message: String(e), error: true };
+		}
+	}
+	async function resetDownloadsDir() {
+		try {
+			await api.setSetting('downloads.dir', '');
+			await loadDownloads();
+		} catch (e) {
+			dlNote = { message: String(e), error: true };
+		}
+	}
+	async function openDownloads() {
+		try {
+			await api.openDownloadsDir();
+		} catch (e) {
+			dlNote = { message: String(e), error: true };
+		}
+	}
+	async function setDlOption(key: string, value: string) {
+		const before: string | undefined = settings[key];
+		settings[key] = value;
+		try {
+			await api.setSetting(key, value);
+		} catch (e) {
+			if (before === undefined) delete settings[key];
+			else settings[key] = before;
+			dlNote = { message: String(e), error: true };
+		}
+	}
 </script>
 
 <!-- One row shape for the whole modal: label and description on the left, the control on the right,
@@ -1182,6 +1329,90 @@
 									below: backupsNote ? backupsNoteLine : undefined,
 									tall: true
 								})}
+							</div>
+						</section>
+					{:else if tab === 'downloads'}
+						<section class={GROUP}>
+							<h3 class={LABEL}>{t('settings.sections.download_tools')}</h3>
+							<div class={CARD}>
+								{@render row({
+									title: t('settings.downloads.ytdlp'),
+									badge: tools?.ytdlp_version
+										? t('settings.downloads.version', { version: tools.ytdlp_version })
+										: undefined,
+									desc: tools?.managed === false
+										? t('settings.downloads.ytdlp_hint_system')
+										: t('settings.downloads.ytdlp_hint_managed'),
+									control: ytdlpControl,
+									below: installing === 'yt-dlp' && installProgress ? installLine : undefined,
+									tall: true
+								})}
+								{@render row({
+									title: t('settings.downloads.ffmpeg'),
+									badge: tools?.ffmpeg_present ? t('settings.downloads.installed') : undefined,
+									desc: tools?.managed === false
+										? t('settings.downloads.ffmpeg_hint_system')
+										: t('settings.downloads.ffmpeg_hint_managed'),
+									control: ffmpegControl,
+									below:
+										installing === 'ffmpeg' && installProgress
+											? installLine
+											: toolsNote
+												? toolsNoteLine
+												: undefined,
+									tall: true
+								})}
+							</div>
+						</section>
+						<section class={GROUP}>
+							<h3 class={LABEL}>{t('settings.sections.download_files')}</h3>
+							<div class={CARD}>
+								{@render row({
+									title: t('settings.downloads.dir'),
+									desc: t('settings.downloads.dir_hint'),
+									below: downloadsDirRow
+								})}
+								{@render row({
+									title: t('settings.downloads.format'),
+									desc: t('settings.downloads.format_hint'),
+									control: dlFormatSelect
+								})}
+								{@render row({
+									title: t('settings.downloads.audio_quality'),
+									desc: t('settings.downloads.audio_quality_hint'),
+									control: dlAudioSelect,
+									tall: true
+								})}
+								{@render row({
+									title: t('settings.downloads.video_quality'),
+									desc: t('settings.downloads.video_quality_hint'),
+									control: dlVideoSelect
+								})}
+								{@render row({
+									title: t('settings.downloads.thumbnail'),
+									desc: t('settings.downloads.thumbnail_hint'),
+									control: dlThumbnailSelect,
+									tall: true
+								})}
+							</div>
+						</section>
+						<section class={GROUP}>
+							<h3 class={LABEL}>{t('settings.sections.download_source')}</h3>
+							<div class={CARD}>
+								{@render row({
+									title: t('settings.downloads.cookies'),
+									desc: t('settings.downloads.cookies_hint'),
+									control: dlCookiesSelect,
+									tall: true
+								})}
+								{#if tools?.managed !== false}
+									{@render row({
+										title: t('settings.downloads.channel'),
+										desc: t('settings.downloads.channel_hint'),
+										control: dlChannelSelect,
+										tall: true
+									})}
+								{/if}
 							</div>
 						</section>
 					{:else if tab === 'import'}
@@ -1890,6 +2121,134 @@
 			{backupsNote.message}
 		</p>
 	{/if}
+{/snippet}
+
+{#snippet toolButton(tool: api.ToolsInstallProgress['tool'], present: boolean)}
+	<Button
+		size="sm"
+		variant={present ? 'outline' : 'default'}
+		disabled={installing !== null || !tools}
+		onclick={() => installTool(tool)}
+	>
+		{installing === tool
+			? t('settings.downloads.installing')
+			: present
+				? t('settings.downloads.update')
+				: t('settings.downloads.install')}
+	</Button>
+{/snippet}
+
+{#snippet systemToolState(present: boolean)}
+	<span class="text-xs text-muted-foreground">
+		{present ? t('settings.downloads.installed') : t('settings.downloads.not_found')}
+	</span>
+{/snippet}
+
+{#snippet ytdlpControl()}
+	{#if tools?.managed === false}
+		{@render systemToolState(!!tools.ytdlp_version)}
+	{:else}
+		{@render toolButton('yt-dlp', !!tools?.ytdlp_version)}
+	{/if}
+{/snippet}
+
+{#snippet ffmpegControl()}
+	{#if tools?.managed === false}
+		{@render systemToolState(tools.ffmpeg_present)}
+	{:else}
+		{@render toolButton('ffmpeg', !!tools?.ffmpeg_present)}
+	{/if}
+{/snippet}
+
+{#snippet installLine()}
+	{#if installProgress}
+		<div class="space-y-1.5">
+			{#if installProgress.stage === 'downloading' && installProgress.total}
+				<div class="h-1.5 overflow-hidden rounded-full bg-muted">
+					<div
+						class="h-full rounded-full bg-primary transition-[width]"
+						style="width: {Math.min(100, (installProgress.received / installProgress.total) * 100)}%"
+					></div>
+				</div>
+			{/if}
+			<p class="text-xs text-muted-foreground">{stageLabel(installProgress)}</p>
+		</div>
+	{/if}
+{/snippet}
+
+{#snippet toolsNoteLine()}
+	{#if toolsNote}
+		<p class="text-xs {toolsNote.error ? 'text-destructive' : 'text-muted-foreground'}">
+			{toolsNote.message}
+		</p>
+	{/if}
+{/snippet}
+
+{#snippet downloadsDirRow()}
+	<div class="flex items-center gap-2">
+		<span
+			class="min-w-0 flex-1 truncate rounded-lg bg-muted/60 px-3 py-1.5 font-mono text-xs"
+			title={dlInfo?.dir}
+		>
+			{dlInfo?.dir ?? ''}
+		</span>
+		<Button variant="outline" size="sm" class="shrink-0" onclick={pickDownloadsDir}>
+			{t('settings.downloads.dir_pick')}
+		</Button>
+		<Button variant="outline" size="sm" class="shrink-0" onclick={openDownloads}>
+			{t('settings.downloads.open')}
+		</Button>
+		{#if dlInfo && dlInfo.dir !== dlInfo.default_dir}
+			<Button variant="ghost" size="sm" class="shrink-0" onclick={resetDownloadsDir}>
+				{t('common.reset')}
+			</Button>
+		{/if}
+	</div>
+	{#if dlNote}
+		<p class="mt-2 text-xs {dlNote.error ? 'text-destructive' : 'text-muted-foreground'}">
+			{dlNote.message}
+		</p>
+	{/if}
+{/snippet}
+
+{#snippet dlSelect(o: DlSelect, label: string)}
+	{@const value = o.options.includes(settings[o.key]) ? settings[o.key] : o.fallback}
+	<Select.Root type="single" {value} onValueChange={(v) => setDlOption(o.key, v)}>
+		<Select.Trigger class="w-44 shrink-0" aria-label={label}>
+			<span class="flex-1 text-left">{dlLabel(o.prefix, value)}</span>
+		</Select.Trigger>
+		<Select.Content>
+			{#each o.options as option (option)}
+				<Select.Item value={option} label={dlLabel(o.prefix, option)}>
+					{dlLabel(o.prefix, option)}
+				</Select.Item>
+			{/each}
+		</Select.Content>
+	</Select.Root>
+{/snippet}
+
+{#snippet dlFormatSelect()}
+	{@render dlSelect(DL_SELECTS.format, t('settings.downloads.format'))}
+{/snippet}
+
+{#snippet dlAudioSelect()}
+	{@render dlSelect(DL_SELECTS.audio, t('settings.downloads.audio_quality'))}
+{/snippet}
+
+{#snippet dlVideoSelect()}
+	{@render dlSelect(DL_SELECTS.video, t('settings.downloads.video_quality'))}
+{/snippet}
+
+{#snippet dlThumbnailSelect()}
+	{@render dlSelect(DL_SELECTS.thumbnail, t('settings.downloads.thumbnail'))}
+{/snippet}
+
+{#snippet dlCookiesSelect()}
+	{@render dlSelect(DL_SELECTS.cookies, t('settings.downloads.cookies'))}
+{/snippet}
+
+{#snippet dlChannelSelect()}
+	{@render dlSelect(DL_SELECTS.channel, t('settings.downloads.channel'))}
 {/snippet}
 
 {#snippet copyDiagButton()}

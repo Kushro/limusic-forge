@@ -760,6 +760,99 @@ export type BackupsOutcome = { written: number; pruned_files: number; pruned_row
 export const exportBackupsNow = () => invoke<BackupsOutcome>('export_backups_now');
 /** Open the backups folder in the file manager (created if missing). */
 export const openBackupsDir = () => invoke<void>('open_backups_dir');
+
+// --- downloads (Rust `download/`) ---------------------------------------------------------------
+export type DownloadFormat = 'audio' | 'video';
+export type DownloadStatus = 'queued' | 'running' | 'available' | 'error' | 'missing';
+/** One `downloads` row. Dates are RFC 3339 UTC. */
+export type DownloadRow = {
+	video_id: string;
+	format: DownloadFormat;
+	status: DownloadStatus;
+	requested_quality: string;
+	thumbnail_mode: string;
+	dest_dir: string;
+	file_path: string | null;
+	file_size_bytes: number | null;
+	container: string | null;
+	error: string | null;
+	attempts: number;
+	created_at: string;
+	completed_at: string | null;
+	last_verified_at: string | null;
+};
+/** yt-dlp's version (null: missing or broken), ffmpeg's presence, and whether the app installs
+ *  them itself (Windows) or uses the ones on PATH. */
+export type ToolsStatus = { ytdlp_version: string | null; ffmpeg_present: boolean; managed: boolean };
+export const downloadToolsStatus = () => invoke<ToolsStatus>('download_tools_status');
+/** Install or update yt-dlp (channel: the `downloads.ytdlp_channel` setting). Resolves with the
+ *  installed version; rejects with `busy`, `not_managed`, `checksum_mismatch` or a message. */
+export const installYtdlp = () => invoke<string>('install_ytdlp');
+/** Install or update ffmpeg. Rejects as `installYtdlp`. */
+export const installFfmpeg = () => invoke<void>('install_ffmpeg');
+export type ToolsInstallProgress = {
+	tool: 'yt-dlp' | 'ffmpeg';
+	stage: 'resolving' | 'downloading' | 'verifying' | 'extracting' | 'done';
+	received: number;
+	total: number | null;
+};
+export const onToolsInstallProgress = (cb: (p: ToolsInstallProgress) => void): Promise<UnlistenFn> =>
+	listen<ToolsInstallProgress>('tools-install-progress', (e) => cb(e.payload));
+/** The download folder in use and the default one (the `downloads.dir` setting empty). */
+export type DownloadsInfo = { dir: string; default_dir: string };
+export const downloadsInfo = () => invoke<DownloadsInfo>('downloads_info');
+export const openDownloadsDir = () => invoke<void>('open_downloads_dir');
+export type EnqueueResult = { queued: number; already: number };
+/** What a download needs of a song: the id, plus what fills the catalog. A `SongItem` is one. */
+export type DownloadSong = Pick<SongItem, 'video_id'> &
+	Partial<Pick<SongItem, 'title' | 'artists' | 'duration'>>;
+/** Queue songs. `format` defaults to the `downloads.default_format` setting; `redownload` queues
+ *  downloaded ones again. Local files are skipped. */
+export const downloadEnqueue = (
+	songs: DownloadSong[],
+	format?: DownloadFormat,
+	redownload?: boolean
+) =>
+	invoke<EnqueueResult>('download_enqueue', {
+		songs,
+		format: format ?? null,
+		redownload: redownload ?? null
+	});
+/** Stop the running download (its row goes). False when nothing runs. */
+export const downloadCancel = () => invoke<boolean>('download_cancel');
+export const downloadRetry = (videoId: string, format: DownloadFormat) =>
+	invoke<boolean>('download_retry', { videoId, format });
+/** Forget a download (stopping it if it runs). Never deletes the file. */
+export const downloadRemove = (videoId: string, format: DownloadFormat) =>
+	invoke<boolean>('download_remove', { videoId, format });
+export type DownloadProgress = {
+	video_id: string;
+	format: DownloadFormat;
+	percent: number;
+	speed: string | null;
+	eta: string | null;
+};
+export const downloadActive = () => invoke<DownloadProgress | null>('download_active');
+/** The rows of these videos, by video, after checking their files are still on disk. */
+export const downloadsFor = (videoIds: string[]) =>
+	invoke<Record<string, DownloadRow[]>>('downloads_for', { videoIds });
+export const downloadsRecent = (limit?: number) =>
+	invoke<DownloadRow[]>('downloads_recent', { limit: limit ?? null });
+/** The running download's progress; null when it ends. */
+export const onDownloadProgress = (cb: (p: DownloadProgress | null) => void): Promise<UnlistenFn> =>
+	listen<DownloadProgress | null>('download-progress', (e) => cb(e.payload));
+/** How a finished run ended. `tools_missing`: queued downloads wait for yt-dlp. */
+export type DownloadOutcome = {
+	video_id: string;
+	format: DownloadFormat;
+	status: 'available' | 'error' | 'cancelled' | 'tools_missing';
+	title: string | null;
+	error: string | null;
+};
+/** Rows changed: these videos' (empty: possibly any), and the outcome of a finished run. */
+export type DownloadsChanged = { video_ids: string[]; outcome: DownloadOutcome | null };
+export const onDownloadsChanged = (cb: (c: DownloadsChanged) => void): Promise<UnlistenFn> =>
+	listen<DownloadsChanged>('downloads-changed', (e) => cb(e.payload));
 /**
  * videoId → times played, from the local listening history. Same trailing window On Repeat uses
  * (a month): the history table is pruned to it, so there is no older data. A videoId that isn't in

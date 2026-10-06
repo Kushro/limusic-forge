@@ -10,6 +10,7 @@ mod commands;
 mod db;
 mod diagnostics;
 mod discord;
+mod download;
 mod hotkeys;
 mod http;
 mod import;
@@ -689,6 +690,12 @@ pub fn run() {
             ));
             app.manage(app_state.clone());
 
+            // Downloads (download/): the queue lives in SQLite, one task runs it, one yt-dlp at a
+            // time. Its start requeues interrupted runs and checks the downloaded files.
+            let downloads = download::runner::Runner::new();
+            app.manage(downloads.clone());
+            download::runner::spawn(app_state.clone(), downloads);
+
             // The player view's <video> pulls its bytes from Rust over loopback, so the webview
             // never sees a googlevideo URL (context/11). videoproxy.rs explains why a socket and
             // not a custom scheme.
@@ -1020,6 +1027,18 @@ pub fn run() {
             commands::backups_info,
             commands::export_backups_now,
             commands::open_backups_dir,
+            commands::download_tools_status,
+            commands::install_ytdlp,
+            commands::install_ffmpeg,
+            commands::downloads_info,
+            commands::open_downloads_dir,
+            commands::download_enqueue,
+            commands::download_cancel,
+            commands::download_retry,
+            commands::download_remove,
+            commands::download_active,
+            commands::downloads_for,
+            commands::downloads_recent,
             commands::play_counts,
             commands::get_album,
             commands::get_blocked_artists,

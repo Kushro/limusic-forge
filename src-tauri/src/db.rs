@@ -2023,7 +2023,6 @@ pub struct PlaylistSync {
 }
 
 /// What the `videos` table knows about a video. `None` leaves a known value as it is.
-#[allow(dead_code)] // the download queue and the importer (commits 20-21)
 #[derive(Debug, Clone, Copy)]
 pub struct VideoMeta<'a> {
     pub video_id: &'a str,
@@ -2033,7 +2032,6 @@ pub struct VideoMeta<'a> {
 }
 
 /// A download to queue. `format` is `audio` or `video` (the table refuses anything else).
-#[allow(dead_code)] // the download queue (commit 20)
 #[derive(Debug, Clone, Copy)]
 pub struct NewDownload<'a> {
     pub video: VideoMeta<'a>,
@@ -2046,7 +2044,6 @@ pub struct NewDownload<'a> {
 }
 
 /// What [`Db::enqueue_download`] did.
-#[allow(dead_code)] // the download queue (commit 20)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EnqueueOutcome {
     /// A new row.
@@ -2058,7 +2055,6 @@ pub enum EnqueueOutcome {
 }
 
 /// One `downloads` row. The dates are RFC 3339 UTC text ([`rfc3339_utc`]).
-#[allow(dead_code)] // the download queue (commits 20-21)
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct DownloadRow {
     pub video_id: String,
@@ -2077,12 +2073,10 @@ pub struct DownloadRow {
     pub last_verified_at: Option<String>,
 }
 
-#[allow(dead_code)]
 const DOWNLOAD_SELECT: &str = "SELECT video_id, format, status, requested_quality, \
      thumbnail_mode, dest_dir, file_path, file_size_bytes, container, error, attempts, \
      created_at, completed_at, last_verified_at FROM downloads";
 
-#[allow(dead_code)]
 fn download_row(r: &rusqlite::Row) -> rusqlite::Result<DownloadRow> {
     Ok(DownloadRow {
         video_id: r.get(0)?,
@@ -2102,7 +2096,6 @@ fn download_row(r: &rusqlite::Row) -> rusqlite::Result<DownloadRow> {
     })
 }
 
-#[allow(dead_code)]
 fn upsert_video_in(conn: &Connection, video: &VideoMeta<'_>, now: i64) -> rusqlite::Result<()> {
     conn.execute(
         "INSERT INTO videos(video_id, title, channel, duration_s, updated_at) \
@@ -2116,7 +2109,6 @@ fn upsert_video_in(conn: &Connection, video: &VideoMeta<'_>, now: i64) -> rusqli
 
 /// Unix seconds as RFC 3339 UTC (`2023-11-14T22:13:20Z`), the form `downloads` stores its dates
 /// in. Sorts as text in time order. Days to civil date after Howard Hinnant's `civil_from_days`.
-#[allow(dead_code)]
 pub fn rfc3339_utc(secs: i64) -> String {
     let days = secs.div_euclid(86_400);
     let rem = secs.rem_euclid(86_400);
@@ -2639,6 +2631,53 @@ impl Db {
         )
     }
 
+    /// The verifier found the file of an `available` or `missing` row, at its recorded path or
+    /// relocated by its `[id]` marker: `available` again, with that path and size. `container`
+    /// `None` keeps the recorded one. Unlike [`Self::mark_download_available`] the completion
+    /// date stays: nothing was downloaded.
+    pub fn mark_download_found(
+        &self,
+        video_id: &str,
+        format: &str,
+        file_path: &str,
+        file_size_bytes: Option<i64>,
+        container: Option<&str>,
+        now: i64,
+    ) -> bool {
+        let stamp = rfc3339_utc(now);
+        self.update_download(
+            "UPDATE downloads SET status = 'available', file_path = ?3, \
+             file_size_bytes = COALESCE(?4, file_size_bytes), \
+             container = COALESCE(?5, container), last_verified_at = ?6 \
+             WHERE video_id = ?1 AND format = ?2 AND status IN ('available', 'missing')",
+            rusqlite::params![video_id, format, file_path, file_size_bytes, container, stamp],
+        )
+    }
+
+    /// The videos with an `available` or `missing` download: what the startup check looks at.
+    pub fn verifiable_download_ids(&self) -> Vec<String> {
+        let conn = self.0.lock().unwrap();
+        let sql = "SELECT DISTINCT video_id FROM downloads \
+                   WHERE status IN ('available', 'missing') ORDER BY video_id";
+        let mut out = Vec::new();
+        if let Ok(mut stmt) = conn.prepare(sql) {
+            if let Ok(rows) = stmt.query_map([], |r| r.get::<_, String>(0)) {
+                out.extend(rows.flatten());
+            }
+        }
+        out
+    }
+
+    /// The title `videos` knows for a video, for the download toasts.
+    pub fn video_title(&self, video_id: &str) -> Option<String> {
+        let conn = self.0.lock().unwrap();
+        conn.query_row("SELECT title FROM videos WHERE video_id = ?1", [video_id], |r| r.get(0))
+            .optional()
+            .ok()
+            .flatten()
+            .flatten()
+    }
+
     /// Retry: an `error`, `missing` or `available` row back to `queued`, at the back of the
     /// queue. `false` for one already queued or running.
     pub fn requeue_download(&self, video_id: &str, format: &str, now: i64) -> bool {
@@ -2713,15 +2752,12 @@ impl Db {
     }
 }
 
-#[allow(dead_code)]
 const DOWNLOAD_FIFO: &str = "ORDER BY created_at, rowid";
 
-#[allow(dead_code)]
 const DOWNLOAD_INSERT: &str = "INSERT INTO downloads(video_id, format, status, \
      requested_quality, thumbnail_mode, dest_dir, created_at) \
      VALUES(?1, ?2, 'queued', ?3, ?4, ?5, ?6)";
 
-#[allow(dead_code)]
 const DOWNLOAD_REQUEUE: &str = "UPDATE downloads SET status = 'queued', requested_quality = ?3, \
      thumbnail_mode = ?4, dest_dir = ?5, error = NULL, completed_at = NULL, created_at = ?6 \
      WHERE video_id = ?1 AND format = ?2";
