@@ -34,6 +34,7 @@
 	import { canDropOn, dropModeFor, transfer } from '$lib/transfer.svelte';
 	import DropConfirm from './DropConfirm.svelte';
 	import { building, stopBuild } from '$lib/build.svelte';
+	import { APP_NAME } from '$lib/brand';
 
 	const nav = $derived([
 		{ href: '/', label: t('nav.home'), icon: Home01Icon },
@@ -153,7 +154,7 @@
 	)}"
 >
 	<div class="flex items-center justify-center px-2 py-2 {wide('lg:justify-between')}">
-		<span class="hidden font-heading text-lg font-bold tracking-tight {wide('lg:block')}">Limusic</span>
+		<span class="hidden font-heading text-lg font-bold tracking-tight {wide('lg:block')}">{APP_NAME}</span>
 		<!-- Column when collapsed: the two buttons don't fit side by side in the 64px rail. -->
 		<div class="flex items-center gap-1 {collapsed ? 'flex-col' : ''}">
 			<Button

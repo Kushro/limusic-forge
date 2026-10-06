@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="./assets/docs/limusic-github-image.png" alt="Limusic Banner" width="100%">
+<img src="./assets/docs/limusic-forge-github-image.png" alt="LiMusic Forge banner" width="100%">
 
 # Limusic
 

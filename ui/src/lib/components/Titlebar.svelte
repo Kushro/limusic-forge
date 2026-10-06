@@ -35,6 +35,7 @@
 	import { lt } from '$lib/lt.svelte';
 	import { anchorMenu, fitMenu, NO_ANCHOR } from '$lib/menu';
 	import { t } from '$lib/i18n.svelte';
+	import { APP_NAME } from '$lib/brand';
 
 	// `w` is this window; `win` (imported) is the shared frame state.
 	const w = getCurrentWindow();
@@ -147,7 +148,7 @@
 	<span
 		class="pointer-events-none absolute inset-x-0 text-center text-xs font-medium tracking-wide text-muted-foreground"
 	>
-		Limusic
+		{APP_NAME}
 	</span>
 
 	<!-- macOS overlay style floats the traffic lights over the top-left of the webview, so the row
