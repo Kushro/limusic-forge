@@ -14,6 +14,7 @@
     "windows": [
       {
         "title": "LiMusic Forge",
+        "create": false,
         "width": 1200,
         "height": 800,
         "minWidth": 900,

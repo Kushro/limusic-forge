@@ -29,9 +29,9 @@ pub fn track_changed(app: &AppHandle, title: &str, artists: &str) {
     }
     // A toast is only delivered for an AppUserModelID that a Start menu shortcut registers, and the
     // NSIS installer registers the bundle identifier. A dev build has no shortcut, so it keeps
-    // notify-rust's default (PowerShell's).
+    // notify-rust's default (PowerShell's). Neither has a portable copy, which installs nothing.
     #[cfg(target_os = "windows")]
-    if !tauri::is_dev() {
+    if !tauri::is_dev() && !crate::paths::is_portable() {
         n.app_id(&app.config().identifier);
     }
     // Which app macOS files the notification under. Errors after the first call (it is set once per

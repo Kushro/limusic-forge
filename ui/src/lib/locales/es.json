@@ -314,6 +314,7 @@
 			"shortcuts_hint": "Abre los atajos de teclado con {key}",
 			"autostart": "Iniciar al arrancar",
 			"autostart_hint": "Iniciar automáticamente LiMusic Forge cuando se encienda el sistema.",
+			"autostart_portable": "No disponible en modo portable: una copia portable no registra nada en el sistema.",
 			"close_to_tray": "Minimizar a la bandeja del sistema",
 			"close_to_tray_hint": "Mantener LiMusic Forge ejecutándose en segundo plano al cerrar la ventana.",
 			"discord_rpc": "Presencia en Discord",
@@ -434,6 +435,7 @@
 		"about": {
 			"description": "Un reproductor de música de escritorio hermoso, rápido y ligero, impulsado por Tauri y Svelte.",
 			"based_on": "Basado en LiMusic {upstream} de SimoHypers · GPL-3.0",
+			"portable": "Modo portable · {path}",
 			"version": "Versión {version}",
 			"check_updates": "Buscar actualizaciones",
 			"checking_updates": "Buscando actualizaciones...",

@@ -12,6 +12,10 @@ rust-version = "1.80"
 name = "app_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+[dev-dependencies]
+# Temp dirs for the portable-mode detection tests (paths.rs, winstate.rs). Already in the lockfile.
+tempfile = "3"
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 

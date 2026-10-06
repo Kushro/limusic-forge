@@ -684,8 +684,7 @@ pub fn allow_music_paths(app: &tauri::AppHandle, db: &Db) {
 /// The covers directory, alongside the SQLite file (not inside the audio cache — "Clear caches"
 /// must not wipe artwork that only a full re-tag would regenerate).
 pub fn covers_dir(app: &tauri::AppHandle) -> PathBuf {
-    use tauri::Manager;
-    app.path().app_data_dir().unwrap_or_else(|_| std::env::temp_dir()).join("covers")
+    crate::paths::data_dir(app).join("covers")
 }
 
 #[cfg(test)]

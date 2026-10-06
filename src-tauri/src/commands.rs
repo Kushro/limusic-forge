@@ -390,6 +390,11 @@ pub async fn set_setting(
     // failure leaves the setting as it was. A dev build would register itself, and at login its
     // window needs a vite server that isn't running.
     if key == "autostart" {
+        // A portable copy installs nothing, and a login entry pointing into a folder that moves
+        // (or a stick that is not plugged in) would be worse than none. The UI greys the toggle.
+        if crate::paths::is_portable() {
+            return Err("portable".into());
+        }
         if tauri::is_dev() {
             return Err(
                 "autostart: a dev build can't register itself, use an installed build".into()
@@ -2380,6 +2385,11 @@ pub fn can_self_update(app: tauri::AppHandle) -> bool {
     if !updater_pubkey_configured(app.config().plugins.0.get("updater")) {
         return false;
     }
+    // The updater would run the NSIS installer, which installs a second, non-portable copy
+    // instead of replacing this one. A portable user downloads the new zip.
+    if crate::paths::is_portable() {
+        return false;
+    }
     #[cfg(target_os = "linux")]
     {
         use tauri::Manager;
@@ -2391,6 +2401,22 @@ pub fn can_self_update(app: tauri::AppHandle) -> bool {
     {
         let _ = app;
         true
+    }
+}
+
+/// How this copy keeps its data, for Settings ▸ About.
+#[derive(serde::Serialize)]
+pub struct InstallInfo {
+    pub portable: bool,
+    pub data_dir: String,
+}
+
+/// Portable or installed, and where the data lives (paths.rs).
+#[tauri::command]
+pub fn install_info(app: tauri::AppHandle) -> InstallInfo {
+    InstallInfo {
+        portable: crate::paths::is_portable(),
+        data_dir: crate::paths::data_dir(&app).to_string_lossy().into_owned(),
     }
 }
 

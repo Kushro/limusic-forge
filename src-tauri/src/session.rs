@@ -131,6 +131,11 @@ pub fn open_login(app: AppHandle, state: Arc<AppState>, add_account: bool) {
             Some(ua) => builder.user_agent(ua),
             None => builder,
         };
+        // Portable: the Google session lives in `data` with everything else (paths.rs).
+        let builder = match crate::paths::webview_dir() {
+            Some(dir) => builder.data_directory(dir),
+            None => builder,
+        };
         let res = builder.build();
         if let Err(e) = res {
             let _ = app2.emit("login-error", format!("Couldn't open the sign-in window: {e}"));
@@ -175,6 +180,11 @@ pub async fn refresh_session(app: AppHandle, state: Arc<AppState>) {
             .focused(false);
         let builder = match LOGIN_UA {
             Some(ua) => builder.user_agent(ua),
+            None => builder,
+        };
+        // Portable: the same jar the login window signed in to (paths.rs).
+        let builder = match crate::paths::webview_dir() {
+            Some(dir) => builder.data_directory(dir),
             None => builder,
         };
         let builder = builder.on_page_load(move |_w, payload| {

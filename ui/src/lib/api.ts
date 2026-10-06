@@ -483,6 +483,14 @@ export const releaseNotes = () => invoke<ReleaseNote[]>('release_notes');
 /** False on Linux builds that aren't the AppImage (.rpm, the AUR package): they update through the
  *  package manager, so the UI offers a download link instead of an install button. */
 export const canSelfUpdate = () => invoke<boolean>('can_self_update');
+export interface InstallInfo {
+	/** Running from a folder with a `data` directory next to the exe (paths.rs). */
+	portable: boolean;
+	/** Where the database, log and caches live. */
+	data_dir: string;
+}
+/** Portable or installed, for Settings > About and the autostart toggle. */
+export const installInfo = () => invoke<InstallInfo>('install_info');
 /** The updater plugin's `check()` against the beta channel's manifest, as the metadata the
  *  plugin's `Update` class is built from. `null` when this build is what the channel offers. */
 export const checkBetaUpdate = () =>

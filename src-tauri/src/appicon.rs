@@ -15,10 +15,10 @@ use std::path::PathBuf;
 use tauri::image::Image;
 use tauri::{AppHandle, Manager};
 
-/// Where the copy lives. `None` only if the platform has no app data dir, in which case the
-/// feature is simply off.
+/// Where the copy lives: next to the database (`paths::data_dir`). Always `Some` now; kept an
+/// `Option` for the callers.
 pub fn path(app: &AppHandle) -> Option<PathBuf> {
-    app.path().app_data_dir().ok().map(|d| d.join("app-icon.png"))
+    Some(crate::paths::data_dir(app).join("app-icon.png"))
 }
 
 /// The picked icon, if there is one. Its existence on disk is the whole setting.

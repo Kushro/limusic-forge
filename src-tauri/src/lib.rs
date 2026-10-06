@@ -27,6 +27,7 @@ mod nativevideo;
 mod nativevideo;
 mod notify;
 mod orchestrator;
+mod paths;
 mod playlist_tools;
 mod potoken;
 mod romanize;
@@ -38,6 +39,7 @@ mod taskbar;
 mod tray;
 mod videoproxy;
 mod webview;
+mod winstate;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -250,6 +252,55 @@ fn fatal(what: &str, detail: &str) -> ! {
     std::process::exit(1)
 }
 
+/// Portable mode on a Windows with no WebView2 runtime: say so, and where to get it, then stop.
+/// The installer bootstraps the runtime; a portable zip cannot, and without it the window would
+/// simply never appear. Runs before the event loop exists, so a plain message box is safe here
+/// (unlike in `fatal`).
+#[cfg(windows)]
+fn webview2_missing() -> ! {
+    use windows::core::HSTRING;
+    use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR, MB_OK};
+
+    const URL: &str = "https://developer.microsoft.com/microsoft-edge/webview2/";
+    let name = brand::APP_NAME;
+    let text = format!(
+        "{name} needs the Microsoft Edge WebView2 Runtime, which is not installed on this PC.\n\n\
+         Download the Evergreen Runtime from:\n{URL}\n\nthen start {name} again."
+    );
+    // SAFETY: both strings outlive the call, and no owner window is passed.
+    unsafe { MessageBoxW(None, &HSTRING::from(text), &HSTRING::from(name), MB_OK | MB_ICONERROR) };
+    std::process::exit(1)
+}
+
+/// Build the main window from its `tauri.conf.json` entry, which is `"create": false` so that this
+/// happens here: in portable mode the webview profile has to point into `data` before the window
+/// exists, or Tauri creates `%LOCALAPPDATA%\<identifier>` for it. Installed builds get the exact
+/// config they always had. macOS still creates it from `tauri.macos.conf.json` (its window array
+/// replaces this one, `create` included), so an existing window is left alone.
+fn create_main_window(app: &tauri::App, data_dir: &std::path::Path) -> Result<(), String> {
+    if app.get_webview_window("main").is_some() {
+        return Ok(());
+    }
+    let conf = app
+        .config()
+        .app
+        .windows
+        .iter()
+        .find(|w| w.label == "main")
+        .ok_or("tauri.conf.json has no main window")?
+        .clone();
+    let mut builder =
+        tauri::WebviewWindowBuilder::from_config(app.handle(), &conf).map_err(|e| e.to_string())?;
+    if let Some(dir) = paths::webview_dir() {
+        builder = builder.data_directory(dir);
+    }
+    let win = builder.build().map_err(|e| e.to_string())?;
+    if paths::is_portable() {
+        winstate::attach(&win, data_dir);
+    }
+    Ok(())
+}
+
 /// Whether the OS launched us at login, through the autostart entry's `--autostart`.
 ///
 /// Not the argument alone: Tauri restarts (the update banner's relaunch, the tray's Restart) hand
@@ -345,6 +396,17 @@ pub fn run() {
         }
     }
 
+    // Portable mode (paths.rs): the WebView2 profile goes into `data\webview`. Every webview also
+    // gets it as its `data_directory`; the variable covers anything that reaches WebView2 without
+    // one. Before any webview exists, which is the only time WebView2 reads it.
+    #[cfg(windows)]
+    if let Some(dir) = paths::webview_dir() {
+        std::env::set_var("WEBVIEW2_USER_DATA_FOLDER", &dir);
+        if tauri::webview_version().is_err() {
+            webview2_missing();
+        }
+    }
+
     let mut builder = tauri::Builder::default();
 
     // Must be the first plugin registered (its documented requirement). A second launch —
@@ -365,6 +427,24 @@ pub fn run() {
                 let _ = app.emit_to("main", "open-link", &args[1..]);
             }
         }));
+    }
+
+    // Reopen at the size/position the window was left at. Only "main": the mini widget is
+    // fixed-size and the login/cipher/PoToken webviews are windows too. Size, position and
+    // maximized only — VISIBLE would restore a window hidden to the tray as invisible, and
+    // DECORATIONS would fight the custom titlebar. Not in portable mode: the plugin creates
+    // `app_config_dir()` whatever file name it is given, so winstate.rs does this there instead.
+    if !paths::is_portable() {
+        builder = builder.plugin(
+            tauri_plugin_window_state::Builder::new()
+                .with_state_flags(
+                    tauri_plugin_window_state::StateFlags::SIZE
+                        | tauri_plugin_window_state::StateFlags::POSITION
+                        | tauri_plugin_window_state::StateFlags::MAXIMIZED,
+                )
+                .with_filter(|label| label == "main")
+                .build(),
+        );
     }
 
     builder
@@ -389,20 +469,6 @@ pub fn run() {
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             Some(vec!["--autostart"]),
         ))
-        // Reopen at the size/position the window was left at. Only "main": the mini widget is
-        // fixed-size and the login/cipher/PoToken webviews are windows too. Size, position and
-        // maximized only — VISIBLE would restore a window hidden to the tray as invisible, and
-        // DECORATIONS would fight the custom titlebar.
-        .plugin(
-            tauri_plugin_window_state::Builder::new()
-                .with_state_flags(
-                    tauri_plugin_window_state::StateFlags::SIZE
-                        | tauri_plugin_window_state::StateFlags::POSITION
-                        | tauri_plugin_window_state::StateFlags::MAXIMIZED,
-                )
-                .with_filter(|label| label == "main")
-                .build(),
-        )
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(|app, shortcut, event| {
@@ -415,10 +481,20 @@ pub fn run() {
         .setup(|app| {
             let handle = app.handle().clone();
 
-            // App data dir for the SQLite file and mpv's on-disk audio cache.
-            let data_dir = app.path().app_data_dir().unwrap_or_else(|_| std::env::temp_dir());
+            // App data dir for the SQLite file and mpv's on-disk audio cache: `data` next to the
+            // exe in portable mode (paths.rs).
+            let data_dir = paths::data_dir(&handle);
             std::fs::create_dir_all(&data_dir).ok();
             init_logging(&data_dir);
+            if paths::is_portable() {
+                tracing::info!(dir = %data_dir.display(), "portable mode");
+            }
+            if let Some(problem) = paths::portable_problem() {
+                tracing::warn!("portable mode off: {problem}");
+            }
+            if let Err(e) = create_main_window(app, &data_dir) {
+                fatal("LiMusic Forge could not open its window", &e);
+            }
             let cache_dir = data_dir.join("audio-cache");
             std::fs::create_dir_all(&cache_dir).ok();
 
@@ -601,8 +677,9 @@ pub fn run() {
             // window, "Could not connect to localhost". An AppImage moved after enabling leaves it
             // pointing at nothing. So an installed build repoints an existing entry at itself.
             // Only an existing one: `is_enabled` is false after a Task Manager disable on Windows,
-            // and that choice is the user's.
-            if !tauri::is_dev() {
+            // and that choice is the user's. Never in portable mode, which has no autostart: the
+            // entry would follow the folder around, or point at a stick that is not plugged in.
+            if !tauri::is_dev() && !paths::is_portable() {
                 use tauri_plugin_autostart::ManagerExt;
                 let al = app.autolaunch();
                 if al.is_enabled().unwrap_or(false) {
@@ -960,6 +1037,7 @@ pub fn run() {
             commands::theater_fullscreen,
             commands::release_notes,
             commands::can_self_update,
+            commands::install_info,
             commands::check_beta_update,
             commands::open_external,
             commands::diagnostics,
@@ -1015,6 +1093,11 @@ pub fn run() {
             {
                 if label == "main" {
                     handle.exit(0);
+                }
+            }
+            if let tauri::RunEvent::Exit = event {
+                if paths::is_portable() {
+                    winstate::save();
                 }
             }
         });
@@ -1166,7 +1249,14 @@ mod tests {
 
         // Only these two may differ; the frame is the compositor's on macOS.
         let overridden = ["decorations", "transparent"];
+        // `create: false` is for `create_main_window`, which builds the window by code so portable
+        // mode can point its webview profile into `data`. macOS is never portable, so its copy may
+        // keep the default and have Tauri create the window; `create_main_window` then skips it.
+        let optional = ["create"];
         for (k, v) in base_win {
+            if optional.contains(&k.as_str()) && !mac_win.contains_key(k) {
+                continue;
+            }
             let got = mac_win.get(k).unwrap_or_else(|| panic!("tauri.macos.conf.json drops `{k}`"));
             if !overridden.contains(&k.as_str()) {
                 assert_eq!(got, v, "tauri.macos.conf.json disagrees on `{k}`");

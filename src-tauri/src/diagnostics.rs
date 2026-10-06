@@ -15,7 +15,7 @@ use std::path::Path;
 use std::sync::LazyLock;
 
 use regex::Regex;
-use tauri::{AppHandle, Manager};
+use tauri::AppHandle;
 
 use crate::db::Db;
 
@@ -61,7 +61,7 @@ pub fn report(app: &AppHandle, db: &Db) -> String {
     );
     out.push_str(&redact(&header(app, db)));
 
-    let dir = app.path().app_data_dir().unwrap_or_else(|_| std::env::temp_dir());
+    let dir = crate::paths::data_dir(app);
     let budget = MAX_CHARS.saturating_sub(out.chars().count() + 64);
     let log = redact(&log_text(&dir, budget));
     out.push_str("\n--- log ---\n");
@@ -174,11 +174,16 @@ fn yes_no(b: bool) -> &'static str {
 /// How this copy was installed, which decides whether the in-app updater can do anything and how
 /// the user should update. Mirrors [`crate::commands::can_self_update`]'s reasoning.
 fn install_kind(app: &AppHandle) -> &'static str {
+    // Before the dev check: where the data lives is the first thing a portable report needs.
+    if crate::paths::is_portable() {
+        return "portable";
+    }
     if cfg!(debug_assertions) {
         return "dev build";
     }
     #[cfg(target_os = "linux")]
     {
+        use tauri::Manager;
         if app.env().appimage.is_some() {
             return "AppImage";
         }

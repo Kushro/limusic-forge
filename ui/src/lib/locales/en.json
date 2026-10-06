@@ -580,6 +580,7 @@
 			"shortcuts_hint": "Open the keyboard shortcuts with {key}",
 			"autostart": "Launch on startup",
 			"autostart_hint": "Automatically start LiMusic Forge when your system boots.",
+			"autostart_portable": "Not available in portable mode: a portable copy doesn't register anything with the system.",
 			"close_to_tray": "Close to system tray",
 			"close_to_tray_hint": "Keep LiMusic Forge running in the background when closing the window.",
 			"track_notifications": "Song notifications",
@@ -738,6 +739,7 @@
 		"about": {
 			"description": "A beautiful, fast, and lightweight desktop music player powered by Tauri and Svelte.",
 			"based_on": "Based on LiMusic {upstream} by SimoHypers · GPL-3.0",
+			"portable": "Portable mode · {path}",
 			"version": "Version {version}",
 			"check_updates": "Check for updates",
 			"checking_updates": "Checking for updates...",

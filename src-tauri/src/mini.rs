@@ -45,7 +45,13 @@ pub fn open(app: &AppHandle) -> Result<(), String> {
         let _ = w.set_focus();
     } else {
         let (w, h) = size(app);
-        let win = WebviewWindowBuilder::new(app, LABEL, WebviewUrl::App("index.html".into()))
+        let builder = WebviewWindowBuilder::new(app, LABEL, WebviewUrl::App("index.html".into()));
+        // Portable: the same profile as the main window, inside `data` (paths.rs).
+        let builder = match crate::paths::webview_dir() {
+            Some(dir) => builder.data_directory(dir),
+            None => builder,
+        };
+        let win = builder
             // Distinct from the main window's "LiMusic Forge" so compositor window rules (niri,
             // KDE) can match it, and set here because they only read the title the window is
             // created with (#362). Deliberately untranslated: a localised title breaks the rule on

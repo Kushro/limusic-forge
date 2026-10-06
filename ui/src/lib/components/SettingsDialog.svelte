@@ -217,6 +217,11 @@
 	// nothing to take from the beta channel. Shown in dev, which is never the AppImage either.
 	let betaAvailable = $state(import.meta.env.DEV);
 	api.canSelfUpdate().then((v) => (betaAvailable ||= v)).catch(() => {});
+	// Portable copies (a `data` folder next to the exe) install nothing: no autostart entry, and
+	// About says where the data lives.
+	let install = $state<api.InstallInfo | null>(null);
+	api.installInfo().then((v) => (install = v)).catch(() => {});
+	const portable = $derived(install?.portable === true);
 	// Result of the last "Check for updates" click — shown inline (a toast renders behind the modal).
 	let updateResult = $state<{ message: string; error: boolean } | null>(null);
 
@@ -697,10 +702,12 @@
 								})}
 								{@render row({
 									title: t('settings.general.autostart'),
-									desc: t('settings.general.autostart_hint'),
+									desc: portable
+										? t('settings.general.autostart_portable')
+										: t('settings.general.autostart_hint'),
 									control: autostartSwitch
 								})}
-								{#if autostartOn}
+								{#if autostartOn && !portable}
 									{@render row({
 										title: t('settings.general.start_minimized'),
 										desc: t('settings.general.start_minimized_hint'),
@@ -993,6 +1000,11 @@
 							<p class="mt-1 text-[11px] text-muted-foreground">
 								{t('settings.about.based_on', { upstream: UPSTREAM_VERSION })}
 							</p>
+							{#if portable && install}
+								<p class="mt-1 text-[11px] break-all text-muted-foreground">
+									{t('settings.about.portable', { path: install.data_dir })}
+								</p>
+							{/if}
 						</div>
 
 						<section class={GROUP}>
@@ -1103,7 +1115,11 @@
 		checked={trackNotificationsOn}
 		onCheckedChange={setTrackNotifications}
 	/>{/snippet}
-{#snippet autostartSwitch()}<Switch checked={autostartOn} onCheckedChange={setAutostart} />{/snippet}
+{#snippet autostartSwitch()}<Switch
+		checked={autostartOn && !portable}
+		disabled={portable}
+		onCheckedChange={setAutostart}
+	/>{/snippet}
 {#snippet startMinimizedSwitch()}<Switch checked={startMinimizedOn} onCheckedChange={setStartMinimized} />{/snippet}
 {#snippet systemTitlebarSwitch()}<Switch
 		checked={systemTitlebarOn}
