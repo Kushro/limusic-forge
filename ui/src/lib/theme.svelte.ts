@@ -25,6 +25,8 @@ export type ThemeId =
 	| 'caffeine'
 	| 'neon'
 	| 'breeze'
+	| 'nord'
+	| 'dracula'
 	| 'amoled';
 
 // `color` is just the picker swatch.
@@ -37,6 +39,8 @@ export const THEMES: Theme[] = [
 	{ id: 'caffeine', label: 'Caffeine', color: 'oklch(0.4341 0.0392 41.9938)' },
 	{ id: 'neon', label: 'Neon', color: 'oklch(0.6726 0.2904 341.4084)' },
 	{ id: 'breeze', label: 'Breeze', color: 'oklch(0.7227 0.1920 149.5793)' },
+	{ id: 'nord', label: 'Nord', color: 'oklch(0.7746 0.0622 217.4690)' },
+	{ id: 'dracula', label: 'Dracula', color: 'oklch(0.7420 0.1485 301.8831)' },
 	{ id: 'amoled', label: 'AMOLED', color: 'oklch(0 0 0)' }
 ];
 
