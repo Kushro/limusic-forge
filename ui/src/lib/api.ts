@@ -689,6 +689,52 @@ export const removeFromPlaylist = (playlistId: string, videoId: string, setVideo
 /** Bulk removal: one request, all or nothing. `tracks` is [videoId, setVideoId] per row. */
 export const removeManyFromPlaylist = (playlistId: string, tracks: [string, string][]) =>
 	invoke<void>('remove_many_from_playlist', { playlistId, tracks });
+
+// --- playlist tools (src-tauri/src/playlist_tools) ---------------------------------------------
+
+/** A row going out of a playlist, with the handle of the row after it that stays: where an undo
+ *  puts it back (`null`: the end). `song.set_video_id` is the row's own handle. */
+export type RowRef = { song: SongItem; before: string | null };
+/** One journal entry: an edit the playlist tools made, and whether it can still be undone. */
+export type PlaylistOp = {
+	id: number;
+	kind: 'reorder' | 'remove' | 'copy' | 'move' | 'dedupe' | 'split' | 'merge' | 'add';
+	summary: { playlists: { id: string; title: string }[]; count: number };
+	createdAt: number;
+	undone: boolean;
+	undoable: boolean;
+};
+type RawPlaylistOp = Omit<PlaylistOp, 'createdAt'> & { created_at: number };
+const op = (r: RawPlaylistOp): PlaylistOp => ({
+	id: r.id,
+	kind: r.kind,
+	summary: r.summary,
+	createdAt: r.created_at,
+	undone: r.undone,
+	undoable: r.undoable
+});
+/** Put a playlist in `order` (row handles). `null` when nothing had to move. */
+export const reorderPlaylist = async (playlistId: string, title: string, order: string[]) => {
+	const r = await invoke<RawPlaylistOp | null>('reorder_playlist', { playlistId, title, order });
+	return r && op(r);
+};
+/** Take rows out of a playlist, undoably (see `RowRef`). */
+export const removeTracks = async (playlistId: string, title: string, rows: RowRef[]) => {
+	const r = await invoke<RawPlaylistOp | null>('remove_tracks', {
+		playlistId,
+		title,
+		rows: rows.map((r) => ({ song: r.song, before: r.before }))
+	});
+	return r && op(r);
+};
+export const playlistHistory = async () =>
+	(await invoke<RawPlaylistOp[]>('playlist_history')).map(op);
+export const undoPlaylistOp = async (id: number) =>
+	op(await invoke<RawPlaylistOp>('undo_playlist_op', { id }));
+/** A playlist tool (or its undo) changed these playlists: a page showing one should re-read it. */
+export const onPlaylistsEdited = (cb: (ids: string[]) => void): Promise<UnlistenFn> =>
+	listen<string[]>('playlists-edited', (e) => cb(e.payload));
+
 /** `local` keeps it on this machine instead of the account, the only kind there is signed out.
  *  Answers the new id: a `LOCALPLAYLIST:` browseId for a local one, YouTube's playlist id else. */
 export const createPlaylist = (title: string, local = false) =>

@@ -25,6 +25,7 @@
 		SpotifyIcon,
 		Search01Icon
 	} from '@hugeicons/core-free-icons';
+	import { Badge } from '$lib/components/ui/badge';
 	import { Button } from '$lib/components/ui/button';
 	import * as RadioGroup from '$lib/components/ui/radio-group';
 	import * as AlertDialog from '$lib/components/ui/alert-dialog';
@@ -965,19 +966,13 @@
 					<div class="flex items-center gap-2 text-xs font-medium uppercase text-muted-foreground">
 						{t('common.playlist_singular')}
 						{#if isLocalList}
-							<span
-								class="flex items-center gap-1 rounded-full bg-primary/15 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-primary"
-								title={t('library.on_this_device_tooltip')}
-							>
-								<HugeiconsIcon icon={ComputerIcon} class="h-3 w-3" />
+							<Badge title={t('library.on_this_device_tooltip')}>
+								<HugeiconsIcon icon={ComputerIcon} />
 								{t('library.on_this_device')}
-							</span>
+							</Badge>
 						{/if}
 						{#if pl.collaborative}
-							<span
-								class="rounded-full bg-primary/15 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-primary"
-								title={t('library.collab_tooltip')}>{t('library.collab')}</span
-							>
+							<Badge title={t('library.collab_tooltip')}>{t('library.collab')}</Badge>
 						{/if}
 						{#if spotifyUrl && (pl.owned || isLocalList)}
 							<button

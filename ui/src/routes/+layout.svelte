@@ -49,7 +49,7 @@
 	import CommandPalette from '$lib/components/CommandPalette.svelte';
 	import KeyboardShortcuts from '$lib/components/KeyboardShortcuts.svelte';
 	import { Button } from '$lib/components/ui/button';
-	import { auth, initApp, np, playback, prefs, ui } from '$lib/player.svelte';
+	import { auth, initApp, np, playback, prefs, runToastAction, ui } from '$lib/player.svelte';
 	import { video } from '$lib/video.svelte';
 	import { win, initWin } from '$lib/win.svelte';
 	import { initZoom } from '$lib/zoom.svelte';
@@ -360,7 +360,7 @@
 		{@const t = ui.toast}
 		<div
 			transition:fly={{ y: 16, duration: 220, easing: cubicOut }}
-			class="fixed bottom-40 left-1/2 z-[100] flex -translate-x-1/2 items-center gap-2 rounded-lg border bg-card px-4 py-2 text-sm shadow-lg"
+			class="fixed bottom-40 left-1/2 z-[100] flex -translate-x-1/2 items-center gap-2 overflow-hidden rounded-lg border bg-card px-4 py-2 text-sm shadow-lg"
 		>
 			<!-- Three branches instead of a ternary on `icon`: HugeiconsIcon freezes `icon` at mount, so a
 			     new toast replacing a visible one would keep the old glyph. -->
@@ -375,6 +375,23 @@
 				/>
 			{/if}
 			{t.msg}
+			{#if t.action}
+				<button
+					type="button"
+					class="ml-2 rounded-md px-2 py-0.5 text-sm font-medium text-primary hover:bg-primary/10"
+					onclick={runToastAction}
+				>
+					{t.action.label}
+				</button>
+				<!-- How long the action has left. One transform on one element, keyed so a new
+				     action toast restarts it. -->
+				{#key t.id}
+					<span
+						class="toast-life absolute inset-x-0 bottom-0 h-0.5 origin-left rounded-b-lg bg-primary/60"
+						style:animation-duration="{t.ms}ms"
+					></span>
+				{/key}
+			{/if}
 		</div>
 	{/if}
 {/if}

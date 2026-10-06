@@ -22,6 +22,29 @@
 		"playlist_partial": "Added {added} to {playlist}; {duplicates} already there; {remaining} unconfirmed. {error}",
 		"playlists_partial": "Added to {done} of {total} playlists. {error}"
 	},
+	"undo": {
+		"action": "Undo",
+		"done": "Change undone",
+		"failed": "Couldn't undo that: {error}"
+	},
+	"reorder": {
+		"pending_one": "1 change to the order isn't saved yet",
+		"pending": "{count} changes to the order aren't saved yet",
+		"apply": "Save order",
+		"applying": "Saving…",
+		"discard": "Discard",
+		"applied_one": "Moved 1 track",
+		"applied": "Moved {count} tracks",
+		"failed": "Couldn't save the new order: {error}",
+		"needs_manual": "Rearranging works on the playlist's own order, unfiltered.",
+		"use_manual": "Show its own order",
+		"unconfirmed": "Some tracks just added are still being confirmed. Try again in a moment.",
+		"loading_rest": "Loading the rest of the playlist first…",
+		"shuffle": "Shuffle the order",
+		"reverse": "Reverse the order",
+		"keep_sort": "Save this order to the playlist",
+		"hint": "Drag rows to rearrange them. Alt+↑ / Alt+↓ moves the selected tracks."
+	},
 	"add_playlist": {
 		"confirm": "Add to playlists",
 		"confirm_one": "Add to playlist",
@@ -887,6 +910,7 @@
 		"removed_from_library": "Removed from library",
 		"removed_from_liked": "Removed from Liked Music",
 		"removed_from_playlist": "Removed from playlist",
+		"removed_many_from_playlist": "Removed {count} tracks from the playlist",
 		"font_loaded": "{name} loaded — pick it above",
 		"quality_updated": "Audio quality updated",
 		"proxy_saved": "Proxy saved — restart to apply",

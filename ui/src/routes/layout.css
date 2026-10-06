@@ -985,6 +985,13 @@ html.art-tint.theme-amoled {
 }
 .animate-heart-pop { animation: heart-pop 0.3s ease-out; }
 
+/* An action toast's remaining time (the playlist tools' Undo). The duration is set inline per toast. */
+@keyframes toast-life {
+	from { transform: scaleX(1); }
+	to { transform: scaleX(0); }
+}
+.toast-life { animation: toast-life linear forwards; }
+
 /* Range inputs (seek + volume): filled progress driven by --pct, with a thumb that
    only appears on hover/focus. Every Tauri target is WebKit/Chromium, so the
    -webkit- pseudo-elements cover Fedora (WebKitGTK), macOS (WebKit) and Windows (WebView2). */
