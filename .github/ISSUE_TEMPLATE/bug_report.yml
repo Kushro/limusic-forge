@@ -25,9 +25,9 @@ body:
   - type: input
     id: version
     attributes:
-      label: Which version of Limusic?
+      label: Which version of LiMusic Forge?
       description: Settings, About tab. Skip this if you cannot find it.
-      placeholder: "0.4.6"
+      placeholder: "1.2.0-forge.1"
 
   - type: textarea
     id: system
@@ -44,5 +44,5 @@ body:
       label: Anything else?
       description: >
         All optional, whatever you have. A screenshot or a screen recording, your
-        Linux distro, how you installed Limusic, or anything the app printed in a
-        terminal. Drag images straight into this box.
+        Linux distro, how you installed LiMusic Forge (setup, offline setup or
+        portable), or anything the app printed in a terminal. Drag images straight into this box.

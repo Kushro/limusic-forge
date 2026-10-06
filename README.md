@@ -2,35 +2,62 @@
 
 <img src="./assets/docs/limusic-forge-github-image.png" alt="LiMusic Forge banner" width="100%">
 
-# Limusic
+# LiMusic Forge
 
-**A native desktop YouTube Music client. Rust + Tauri, ad-free, no Electron.**
+**A native desktop YouTube Music client with playlist tools. Rust + Tauri, ad-free, no Electron.**
 
 <p align="center">
-  <a href="https://github.com/SimoHypers/limusic/releases/latest"><img alt="GitHub Downloads" src="https://img.shields.io/github/downloads/SimoHypers/limusic/total?style=for-the-badge&label=DOWNLOADS&color=a4c400"></a>
-  <a href="https://github.com/SimoHypers/limusic/releases/latest"><img alt="GitHub Release" src="https://img.shields.io/github/v/release/SimoHypers/limusic?display_name=release&style=for-the-badge&color=a10935"></a>
-  <img alt="License" src="https://img.shields.io/github/license/SimoHypers/limusic?style=for-the-badge&color=1881cc">
-  <a href="https://hosted.weblate.org/engage/limusic/"><img alt="Translation status" src="https://img.shields.io/weblate/progress/limusic?server=https%3A%2F%2Fhosted.weblate.org&style=for-the-badge&label=TRANSLATED&color=6a3fb5"></a>
-  <a href="https://simohypers.github.io/limusic/"><img alt="Website" src="https://img.shields.io/badge/WEBSITE-limusic-e5486e?style=for-the-badge"></a>
-  <a href="https://ko-fi.com/simohypers"><img alt="Support on Ko-fi" src="https://img.shields.io/badge/KO--FI-support-ff5e5b?style=for-the-badge&logo=kofi&logoColor=white"></a>
+  <a href="https://github.com/Kushro/limusic-forge/releases/latest"><img alt="GitHub Release" src="https://img.shields.io/github/v/release/Kushro/limusic-forge?display_name=release&include_prereleases&style=for-the-badge&color=a10935"></a>
+  <img alt="License" src="https://img.shields.io/github/license/Kushro/limusic-forge?style=for-the-badge&color=1881cc">
   <br>
-  <img alt="Linux" src="https://img.shields.io/badge/Linux-FCC624?style=for-the-badge&logo=linux&logoColor=black">
   <img alt="Windows" src="https://img.shields.io/badge/Windows-0078D6?style=for-the-badge&logoColor=white">
+  <img alt="Linux" src="https://img.shields.io/badge/Linux-FCC624?style=for-the-badge&logo=linux&logoColor=black">
   <img alt="macOS" src="https://img.shields.io/badge/macOS-000000?style=for-the-badge&logo=apple&logoColor=white">
   <img alt="Tauri 2" src="https://img.shields.io/badge/Tauri_2-24C8D8?style=for-the-badge&logo=tauri&logoColor=white">
   <img alt="Rust" src="https://img.shields.io/badge/Rust-000000?style=for-the-badge&logo=rust&logoColor=white">
 </p>
 
-**Limusic** talks directly to YouTube's internal API and plays audio through libmpv: no bundled
-browser runtime, no backend server, no ads in the audio. It started as a desktop rebuild of the
-playback engine behind [Metrolist](https://github.com/mostafaalagamy/Metrolist), an Android
-YouTube Music client, and grew from there.
+**LiMusic Forge** is a fork of [LiMusic](https://github.com/SimoHypers/limusic) by SimoHypers.
+It keeps everything LiMusic does (it talks directly to YouTube's internal API and plays audio
+through libmpv: no bundled browser runtime, no backend server, no ads in the audio) and adds the
+playlist management tools of PlaylistForge on top.
 
 </div>
 
+> **Modified version notice.** LiMusic Forge is a modified version of LiMusic, changed by Kushro
+> in 2026. It is not the official LiMusic and is not supported by its author; please report
+> problems with this fork [here](https://github.com/Kushro/limusic-forge/issues), not upstream.
+> The full list of changes is the git history of this repository.
+
 ---
 
-## Features
+## What the fork adds
+
+Playlist tools ported from PlaylistForge:
+
+- **Reorder** playlists by dragging tracks, with the new order written back to YouTube Music
+- **Copy or move by dropping**: drop tracks onto another playlist to copy them, or move them
+- **Duplicates**: find and remove repeated tracks inside a playlist
+- **Split and combine** playlists
+- **Filters and export** of a playlist's tracks
+- **Global view** of every track across all your playlists
+- **Unavailable monitor**: spot tracks that YouTube has removed or made unplayable
+- **Undo** for playlist operations
+
+Also part of the fork's feature set, landing over time:
+
+- Playlist monitoring and alerts
+- Playlist backups as JSON snapshots, with retention
+- Downloads
+- An optional YouTube Data API mode
+- An importer for PlaylistForge's library and backups
+
+Plus Windows packaging that upstream doesn't ship: an offline installer that carries WebView2,
+and a portable build that keeps all its data next to the executable.
+
+---
+
+## Features from LiMusic
 
 - **Ad-free playback**: streams come straight from YouTube's API, ads never do
 - **Search & browse**: songs, albums, artists, playlists and the YTM home feed, with results previewing as you type
@@ -43,14 +70,12 @@ YouTube Music client, and grew from there.
 - **Music videos**: optional, the video plays where the artwork sits, with the same gapless audio behind it
 - **Mini Player and theater mode**: shrink to a strip that keeps playing, or go fullscreen with cover and lyrics side by side
 - **Local Music**: play your own files, with all metadata still intact
-- **Last.fm scrobbling**: connect once from the title bar, every play is scrobbled
-- **Discord Rich Presence**: artwork, live progress bar, one click to toggle
+- **Last.fm scrobbling** and **Discord Rich Presence** (when the build is configured for them, see below)
 - **OS media keys** and now-playing integration (MPRIS on Linux, SMTC on Windows, plus playback buttons on the Windows taskbar preview)
 - **System tray**: close the window, keep the music; play/pause and skip from the tray, optional start-on-login
 - **Listen Together**: synced listening rooms over a small self-hosted relay
 - **Keyboard and mouse**: `Ctrl+K` searches from anywhere, `Ctrl+H` lists every shortcut, right-click menus throughout, `Ctrl` and the wheel zooms the interface
-- **Fifteen languages**: English, German, Spanish, French, Indonesian, Italian, Japanese, Korean, Polish, Brazilian Portuguese, Romanian, Russian, Turkish, Ukrainian and Traditional Chinese, with more in progress on [Weblate](https://hosted.weblate.org/projects/limusic/)
-- **Self-updating builds** (AppImage on Linux, setup.exe on Windows, .app on macOS)
+- **Many languages**: English, German, Spanish, French, Indonesian, Italian, Japanese, Korean, Polish, Brazilian Portuguese, Romanian, Russian, Turkish, Ukrainian and Traditional Chinese
 - **Make it yours**: accent palettes, custom colors, your own fonts, corner roundness, a custom app icon, and an adaptive theme that recolors the app from the playing cover
 
 ---
@@ -59,12 +84,11 @@ YouTube Music client, and grew from there.
 
 <table>
   <tr>
-    <td><img src="website/src/assets/screen-playlist.webp" alt="A playlist in Limusic"></td>
-    <td><img src="website/src/assets/screen-lyrics.webp" alt="Word-by-word synced lyrics"></td>
+    <td colspan="2"><img src="assets/docs/screen-playlist.webp" alt="A playlist kept on this device"></td>
   </tr>
   <tr>
-    <td><img src="website/src/assets/screen-album.webp" alt="An album page, colors adapted to the cover"></td>
-    <td><img src="website/src/assets/screen-video.webp" alt="A music video playing with lyrics alongside"></td>
+    <td><img src="assets/docs/screen-album.webp" alt="An album page, colors adapted to the cover"></td>
+    <td><img src="assets/docs/screen-artist.webp" alt="An artist page"></td>
   </tr>
 </table>
 
@@ -73,28 +97,26 @@ YouTube Music client, and grew from there.
 <h2 align="center">Download & Install</h2>
 
 <p align="center">
-  <a href="https://github.com/SimoHypers/limusic/releases/latest">
+  <a href="https://github.com/Kushro/limusic-forge/releases/latest">
     <img src="https://img.shields.io/badge/GitHub_Releases-100000?style=for-the-badge&logo=github&logoColor=white" height="40">
   </a>
 </p>
 
+Every build is published on the [releases page](https://github.com/Kushro/limusic-forge/releases)
+of this repository.
+
 | Platform | File | Notes |
 |---|---|---|
-| Windows | `-setup.exe` | Self-updating |
-| Windows | `.msi` | Plain installer, no auto-update |
+| Windows | `-setup.exe` | Installer. Self-updating. Uses the WebView2 that Windows 10 and 11 already have |
+| Windows | `-offline-setup.exe` | Same installer with WebView2 bundled, for machines without internet or without WebView2 |
+| Windows | `-portable.zip` | No installation: unzip anywhere writable and run. Settings, accounts and caches stay in the `data` folder next to the exe. Does not self-update |
 | Linux | `.AppImage` | Self-updating, libmpv bundled. Needs glibc 2.39+ (Ubuntu 24.04+, Debian 13+, Fedora 40+) |
 | Linux (Ubuntu/Debian) | `.deb` | No self-update. Needs Ubuntu 24.04+ / Debian 13+; apt pulls libmpv and webkit2gtk in for you |
-| Linux (Fedora/RHEL) | `.rpm` | Needs `mpv-libs` installed (`sudo dnf install mpv-libs`). No updates, redownload each release |
-| macOS (Apple Silicon) | `.dmg` | Self-updating. Unsigned, so the first launch needs `xattr -dr com.apple.quarantine /Applications/limusic.app` |
-| macOS (Intel) | none | Build from source, see [docs/BUILD-PLATFORMS.md](docs/BUILD-PLATFORMS.md) |
+| macOS (Apple Silicon) | `.dmg` | Unsigned, so the first launch needs `xattr -dr com.apple.quarantine "/Applications/LiMusic Forge.app"` |
 
-Community-maintained repositories, packaged and updated by their maintainers rather than by this project:
-
-| Platform | Source | Notes |
-|---|---|---|
-| Linux (Arch) | [AUR](https://aur.archlinux.org/packages/limusic-bin) | `yay -S limusic-bin`. Maintained by [@xiryuudev](https://github.com/xiryuudev), updates through pacman |
-| Linux (Fedora COPR) | [COPR](https://copr.fedorainfracloud.org/coprs/oguzkarayemis/limusic/) | `sudo dnf copr enable oguzkarayemis/limusic` then `sudo dnf install limusic`. Maintained by [@oguzkarayemis](https://github.com/oguzkarayemis), updates through dnf |
-| Linux (openSUSE Tumbleweed) | [OBS](https://build.opensuse.org/package/show/home:itachi_re/limusic) | `sudo zypper ar -p 100 https://download.opensuse.org/repositories/home:/itachi_re/openSUSE_Tumbleweed/home:itachi_re.repo` then `sudo zypper install limusic`. Maintained by [@itachi-re](https://github.com/itachi-re), updates through zypper. The repo carries the maintainer's other packages too, so `-p 100` keeps it below the distro repos |
+LiMusic Forge installs alongside LiMusic: it has its own app id and data folder, so the two
+don't share settings or sign-ins. The community packages of upstream LiMusic (AUR, COPR, OBS)
+install LiMusic, not this fork.
 
 ---
 
@@ -102,25 +124,27 @@ Community-maintained repositories, packaged and updated by their maintainers rat
 
 Both live in the title bar, next to the window controls.
 
-- **Last.fm**: click the Last.fm mark, approve Limusic in the browser tab that
-  opens, and you're connected for good. Tracks scrobble at the halfway point (or
-  four minutes, whichever comes first), which is Last.fm's own rule. Click again
-  to see the account or disconnect.
+- **Last.fm**: click the Last.fm mark, approve LiMusic Forge in the browser tab
+  that opens, and you're connected for good. Tracks scrobble at the halfway point
+  (or four minutes, whichever comes first), which is Last.fm's own rule. Click
+  again to see the account or disconnect.
 - **Discord**: click the Discord mark to toggle Rich Presence. Green dot means
   it's live. The card shows the track, artist, album art, and a progress bar, and
   it disappears when you pause.
 
-Building from source? Last.fm needs your own API credentials, and they are not in
-the repo. Get a key at [last.fm/api/account/create](https://www.last.fm/api/account/create)
-and put it in `src-tauri/lastfm.keys`:
+Both need credentials that belong to whoever publishes the build. A build without
+them still runs; the Last.fm and Discord buttons just say they aren't configured.
+How to set them up for your own builds is in
+[docs/RELEASING-FORK.md](docs/RELEASING-FORK.md).
+
+Building from source? Get a Last.fm key at
+[last.fm/api/account/create](https://www.last.fm/api/account/create) and put it in
+`src-tauri/lastfm.keys`:
 
 ```
 LIMUSIC_LASTFM_API_KEY=your_key
 LIMUSIC_LASTFM_API_SECRET=your_secret
 ```
-
-Without that file everything else still builds and runs; the Last.fm button just
-reports that it isn't configured.
 
 ---
 
@@ -152,44 +176,26 @@ entirely in some countries. Where that's the case, LRCLIB does all the work.
 ## Listen Together
 
 Synced listening with friends. Everyone streams their own audio from YouTube;
-the room only relays play/pause, seeks, track changes and the queue. One person
-hosts the relay:
+the room only relays play/pause, seeks, track changes and the queue. LiMusic
+Forge ships without a default relay, so one person hosts it:
 
 ```bash
 cargo run -p sync-server        # plain WebSocket on 0.0.0.0:8080
 ```
 
 Front it with something that terminates TLS (Tailscale Funnel, Cloudflare
-Tunnel), then paste the `wss://` URL into the Listen Together panel in the app.
-Rooms have join codes and the host approves every join and every track
-suggestion.
+Tunnel), then paste the `wss://` URL into the server field of the Listen
+Together panel. Rooms have join codes and the host approves every join and every
+track suggestion.
 
 ---
 
 ## Translations
 
-Limusic is translated on [Weblate](https://hosted.weblate.org/engage/limusic/),
-who host it free for libre projects.
-
-<a href="https://hosted.weblate.org/engage/limusic/">
-  <img src="https://hosted.weblate.org/widget/limusic/ui/multi-auto.svg" alt="Translation status">
-</a>
-
-English, Spanish, French, Turkish, Brazilian Portuguese and Indonesian ship in
-the app today.
-The badge above shows everything else in flight.
-
-**Translate on Weblate, not in a pull request.** Weblate keeps its own copy of
-the catalogs, so a hand-edited `fr.json` merged here puts the two out of sync
-and the next batch of real translations arrives as a merge conflict. Weblate
-also shows you the English original beside each string, flags translations that
-went stale when the English changed, checks that placeholders like `{count}`
-survived, and opens the pull request for you. Anything untranslated falls back
-to English in the app, so partial work is safe to submit.
-
-`en.json` is the exception: it changes by hand, in whichever pull request
-changes the UI. Switching a finished language on in the picker takes a small
-code change too, see [CONTRIBUTING.md](CONTRIBUTING.md#translations).
+Translations are plain JSON files in `ui/src/lib/locales/`, with `en.json` as
+the source of truth. They are contributed by pull request; anything untranslated
+falls back to English in the app, so partial work is safe to submit. See
+[CONTRIBUTING.md](CONTRIBUTING.md#translations).
 
 ---
 
@@ -213,7 +219,7 @@ Windows and macOS instructions live in [docs/BUILD-PLATFORMS.md](docs/BUILD-PLAT
 - A pure Rust crate speaks YouTube's InnerTube API, impersonating several
   official client identities and falling back between them when one fails.
 - YouTube's stream URLs are protected by obfuscated JavaScript (the signature
-  cipher and the `n` parameter) and by BotGuard attestation. Limusic runs that
+  cipher and the `n` parameter) and by BotGuard attestation. The app runs that
   JavaScript where it expects to run, in a real webview, hidden, and never lets
   any of it touch the UI process.
 - Audio goes through libmpv: gapless transitions, an on-disk cache, and
@@ -223,22 +229,14 @@ Windows and macOS instructions live in [docs/BUILD-PLATFORMS.md](docs/BUILD-PLAT
 
 ---
 
-## Star History
+## Credits
 
-<a href="https://www.star-history.com/?repos=simohypers%2Flimusic&type=date&legend=top-left">
- <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=simohypers/limusic&type=date&theme=dark&legend=top-left" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=simohypers/limusic&type=date&legend=top-left" />
-   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=simohypers/limusic&type=date&legend=top-left" />
- </picture>
-</a>
-
----
-
-## Support
-
-Limusic is free and stays free. If it earned a coffee,
-[ko-fi.com/simohypers](https://ko-fi.com/simohypers) is where to leave one.
+- [LiMusic](https://github.com/SimoHypers/limusic) by SimoHypers and contributors: the
+  application this fork is built on. Nearly everything under "Features from LiMusic" is
+  their work.
+- [Metrolist](https://github.com/mostafaalagamy/Metrolist), the Android YouTube Music
+  client whose playback engine LiMusic started as a desktop rebuild of.
+- PlaylistForge, the playlist tools whose features this fork ports.
 
 ---
 
@@ -255,4 +253,7 @@ this project belong to their respective owners.
 
 ## License
 
-[GPL-3.0](LICENSE)
+[GPL-3.0](LICENSE), the same license as LiMusic. Copyright © SimoHypers and
+contributors; modifications in LiMusic Forge © 2026 Kushro. As required by
+section 5(a) of the GPL, this is a modified version of LiMusic, and the
+modifications are dated by the commits in this repository.

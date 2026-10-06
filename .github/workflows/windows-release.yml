@@ -136,7 +136,7 @@ jobs:
 
       # pnpm before setup-node, so `cache: pnpm` below can find the binary and cache its store.
       # This step was 44s on Windows against 5s on Linux, all of it re-downloading the same
-      # packages every release. Same shape as website.yml.
+      # packages every release.
       - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
         with:
           version: 10
@@ -279,8 +279,8 @@ jobs:
           echo "building with RUSTFLAGS=${RUSTFLAGS:-<unset>}"
           (cd ui && pnpm build)
           # beforeBuildCommand emptied: we just ran it. Left on, tauri runs `pnpm build` from the
-          # repo root, which has no package.json, so pnpm's choice between ui/ and website/ is down
-          # to the filesystem — it resolves to ui here and to website on Linux. Working by accident.
+          # repo root, which has no package.json, so what pnpm builds there is down to the
+          # filesystem rather than this job. Running it ourselves from ui/ keeps it deterministic.
           # A release candidate builds the NSIS installer only. The updater never uses the MSI, and
           # WiX refuses a version whose prerelease suffix isn't numeric, which -rc.1 isn't.
           BUNDLES=(); [ "$PRERELEASE" = false ] || BUNDLES=(--bundles nsis)

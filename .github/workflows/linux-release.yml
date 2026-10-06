@@ -186,7 +186,6 @@ jobs:
           # the ones a music video needs into the AppDir by name.
 
       # pnpm before setup-node, so `cache: pnpm` below can find the binary and cache its store.
-      # Same shape as website.yml.
       - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
         with:
           version: 10
@@ -254,10 +253,9 @@ jobs:
           fi
           (cd ui && pnpm build)
           # beforeBuildCommand is emptied because we just ran it, deterministically. Left on, tauri
-          # runs `pnpm build` from the repo root — which has no package.json, so which of the two
-          # frontend packages (ui/, website/) pnpm picks is up to the filesystem: Windows resolved
-          # it to ui, Linux to website, whose deps this job never installs. It only works locally
-          # because you run it from ui/.
+          # runs `pnpm build` from the repo root, which has no package.json, so what pnpm builds
+          # there is up to the filesystem rather than this job. It only works locally because you
+          # run it from ui/.
           # A release candidate builds only what the updater installs. The beta channel is its whole
           # audience, and a deb install can't take an update from it anyway.
           BUNDLES=appimage,deb; [ "$PRERELEASE" = false ] || BUNDLES=appimage
