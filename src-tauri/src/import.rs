@@ -443,6 +443,54 @@ async fn before_youtube(state: &AppState, gen: Option<u64>, ask: Ask) -> Result<
     Ok(())
 }
 
+// --- the same rules for the playlist tools --------------------------------------------------------
+//
+// A dedupe, a split or a merge writes to the same account from the same IP as an import, so it
+// waits on the same request slot and honours the same cooldown: an import and a bulk edit never
+// fire together, and pushback from either stops both. One request at a time, a write gap apart.
+
+/// Wait for the next playlist write slot. `cancelled` is polled around the wait, so a stopped
+/// operation stops waiting. The error is a UI code: `gone` or `cooldown:<until>`.
+pub(crate) async fn before_playlist_write(
+    state: &AppState,
+    cancelled: impl Fn() -> bool,
+) -> Result<(), String> {
+    let check = || -> Result<(), Halt> {
+        if let Some(until) = cooldown(state) {
+            return Err(Halt::Cooldown(until));
+        }
+        if cancelled() {
+            return Err(Halt::Cancelled);
+        }
+        Ok(())
+    };
+    check().map_err(Halt::code)?;
+    let at = {
+        let mut p = PACER.lock().unwrap();
+        let mut gap = between(WRITE_GAP_MS);
+        if p.since_break >= BREAK_EVERY {
+            p.since_break = 0;
+            gap += between(BREAK_MS);
+        }
+        p.since_break += 1;
+        reserve(&mut p, Instant::now(), gap)
+    };
+    tokio::time::sleep_until(at.into()).await;
+    check().map_err(Halt::code)
+}
+
+/// The cooldown's end when one is running: a single interactive edit (one drag, one drop) is not
+/// paced, but it still doesn't go out while YouTube is being left alone.
+pub(crate) fn youtube_cooldown(state: &AppState) -> Option<i64> {
+    cooldown(state)
+}
+
+/// What a failed playlist write says to the UI. Pushback starts the shared cooldown and comes back
+/// as `cooldown:<until>`; anything else is the message.
+pub(crate) fn playlist_write_error(state: &AppState, e: innertube::Error) -> String {
+    halt_for(state, e).code()
+}
+
 /// Search for one track: songs first, then videos when no song is even a plausible guess
 /// (covers, live sets and releases that never got an official upload only exist as videos; the
 /// video search answers nothing when the user hides music videos). Best first, at most six.
