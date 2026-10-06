@@ -72,6 +72,18 @@ export const prefs = $state({
 	/** `drop_dupes`: what a copy or move does with a track the target already holds. */
 	dropDupes: 'skip' as DropDupes
 });
+/** The settings modal's tabs (SettingsDialog). */
+export type SettingsTab =
+	| 'general'
+	| 'themes'
+	| 'playback'
+	| 'hotkeys'
+	| 'discord'
+	| 'data'
+	| 'import'
+	| 'about';
+/** Open settings on a tab, scrolled to `settings-<section>` when given. */
+export type SettingsFocus = { tab: SettingsTab; section?: string };
 export type DropMode = 'ask' | 'copy' | 'move';
 export type DropDupes = 'skip' | 'allow' | 'consolidate';
 
@@ -1192,7 +1204,11 @@ export const ui = $state({
 	share: null as BrowseItem | null, // the share modal's target
 	toast: null as Toast | null,
 	settingsOpen: false, // the settings modal
-	settingsFocus: null as 'lyrics' | null, // a section to open settings on, once
+	// Where to open settings, once: a tab and optionally a section on it (`settings-<section>`).
+	// The bare 'lyrics' is the older form, the Playback tab's lyrics section.
+	settingsFocus: null as SettingsFocus | 'lyrics' | null,
+	// The last upstream migration's outcome, read once at startup for Settings ▸ Import & migrate.
+	importResult: null as api.MigrateReport | null,
 	ltOpen: false, // the Listen Together modal
 	linkOpen: false, // the "open a pasted link" modal
 	paletteOpen: false, // the Ctrl+K search palette

@@ -130,6 +130,45 @@ pub fn webview_dir() -> Option<PathBuf> {
     portable_root().map(|r| r.join("data").join("webview"))
 }
 
+/// `identifier` in tauri.conf.json: the name of every per-user directory Tauri resolves for us.
+/// The `paths_identifier_matches_the_config` test keeps the two together.
+pub const IDENTIFIER: &str = "com.limusicforge.desktop";
+
+/// [`data_dir`] before an `AppHandle` exists (`run()`, ahead of the builder: the upstream
+/// migration). Tauri's resolver is `dirs::data_dir()` joined with the identifier, so this is the
+/// same directory. `None` when `dirs` cannot resolve it.
+pub fn data_dir_early() -> Option<PathBuf> {
+    if let Some(root) = portable_root() {
+        return Some(root.join("data"));
+    }
+    dirs::data_dir().map(|d| d.join(IDENTIFIER)).filter(|p| p.is_absolute())
+}
+
+/// The directory the webview profile lives in, before an `AppHandle` exists. Portable:
+/// `data\webview`. Installed: WebView2 puts `EBWebView` under the local app data directory;
+/// WebKitGTK keeps its directories beside the database.
+pub fn webview_root_early() -> Option<PathBuf> {
+    if let Some(dir) = webview_dir() {
+        return Some(dir);
+    }
+    if cfg!(windows) {
+        dirs::data_local_dir().map(|d| d.join(IDENTIFIER)).filter(|p| p.is_absolute())
+    } else {
+        data_dir_early()
+    }
+}
+
+/// The window-state plugin's file (`app_config_dir()/.window-state.json`). `None` in portable
+/// mode, where winstate.rs keeps its own.
+pub fn window_state_early() -> Option<PathBuf> {
+    if is_portable() {
+        return None;
+    }
+    dirs::config_dir()
+        .map(|d| d.join(IDENTIFIER).join(".window-state.json"))
+        .filter(|p| p.is_absolute())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -200,6 +239,13 @@ mod tests {
         let exe = Path::new("C:/Forge/limusic-forge.exe");
         let img = Path::new("C:/Other/LiMusic.AppImage");
         assert_eq!(base_dir(exe, Some(img)), Some(PathBuf::from("C:/Forge")));
+    }
+
+    #[test]
+    fn paths_identifier_matches_the_config() {
+        let conf: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+        assert_eq!(conf["identifier"], IDENTIFIER);
     }
 
     /// Every data path goes through [`data_dir`], or portable mode leaks files into the user's

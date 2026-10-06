@@ -83,6 +83,11 @@ zip = { version = "4", default-features = false, features = ["deflate-flate2"] }
 csv = "1"
 strsim = "0.11"
 unicode-normalization = "0.1"
+# Upstream LiMusic migration (migrate_upstream.rs): absolute per-user paths before an AppHandle
+# exists, and whether upstream starts at login. Both already in the lockfile (dirs under tauri,
+# auto-launch under tauri-plugin-autostart).
+dirs = "6"
+auto-launch = "0.5"
 
 # Taskbar thumbnail toolbar (#47). Same `windows` version tauri-runtime-wry already pulls in, so
 # `Window::hwnd()` hands us a matching HWND.
@@ -91,6 +96,8 @@ windows = { version = "0.61", features = [
   "Win32_Foundation",
   "Win32_Graphics_Gdi",
   "Win32_System_Com",
+  # OpenMutexW: is upstream LiMusic (or this app) running (migrate_upstream.rs).
+  "Win32_System_Threading",
   "Win32_UI_Shell",
   "Win32_UI_WindowsAndMessaging",
 ] }

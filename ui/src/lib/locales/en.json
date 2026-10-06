@@ -547,7 +547,9 @@
 			"data": "Data & storage",
 			"data_hint": "Network and cached files.",
 			"about": "About",
-			"about_hint": "Version, updates and what changed."
+			"about_hint": "Version, updates and what changed.",
+			"import": "Import & migrate",
+			"import_hint": "Bring in data from LiMusic or PlaylistForge."
 		},
 		"sections": {
 			"playlists": "Your playlists",
@@ -818,6 +820,33 @@
 			"preview_status": "Member list",
 			"preview_you": "You",
 			"preview_card": "Profile card"
+		},
+		"import": {
+			"limusic_title": "LiMusic",
+			"limusic_hint": "No LiMusic data was found on this computer.",
+			"playlistforge_title": "PlaylistForge",
+			"playlistforge_hint": "No PlaylistForge database was found on this computer.",
+			"playlistforge_soon": "importing from PlaylistForge comes in a later version",
+			"detected": "Detected",
+			"not_detected": "Not detected",
+			"limusic_open": "open",
+			"limusic_closed": "closed",
+			"limusic_running": "Close LiMusic first: its data cannot be copied while it is open.",
+			"include_webview": "Include the Google session (the browser profile)",
+			"migrate_warning": "Copies LiMusic's accounts, settings, local library, theme and language. This replaces LiMusic Forge's current data, which is kept as a backup in a pre-migrate folder, and restarts the app. LiMusic itself is left untouched.",
+			"migrate": "Migrate",
+			"result_done": "LiMusic data copied: {files} files, {size}.",
+			"result_retry": "LiMusic was open, so nothing was copied. It will be tried again on the next start.",
+			"result_error": "The migration failed: {error}",
+			"result_aside": "Previous data kept in {path}",
+			"autostart_offer": "LiMusic starts with your computer. Do the same for LiMusic Forge?",
+			"autostart_enable": "Start with the computer",
+			"pending_title": "Migration pending",
+			"pending_expired": "A migration from LiMusic was requested more than 10 minutes ago and was never carried out, so it will not run on its own. Retry it now, or cancel it.",
+			"pending_retry": "The migration from LiMusic could not run on the last start (LiMusic was open or a file was in use). Retry it now, or cancel it.",
+			"pending_waiting": "A migration from LiMusic will run on the next start.",
+			"pending_retry_now": "Retry now",
+			"pending_cancel": "Cancel"
 		}
 	},
 	"dialogs": {
@@ -1237,6 +1266,18 @@
 			"gone": "That import isn’t open anymore.",
 			"not_found": "Couldn’t find that on YouTube Music.",
 			"cooldown": "YouTube Music asked LiMusic Forge to slow down, so imports are paused until {time}. Everything found so far is saved."
+		}
+	},
+	"onboarding": {
+		"import": {
+			"title": "We found data from {sources}. Import it?",
+			"body": "You can bring in your accounts, settings and library now, or later from Settings ▸ Import & migrate.",
+			"limusic": "LiMusic",
+			"playlistforge": "PlaylistForge",
+			"and": " and ",
+			"now": "Now",
+			"later": "Later (Settings)",
+			"no": "No"
 		}
 	}
 }

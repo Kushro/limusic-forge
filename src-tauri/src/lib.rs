@@ -19,6 +19,7 @@ mod listentogether;
 mod local;
 mod lyrics;
 mod media;
+mod migrate_upstream;
 mod mini;
 #[cfg(target_os = "linux")]
 mod nativevideo;
@@ -407,6 +408,11 @@ pub fn run() {
         }
     }
 
+    // Phase 2 of Settings ▸ Import & migrate (migrate_upstream.rs): upstream LiMusic's data is
+    // copied in here, before anything opens the database or the webview profile it replaces.
+    // A no-op unless phase 1 left its marker. Logged once logging is up, in `setup`.
+    let migrated = migrate_upstream::apply_pending();
+
     let mut builder = tauri::Builder::default();
 
     // Must be the first plugin registered (its documented requirement). A second launch —
@@ -478,7 +484,7 @@ pub fn run() {
                 })
                 .build(),
         )
-        .setup(|app| {
+        .setup(move |app| {
             let handle = app.handle().clone();
 
             // App data dir for the SQLite file and mpv's on-disk audio cache: `data` next to the
@@ -491,6 +497,16 @@ pub fn run() {
             }
             if let Some(problem) = paths::portable_problem() {
                 tracing::warn!("portable mode off: {problem}");
+            }
+            if let Some(r) = &migrated {
+                tracing::info!(
+                    status = %r.status,
+                    files = r.files,
+                    bytes = r.bytes,
+                    aside = ?r.aside,
+                    error = ?r.error,
+                    "upstream LiMusic migration"
+                );
             }
             if let Err(e) = create_main_window(app, &data_dir) {
                 fatal("LiMusic Forge could not open its window", &e);
@@ -513,6 +529,20 @@ pub fn run() {
                 tracing::warn!(
                     "started with a fresh database; the previous one is at {}",
                     aside.display()
+                );
+            }
+            // The database may have just been replaced by upstream's, which never answered the
+            // first-run import prompt: write the answer back so it is not asked again. Only while
+            // the stored answer does not list this source yet, so a later answer is never undone.
+            let asked = db
+                .get_setting(migrate_upstream::PROMPTED_KEY)
+                .is_some_and(|v| v.contains(&format!("\"{}\"", migrate_upstream::SOURCE_ID)));
+            if let Some(r) = migrate_upstream::peek_result(&data_dir)
+                .filter(|r| r.status == "done" && !asked)
+            {
+                db.set_setting(
+                    migrate_upstream::PROMPTED_KEY,
+                    &migrate_upstream::prompted_after_migration(r.prompted.as_deref()),
                 );
             }
             let db = Arc::new(db);
@@ -1038,6 +1068,11 @@ pub fn run() {
             commands::release_notes,
             commands::can_self_update,
             commands::install_info,
+            commands::import_sources,
+            commands::migrate_upstream_request,
+            commands::migrate_upstream_result,
+            commands::migrate_upstream_pending,
+            commands::migrate_upstream_cancel,
             commands::check_beta_update,
             commands::open_external,
             commands::diagnostics,

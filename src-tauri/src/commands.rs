@@ -224,7 +224,7 @@ pub async fn get_queue(state: St<'_>) -> Result<serde_json::Value, String> {
 /// `visitor_data`) and internal blobs (`queue_json`, `queue_index`, `queue_position`) never cross
 /// into the webview: they'd otherwise ship the login credential to the renderer on every open, and
 /// the webview can't overwrite them either.
-const UI_SETTINGS: [&str; 30] = [
+const UI_SETTINGS: [&str; 31] = [
     "volume",
     "proxy",
     "quality",
@@ -255,6 +255,8 @@ const UI_SETTINGS: [&str; 30] = [
     "locale",
     "drop_mode",
     "drop_dupes",
+    // The first-run import prompt's answer and the sources it covered (D8, onboarding.ts).
+    "onboarding_import_prompted",
 ];
 
 /// Resolve the music video for `video_id` and hand back a `limusicvideo://` URL the player view
@@ -2418,6 +2420,106 @@ pub fn install_info(app: tauri::AppHandle) -> InstallInfo {
         portable: crate::paths::is_portable(),
         data_dir: crate::paths::data_dir(&app).to_string_lossy().into_owned(),
     }
+}
+
+/// Upstream LiMusic's data as Settings ▸ Import & migrate shows it.
+#[derive(serde::Serialize)]
+pub struct UpstreamSource {
+    pub path: String,
+    pub bytes: u64,
+    pub running: bool,
+}
+
+/// What there is to import on this machine. Detection only: nothing is opened.
+#[derive(serde::Serialize)]
+pub struct ImportSources {
+    pub upstream: Option<UpstreamSource>,
+    /// PlaylistForge's `forge.db`, when present. Its importer comes later.
+    pub playlistforge: Option<String>,
+}
+
+#[tauri::command]
+pub async fn import_sources() -> Result<ImportSources, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        use crate::migrate_upstream as mu;
+        let upstream = mu::locate().map_err(|e| e.to_string())?.map(|up| {
+            let mut bytes = mu::tree_size(&up.roaming);
+            if let Some(local) = &up.local {
+                bytes += mu::tree_size(&local.join("EBWebView"));
+            }
+            UpstreamSource {
+                path: up.roaming.to_string_lossy().into_owned(),
+                bytes,
+                running: mu::upstream_running(),
+            }
+        });
+        let playlistforge = mu::playlistforge_db().map(|p| p.to_string_lossy().into_owned());
+        Ok(ImportSources { upstream, playlistforge })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Phase 1 of the upstream migration: leave the marker and restart, so phase 2 runs before
+/// anything holds the database or the webview profile (migrate_upstream.rs).
+#[tauri::command]
+pub fn migrate_upstream_request(
+    app: tauri::AppHandle,
+    state: St<'_>,
+    include_webview: bool,
+) -> Result<(), String> {
+    use crate::migrate_upstream as mu;
+    if mu::locate().map_err(|e| e.to_string())?.is_none() {
+        return Err("no LiMusic data on this machine".into());
+    }
+    if mu::upstream_running() {
+        return Err("upstream_running".into());
+    }
+    // Phase 2 resolves the directory without an AppHandle; both answers have to agree, or the
+    // marker would be left where the next launch never looks.
+    let data = crate::paths::data_dir(&app);
+    if crate::paths::data_dir_early().as_deref() != Some(data.as_path()) {
+        return Err(format!("data directory mismatch: {}", data.display()));
+    }
+    // Also how "Retry now" restarts a pending migration: a fresh marker, with a new window.
+    let pending = mu::Pending {
+        include_webview,
+        prompted: state.db.get_setting(mu::PROMPTED_KEY),
+        requested_at: mu::now_secs(),
+        last_status: None,
+    };
+    mu::write_pending(&data, &pending).map_err(|e| e.to_string())?;
+    app.restart()
+}
+
+/// The migration marker still waiting, if any: when it was asked for, whether it is past its
+/// window (phase 2 no longer acts on it) and what phase 2 last made of it (`retry`, `expired`).
+#[tauri::command]
+pub fn migrate_upstream_pending(
+    app: tauri::AppHandle,
+) -> Option<crate::migrate_upstream::PendingInfo> {
+    use crate::migrate_upstream as mu;
+    mu::pending_info(&crate::paths::data_dir(&app), mu::now_secs())
+}
+
+/// Drop the pending migration: removes `<data>/migrate-upstream.pending` only (and its
+/// `retry`/`expired` result). Nothing else is touched.
+#[tauri::command]
+pub fn migrate_upstream_cancel(app: tauri::AppHandle) -> Result<(), String> {
+    let data = crate::paths::data_dir(&app);
+    crate::migrate_upstream::cancel_pending(&data).map(|_| ()).map_err(|e| e.to_string())
+}
+
+/// What the last migration did, read once. Says whether upstream starts at login, so the UI can
+/// offer the same for this app (upstream's own entry is never touched).
+#[tauri::command]
+pub fn migrate_upstream_result(app: tauri::AppHandle) -> Option<crate::migrate_upstream::Report> {
+    let mut report = crate::migrate_upstream::take_result(&crate::paths::data_dir(&app))?;
+    report.prompted = None;
+    if report.status == "done" {
+        report.upstream_autostart = crate::migrate_upstream::upstream_autostart();
+    }
+    Some(report)
 }
 
 /// Whether the updater plugin's config (`plugins.updater` in tauri.conf.json) carries a public key.

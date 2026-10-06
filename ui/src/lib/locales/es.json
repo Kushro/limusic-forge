@@ -283,7 +283,9 @@
 			"discord": "Discord",
 			"discord_hint": "Cómo se ve tu tarjeta de Rich Presence.",
 			"hotkeys": "Atajos globales",
-			"hotkeys_hint": "Atajos globales para controlar la reproducción."
+			"hotkeys_hint": "Atajos globales para controlar la reproducción.",
+			"import": "Importar y migrar",
+			"import_hint": "Trae datos de LiMusic o de PlaylistForge."
 		},
 		"sections": {
 			"language": "Idioma",
@@ -553,6 +555,33 @@
 			"action_toggle_repeat_hint": "Modo de repetición: desactivado, todo, uno.",
 			"action_show_app": "Mostrar la aplicación",
 			"action_show_app_hint": "Muestra la ventana de LiMusic Forge en primer plano."
+		},
+		"import": {
+			"limusic_title": "LiMusic",
+			"limusic_hint": "No se encontraron datos de LiMusic en esta computadora.",
+			"playlistforge_title": "PlaylistForge",
+			"playlistforge_hint": "No se encontró una base de PlaylistForge en esta computadora.",
+			"playlistforge_soon": "la importación desde PlaylistForge llega en una versión próxima",
+			"detected": "Detectado",
+			"not_detected": "No detectado",
+			"limusic_open": "abierto",
+			"limusic_closed": "cerrado",
+			"limusic_running": "Cierra LiMusic primero: sus datos no se pueden copiar mientras está abierto.",
+			"include_webview": "Incluir la sesión de Google (perfil del navegador)",
+			"migrate_warning": "Copia las cuentas, los ajustes, la biblioteca local, el tema y el idioma de LiMusic. Reemplaza los datos actuales de LiMusic Forge, que quedan respaldados en una carpeta pre-migrate, y reinicia la aplicación. LiMusic no se toca.",
+			"migrate": "Migrar",
+			"result_done": "Datos de LiMusic copiados: {files} archivos, {size}.",
+			"result_retry": "LiMusic estaba abierto y no se copió nada. Se va a reintentar en el próximo inicio.",
+			"result_error": "La migración falló: {error}",
+			"result_aside": "Los datos anteriores quedaron en {path}",
+			"autostart_offer": "LiMusic se inicia con la computadora. ¿Hacer lo mismo con LiMusic Forge?",
+			"autostart_enable": "Iniciar con la computadora",
+			"pending_title": "Migración pendiente",
+			"pending_expired": "Pediste una migración desde LiMusic hace más de 10 minutos y no se llegó a hacer, así que ya no se va a ejecutar sola. Puedes reintentarla ahora o cancelarla.",
+			"pending_retry": "La migración desde LiMusic no se pudo hacer en el último inicio (LiMusic estaba abierto o un archivo estaba en uso). Puedes reintentarla ahora o cancelarla.",
+			"pending_waiting": "Una migración desde LiMusic se va a ejecutar en el próximo inicio.",
+			"pending_retry_now": "Reintentar ahora",
+			"pending_cancel": "Cancelar"
 		}
 	},
 	"dialogs": {
@@ -924,5 +953,17 @@
 		"anyway_hint": "Conservar una copia",
 		"anyway_hint_local": "Las copias solo van a las playlists de YouTube",
 		"adds": "+{count}"
+	},
+	"onboarding": {
+		"import": {
+			"title": "Encontramos datos de {sources}. ¿Importarlos?",
+			"body": "Puedes traer tus cuentas, ajustes y biblioteca ahora, o más tarde desde Configuración ▸ Importar y migrar.",
+			"limusic": "LiMusic",
+			"playlistforge": "PlaylistForge",
+			"and": " y ",
+			"now": "Ahora",
+			"later": "Más tarde (Configuración)",
+			"no": "No"
+		}
 	}
 }

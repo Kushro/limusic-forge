@@ -16,7 +16,8 @@
 		Globe02Icon,
 		ArrowDown01Icon,
 		Alert02Icon,
-		LinkSquare02Icon
+		LinkSquare02Icon,
+		DatabaseImportIcon
 	} from '@hugeicons/core-free-icons';
 	import { Button } from '$lib/components/ui/button';
 	import { Input } from '$lib/components/ui/input';
@@ -30,7 +31,18 @@
 	import { HELP_COMBO } from '$lib/shortcuts';
 	import { copyText } from '$lib/clipboard';
 	import * as api from '$lib/api';
-	import { blocked, prefs, refreshView, setAutoplay, ui, toast, unblockArtist, type DropMode } from '$lib/player.svelte';
+	import { pendingNotice } from '$lib/onboarding';
+	import {
+		blocked,
+		prefs,
+		refreshView,
+		setAutoplay,
+		ui,
+		toast,
+		unblockArtist,
+		type DropMode,
+		type SettingsTab
+	} from '$lib/player.svelte';
 	import { rememberDrop } from '$lib/transfer.svelte';
 	const DROP_MODES: DropMode[] = ['ask', 'copy', 'move'];
 	import { win } from '$lib/win.svelte';
@@ -77,7 +89,7 @@
 	import LanguagePicker from '$lib/components/LanguagePicker.svelte';
 	import { APP_NAME, REPO_URL, UPSTREAM_VERSION } from '$lib/brand';
 
-	type TabId = 'general' | 'themes' | 'playback' | 'hotkeys' | 'discord' | 'data' | 'about';
+	type TabId = SettingsTab;
 	const TABS = $derived<{ id: TabId; label: string; hint: string; icon: typeof Settings02Icon }[]>([
 		{ id: 'general', label: t('settings.tabs.general'), hint: t('settings.tabs.general_hint'), icon: Settings02Icon },
 		{ id: 'themes', label: t('settings.tabs.themes'), hint: t('settings.tabs.themes_hint'), icon: PaintBoardIcon },
@@ -85,6 +97,7 @@
 		{ id: 'hotkeys', label: t('settings.tabs.hotkeys'), hint: t('settings.tabs.hotkeys_hint'), icon: KeyboardIcon },
 		{ id: 'discord', label: t('settings.tabs.discord'), hint: t('settings.tabs.discord_hint'), icon: DiscordIcon },
 		{ id: 'data', label: t('settings.tabs.data'), hint: t('settings.tabs.data_hint'), icon: Database02Icon },
+		{ id: 'import', label: t('settings.tabs.import'), hint: t('settings.tabs.import_hint'), icon: DatabaseImportIcon },
 		{ id: 'about', label: t('settings.tabs.about'), hint: t('settings.tabs.about_hint'), icon: InformationCircleIcon }
 	]);
 
@@ -232,14 +245,18 @@
 	$effect(() => {
 		if (!ui.settingsOpen) return;
 		untrack(() => {
-			// Opened on a section from elsewhere (the lyrics source picker): its tab, scrolled to it
-			// once the tab has rendered.
-			if (ui.settingsFocus) {
-				tab = 'playback';
-				const id = `settings-${ui.settingsFocus}`;
-				ui.settingsFocus = null;
+			// Opened on a tab or a section from elsewhere (the lyrics source picker, the first-run
+			// import prompt): that tab, scrolled to the section once the tab has rendered.
+			const focus =
+				ui.settingsFocus === 'lyrics'
+					? { tab: 'playback' as const, section: 'lyrics' }
+					: ui.settingsFocus;
+			ui.settingsFocus = null;
+			if (focus) {
+				tab = focus.tab;
+				const id = focus.section ? `settings-${focus.section}` : null;
 				load().then(tick).then(() => {
-					document.getElementById(id)?.scrollIntoView({ block: 'start', behavior: 'smooth' });
+					if (id) document.getElementById(id)?.scrollIntoView({ block: 'start', behavior: 'smooth' });
 				});
 			} else {
 				load();
@@ -255,6 +272,84 @@
 			}
 		});
 	});
+
+	// --- Import & migrate tab ---
+	// Detection runs each time the tab is shown: LiMusic being open or closed changes while the
+	// dialog is up, and the button depends on it.
+	let sources = $state<api.ImportSources | null>(null);
+	let sourcesError = $state('');
+	let includeWebview = $state(true);
+	let migrating = $state(false);
+	let migrateError = $state('');
+	// A migration marker still waiting (valid ten minutes; past that, never carried out on its own).
+	let pending = $state<api.MigratePending | null>(null);
+	const pendingKind = $derived(pendingNotice(pending));
+	let pendingBusy = $state(false);
+	let pendingError = $state('');
+	async function loadImport() {
+		sourcesError = '';
+		try {
+			sources = await api.importSources();
+		} catch (e) {
+			sourcesError = String(e);
+		}
+		pending = await api.migrateUpstreamPending().catch(() => null);
+	}
+	async function retryPending() {
+		if (!pending) return;
+		pendingError = '';
+		pendingBusy = true;
+		try {
+			// A fresh marker and a restart: nothing after this line runs on success.
+			await api.migrateUpstreamRequest(pending.include_webview);
+		} catch (e) {
+			pendingBusy = false;
+			pendingError =
+				String(e) === 'upstream_running' ? t('settings.import.limusic_running') : String(e);
+			loadImport();
+		}
+	}
+	async function cancelPending() {
+		pendingError = '';
+		pendingBusy = true;
+		try {
+			await api.migrateUpstreamCancel();
+			if (ui.importResult?.status === 'retry' || ui.importResult?.status === 'expired') {
+				ui.importResult = null;
+			}
+		} catch (e) {
+			pendingError = String(e);
+		} finally {
+			pendingBusy = false;
+			loadImport();
+		}
+	}
+	$effect(() => {
+		if (ui.settingsOpen && tab === 'import') untrack(loadImport);
+	});
+	async function migrateUpstream() {
+		migrateError = '';
+		migrating = true;
+		try {
+			// Restarts the app on success: nothing after this line runs.
+			await api.migrateUpstreamRequest(includeWebview);
+		} catch (e) {
+			migrating = false;
+			migrateError =
+				String(e) === 'upstream_running' ? t('settings.import.limusic_running') : String(e);
+			loadImport();
+		}
+	}
+	const sizeLabel = (bytes: number) =>
+		bytes >= 1 << 30
+			? `${(bytes / (1 << 30)).toFixed(1)} GB`
+			: `${Math.max(1, Math.round(bytes / (1 << 20)))} MB`;
+	const offerAutostart = $derived(
+		ui.importResult?.status === 'done' &&
+			ui.importResult.upstream_autostart === true &&
+			!portable &&
+			settings.autostart !== 'true'
+	);
 
 	async function checkUpdates() {
 		updateResult = await checkForUpdatesInteractive();
@@ -980,6 +1075,94 @@
 								})}
 							</div>
 						</section>
+					{:else if tab === 'import'}
+						{#if pending}
+							<Alert class="mb-5" id="settings-migrate-pending">
+								<HugeiconsIcon icon={Alert02Icon} size={16} strokeWidth={1.8} />
+								<AlertDescription>
+									<p class="font-medium">{t('settings.import.pending_title')}</p>
+									<p>
+										{pendingKind === 'expired'
+											? t('settings.import.pending_expired')
+											: pendingKind === 'retry'
+												? t('settings.import.pending_retry')
+												: t('settings.import.pending_waiting')}
+									</p>
+									<div class="mt-2 flex items-center gap-3">
+										{#if pendingKind}
+											<Button size="sm" disabled={pendingBusy} onclick={retryPending}>
+												{pendingBusy ? t('common.loading') : t('settings.import.pending_retry_now')}
+											</Button>
+										{/if}
+										<Button size="sm" variant="outline" disabled={pendingBusy} onclick={cancelPending}>
+											{t('settings.import.pending_cancel')}
+										</Button>
+									</div>
+									{#if pendingError}
+										<p class="mt-1 text-xs text-destructive">{pendingError}</p>
+									{/if}
+								</AlertDescription>
+							</Alert>
+						{/if}
+						{#if ui.importResult && !(pending && (ui.importResult.status === 'retry' || ui.importResult.status === 'expired'))}
+							{@const r = ui.importResult}
+							<Alert class="mb-5" variant={r.status === 'error' ? 'destructive' : 'default'}>
+								<HugeiconsIcon icon={r.status === 'done' ? DatabaseImportIcon : Alert02Icon} size={16} strokeWidth={1.8} />
+								<AlertDescription>
+									<p>
+										{r.status === 'done'
+											? t('settings.import.result_done', { files: r.files, size: sizeLabel(r.bytes) })
+											: r.status === 'retry'
+												? t('settings.import.result_retry')
+												: r.status === 'expired'
+													? t('settings.import.pending_expired')
+													: t('settings.import.result_error', { error: r.error ?? '' })}
+									</p>
+									{#if r.aside}
+										<p class="mt-1 break-all text-[11px]">{t('settings.import.result_aside', { path: r.aside })}</p>
+									{/if}
+									{#if offerAutostart}
+										<div class="mt-2 flex items-center gap-3">
+											<span class="text-xs">{t('settings.import.autostart_offer')}</span>
+											<Button size="sm" variant="outline" onclick={() => setAutostart(true)}>
+												{t('settings.import.autostart_enable')}
+											</Button>
+										</div>
+									{/if}
+								</AlertDescription>
+							</Alert>
+						{/if}
+						<section class={GROUP} id="settings-limusic">
+							<h3 class={LABEL}>{t('settings.import.limusic_title')}</h3>
+							<div class={CARD}>
+								{@render row({
+									title: sources?.upstream
+										? t('settings.import.detected')
+										: t('settings.import.not_detected'),
+									desc: sources?.upstream
+										? `${sources.upstream.path} · ${sizeLabel(sources.upstream.bytes)} · ${
+												sources.upstream.running
+													? t('settings.import.limusic_open')
+													: t('settings.import.limusic_closed')
+											}`
+										: sourcesError || t('settings.import.limusic_hint'),
+									below: sources?.upstream ? migrateForm : undefined
+								})}
+							</div>
+						</section>
+						<section class={GROUP} id="settings-playlistforge">
+							<h3 class={LABEL}>{t('settings.import.playlistforge_title')}</h3>
+							<div class={CARD}>
+								{@render row({
+									title: sources?.playlistforge
+										? t('settings.import.detected')
+										: t('settings.import.not_detected'),
+									desc: sources?.playlistforge
+										? `${sources.playlistforge} · ${t('settings.import.playlistforge_soon')}`
+										: t('settings.import.playlistforge_hint')
+								})}
+							</div>
+						</section>
 					{:else if tab === 'about'}
 						<div
 							class="mb-7 rounded-xl border bg-gradient-to-br from-primary/8 to-transparent px-4 py-4"
@@ -1107,6 +1290,33 @@
 			setLocale(id).then(refreshView);
 		}}
 	/>
+{/snippet}
+
+{#snippet migrateForm()}
+	<div class="flex flex-col gap-3">
+		<label class="flex cursor-pointer items-center gap-2 text-sm">
+			<input type="checkbox" class="size-4 accent-primary" bind:checked={includeWebview} disabled={migrating} />
+			{t('settings.import.include_webview')}
+		</label>
+		<p class="max-w-prose text-xs leading-relaxed text-muted-foreground">
+			{t('settings.import.migrate_warning')}
+		</p>
+		<div class="flex items-center gap-3">
+			<Button
+				size="sm"
+				onclick={migrateUpstream}
+				disabled={migrating || sources?.upstream?.running === true}
+			>
+				{migrating ? t('common.loading') : t('settings.import.migrate')}
+			</Button>
+			{#if sources?.upstream?.running}
+				<span class="text-xs text-muted-foreground">{t('settings.import.limusic_running')}</span>
+			{/if}
+		</div>
+		{#if migrateError}
+			<p class="text-xs text-destructive">{migrateError}</p>
+		{/if}
+	</div>
 {/snippet}
 
 {#snippet historySwitch()}<Switch checked={historyOn} onCheckedChange={setHistory} />{/snippet}

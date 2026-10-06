@@ -491,6 +491,48 @@ export interface InstallInfo {
 }
 /** Portable or installed, for Settings > About and the autostart toggle. */
 export const installInfo = () => invoke<InstallInfo>('install_info');
+
+// --- import & migrate (migrate_upstream.rs) --------------------------------------------------
+/** What there is to import on this machine. Detection only. */
+export interface ImportSources {
+	/** Upstream LiMusic's data folder: where, how big, and whether LiMusic is open right now. */
+	upstream: { path: string; bytes: number; running: boolean } | null;
+	/** PlaylistForge's database, when there is one. */
+	playlistforge: string | null;
+}
+export const importSources = () => invoke<ImportSources>('import_sources');
+/** Leave the migration marker and restart: the copy runs on the next launch, before anything
+ *  opens the database. Rejects with `upstream_running` while LiMusic is open. */
+export const migrateUpstreamRequest = (includeWebview: boolean) =>
+	invoke<void>('migrate_upstream_request', { includeWebview });
+export interface MigrateReport {
+	/** `retry`: LiMusic was open, the next launch tries again. `expired`: the request was more than
+	 *  ten minutes old, so nothing was done; the marker waits for "retry now" or "cancel". */
+	status: 'done' | 'retry' | 'expired' | 'error';
+	error: string | null;
+	files: number;
+	bytes: number;
+	/** Where this app's previous data was moved to, if it had any. */
+	aside: string | null;
+	webview: boolean;
+	/** Whether LiMusic starts at login (only reported after a successful copy). */
+	upstream_autostart: boolean | null;
+}
+/** What the last migration did; read once, then gone. */
+export const migrateUpstreamResult = () => invoke<MigrateReport | null>('migrate_upstream_result');
+/** A migration asked for and not carried out yet. Only valid for ten minutes after
+ *  `requested_at`; past that (`expired`) the next launch no longer acts on it on its own. */
+export interface MigratePending {
+	/** Unix seconds. */
+	requested_at: number;
+	expired: boolean;
+	/** What the last launch made of it: `retry` (LiMusic open, a file held) or `expired`. */
+	last_status: string | null;
+	include_webview: boolean;
+}
+export const migrateUpstreamPending = () => invoke<MigratePending | null>('migrate_upstream_pending');
+/** Drop the pending migration marker (only that file). */
+export const migrateUpstreamCancel = () => invoke<void>('migrate_upstream_cancel');
 /** The updater plugin's `check()` against the beta channel's manifest, as the metadata the
  *  plugin's `Update` class is built from. `null` when this build is what the channel offers. */
 export const checkBetaUpdate = () =>

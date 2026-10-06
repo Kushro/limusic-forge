@@ -3366,8 +3366,10 @@ version = "1.2.0-forge.1"
 dependencies = [
  "any_ascii",
  "anyhow",
+ "auto-launch",
  "base64 0.22.1",
  "csv",
+ "dirs 6.0.0",
  "discord-rich-presence",
  "futures-util",
  "gtk",
