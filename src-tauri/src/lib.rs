@@ -1052,6 +1052,8 @@ pub fn run() {
             commands::keep_only_in,
             commands::playlist_alerts,
             commands::dismiss_playlist_alert,
+            commands::mark_alerts_seen,
+            commands::playlist_timeline,
             commands::playlist_history,
             commands::undo_playlist_op,
             commands::create_playlist,

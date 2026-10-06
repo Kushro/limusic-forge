@@ -22,6 +22,7 @@
 		UserIcon,
 		Home01Icon,
 		LibraryIcon,
+		Notification03Icon,
 		Playlist02Icon,
 		Settings01Icon,
 		DatabaseImportIcon,
@@ -146,6 +147,13 @@
 		{ id: 'goto:home', group: 'goto', label: t('nav.home'), run: go('/') },
 		{ id: 'goto:search', group: 'goto', label: t('nav.search'), run: go('/search') },
 		{ id: 'goto:library', group: 'goto', label: t('nav.library'), run: go('/library') },
+		{
+			id: 'goto:alerts',
+			group: 'goto',
+			label: t('nav.alerts'),
+			keywords: ['monitor', 'changes', 'notifications', 'timeline'],
+			run: go('/alerts')
+		},
 		...LIBRARY_TABS.map(
 			([tab, key]): PaletteCommand => ({
 				id: `goto:library:${tab}`,
@@ -197,6 +205,7 @@
 	const ICONS: Record<string, Icon> = {
 		'goto:home': Home01Icon,
 		'goto:search': Search01Icon,
+		'goto:alerts': Notification03Icon,
 		'action:settings': Settings01Icon,
 		'action:import': DatabaseImportIcon,
 		'action:theme': Sun01Icon

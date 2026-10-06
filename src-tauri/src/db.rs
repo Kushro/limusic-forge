@@ -2174,6 +2174,46 @@ impl Db {
         out
     }
 
+    /// One page of [`Db::alert_rows`], newest first: at most `limit` rows (all with `None`), and
+    /// only those after the `before` cursor, the `(at, id)` of the last row of the page before.
+    /// Ordering by both means rows that share an `at` are neither skipped nor repeated.
+    pub fn alert_rows_page(
+        &self,
+        include_dismissed: bool,
+        limit: Option<u32>,
+        before: Option<(i64, i64)>,
+    ) -> Vec<AlertRow> {
+        let conn = self.0.lock().unwrap();
+        let mut out = Vec::new();
+        if let Ok(mut stmt) = conn.prepare(
+            "SELECT id, playlist_id, video_id, kind, song_json, at, from_pos, to_pos, seen, \
+             dismissed FROM playlist_alert WHERE (?1 OR dismissed = 0) \
+             AND (?2 IS NULL OR at < ?2 OR (at = ?2 AND id < ?3)) \
+             ORDER BY at DESC, id DESC LIMIT ?4",
+        ) {
+            let (at, id) = (before.map(|b| b.0), before.map(|b| b.1));
+            let limit = limit.map_or(-1, i64::from);
+            let params = rusqlite::params![include_dismissed, at, id, limit];
+            if let Ok(rows) = stmt.query_map(params, |r| {
+                Ok(AlertRow {
+                    id: r.get(0)?,
+                    playlist_id: r.get(1)?,
+                    video_id: r.get(2)?,
+                    kind: r.get(3)?,
+                    song_json: r.get(4)?,
+                    at: r.get(5)?,
+                    from_pos: r.get(6)?,
+                    to_pos: r.get(7)?,
+                    seen: r.get::<_, i64>(8)? != 0,
+                    dismissed: r.get::<_, i64>(9)? != 0,
+                })
+            }) {
+                out.extend(rows.flatten());
+            }
+        }
+        out
+    }
+
     /// Mark these alerts seen, or every alert with `None`. Answers how many rows it touched.
     pub fn mark_alerts_seen(&self, ids: Option<&[i64]>) -> usize {
         let conn = self.0.lock().unwrap();
@@ -3921,6 +3961,44 @@ mod tests {
         d.dismiss_playlist_alert("VL1", "a", "removed");
         assert!(d.alert_rows(false).is_empty());
         assert_eq!(d.alert_rows(true).len(), 2);
+    }
+
+    #[test]
+    fn alert_pages_follow_the_at_and_id_cursor() {
+        let d = db();
+        // Three rows share an `at`, as one monitor run files them.
+        for (at, video) in [(10, "a"), (20, "b"), (20, "c"), (20, "d"), (30, "e")] {
+            let key = alert_dedupe_key("VL1", video, "added", None);
+            d.insert_alert(&NewAlert {
+                playlist_id: "VL1",
+                video_id: video,
+                kind: "added",
+                song_json: None,
+                at,
+                from_pos: None,
+                to_pos: None,
+                dedupe_key: &key,
+            })
+            .unwrap();
+        }
+        d.dismiss_playlist_alert("VL1", "d", "added");
+        let all = d.alert_rows(true);
+        assert_eq!(d.alert_rows_page(true, None, None).len(), all.len(), "no limit, no cursor");
+
+        let mut paged = Vec::new();
+        let mut cursor = None;
+        loop {
+            let page = d.alert_rows_page(true, Some(2), cursor);
+            assert!(page.len() <= 2);
+            let Some(last) = page.last() else { break };
+            cursor = Some((last.at, last.id));
+            paged.extend(page.into_iter().map(|a| a.id));
+        }
+        assert_eq!(paged, all.iter().map(|a| a.id).collect::<Vec<_>>(), "no skips, no repeats");
+
+        let shown: Vec<String> =
+            d.alert_rows_page(false, Some(10), None).into_iter().map(|a| a.video_id).collect();
+        assert_eq!(shown, ["e", "c", "b", "a"], "dismissed ones only when asked for");
     }
 
     #[test]

@@ -17,14 +17,15 @@
 		ComputerIcon,
 		SquareArrowLeft01Icon,
 		SquareArrowRight01Icon,
-		SpotifyIcon
+		SpotifyIcon,
+		Notification03Icon
 	} from '@hugeicons/core-free-icons';
 	import { toggleMode } from 'mode-watcher';
 	import { Button } from '$lib/components/ui/button';
 	import { ON_REPEAT_ID, isLocalPlaylist, type BrowseItem } from '$lib/api';
 	import { thumb } from '$lib/thumb';
 	import PlaylistMenu from './PlaylistMenu.svelte';
-	import { library, personal, prefs, ui, openNewPlaylist, toggleSidebar } from '$lib/player.svelte';
+	import { library, monitor, personal, prefs, ui, openNewPlaylist, toggleSidebar } from '$lib/player.svelte';
 	import { mergeSaved, orderLibrary } from '$lib/personal';
 	import { t } from '$lib/i18n.svelte';
 	import { imp } from '$lib/import.svelte';
@@ -39,8 +40,12 @@
 	const nav = $derived([
 		{ href: '/', label: t('nav.home'), icon: Home01Icon },
 		{ href: '/search', label: t('nav.search'), icon: Search01Icon },
-		{ href: '/library', label: t('nav.library'), icon: LibraryIcon }
+		{ href: '/library', label: t('nav.library'), icon: LibraryIcon },
+		{ href: '/alerts', label: t('nav.alerts'), icon: Notification03Icon }
 	]);
+	// The monitor's alerts neither seen nor dismissed, on the Alerts entry (99+ past that).
+	const badge = (href: string) =>
+		href === '/alerts' && monitor.unseen > 0 ? (monitor.unseen > 99 ? '99+' : String(monitor.unseen)) : null;
 	const isActive = (href: string) =>
 		href === '/' ? page.url.pathname === '/' : page.url.pathname.startsWith(href);
 
@@ -203,11 +208,30 @@
 						class="absolute left-0 top-1/2 h-5 w-1 -translate-y-1/2 rounded-r-full bg-primary"
 					></span>
 				{/if}
-				<HugeiconsIcon
-					icon={n.icon}
-					class="h-5 w-5 shrink-0"
-				/>
+				<span class="relative shrink-0">
+					<HugeiconsIcon
+						icon={n.icon}
+						class="h-5 w-5 shrink-0"
+					/>
+					{#if badge(n.href)}
+						<!-- On the icon rail the count has nowhere else to go: a dot on the bell. -->
+						<span
+							class="absolute -right-1 -top-1 h-2 w-2 rounded-full bg-primary {wide('lg:hidden')}"
+							aria-hidden="true"
+						></span>
+					{/if}
+				</span>
 				<span class="hidden {wide('lg:inline')}">{n.label}</span>
+				{#if badge(n.href)}
+					<span
+						class="ml-auto hidden min-w-5 rounded-full bg-primary px-1.5 text-center text-[11px] font-semibold leading-5 text-primary-foreground tabular-nums {wide(
+							'lg:inline-block'
+						)}"
+						aria-label={t('alerts.unseen_count', { count: monitor.unseen })}
+					>
+						{badge(n.href)}
+					</span>
+				{/if}
 			</a>
 		{/each}
 		<button

@@ -965,8 +965,52 @@ export type PlaylistAlert = {
 	seen: boolean;
 	from?: number;
 	to?: number;
+	/** Dismissed from Library ▸ In your playlists (only ever true with `all`). */
+	dismissed?: boolean;
 };
-export const playlistAlerts = () => invoke<PlaylistAlert[]>('playlist_alerts');
+/** The alerts not dismissed, newest first, one per playlist, track and kind (the newest of its
+ *  repeats). `all` is the alerts page: every row ever filed, repeats and dismissed ones included,
+ *  in pages of at most `limit` rows older than `before`, the `[at, id]` of the last row loaded.
+ *  `limit`/`before` only apply with `all`. */
+export const playlistAlerts = (
+	opts: { all?: boolean; limit?: number; before?: [number, number] } = {}
+) =>
+	invoke<PlaylistAlert[]>('playlist_alerts', {
+		all: opts.all ?? null,
+		limit: opts.limit ?? null,
+		before: opts.before ?? null
+	});
+/** Mark these alerts seen, or every one with no ids. Answers the unseen count after (also sent as
+ *  `alerts-changed`). */
+export const markAlertsSeen = (ids?: number[]) =>
+	invoke<number>('mark_alerts_seen', { ids: ids ?? null });
+/** One change between two snapshots of a playlist; `from`/`to` are 0-based positions in the older
+ *  and the newer one, where known. */
+export type TimelineChange = {
+	video_id: string;
+	kind: AlertKind;
+	song: SongItem | null;
+	from?: number;
+	to?: number;
+};
+/** One snapshot of a playlist and what changed since the one before it. `baseline` is the oldest
+ *  kept, with nothing to compare against. */
+export type TimelineEntry = {
+	snapshot_id: number;
+	taken_at: number;
+	item_count: number;
+	title: string | null;
+	baseline: boolean;
+	added: number;
+	removed: number;
+	moved: number;
+	unavailable: number;
+	restored: number;
+	changes: TimelineChange[];
+};
+/** Every snapshot kept of a playlist, newest first, with its changes. Empty when never synced. */
+export const playlistTimeline = (playlistId: string) =>
+	invoke<TimelineEntry[]>('playlist_timeline', { playlistId });
 export const dismissPlaylistAlert = (a: PlaylistAlert) =>
 	invoke<void>('dismiss_playlist_alert', {
 		playlistId: a.playlist_id,

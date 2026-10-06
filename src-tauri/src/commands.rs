@@ -2156,19 +2156,19 @@ pub struct PlaylistAlert {
     from: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     to: Option<i64>,
+    /// Dismissed from Library ▸ In your playlists. Only ever true with `all`.
+    dismissed: bool,
 }
 
-/// The alerts not dismissed, newest first, one per playlist, track and kind: a repeated event
-/// files a row each time (the alerts page lists them all), but here the newest stands for the
-/// rest, and dismissing it dismisses them all (`dismiss_playlist_alert`).
-#[tauri::command]
-pub fn playlist_alerts(state: St<'_>) -> Vec<PlaylistAlert> {
+/// `rows` (newest first) as the UI gets them. Without `all`: the ones not dismissed, one per
+/// playlist, track and kind, the newest standing for its repeats. With it: every row, as filed.
+fn alerts_of(rows: Vec<crate::db::AlertRow>, all: bool) -> Vec<PlaylistAlert> {
     let mut shown = std::collections::HashSet::new();
-    state
-        .db
-        .alert_rows(false)
-        .into_iter()
-        .filter(|a| shown.insert((a.playlist_id.clone(), a.video_id.clone(), a.kind.clone())))
+    rows.into_iter()
+        .filter(|a| {
+            all || (!a.dismissed
+                && shown.insert((a.playlist_id.clone(), a.video_id.clone(), a.kind.clone())))
+        })
         .map(|a| PlaylistAlert {
             id: a.id,
             playlist_id: a.playlist_id,
@@ -2179,8 +2179,139 @@ pub fn playlist_alerts(state: St<'_>) -> Vec<PlaylistAlert> {
             seen: a.seen,
             from: a.from_pos,
             to: a.to_pos,
+            dismissed: a.dismissed,
         })
         .collect()
+}
+
+/// The monitor's alerts, newest first. By default the ones not dismissed, one per playlist, track
+/// and kind: a repeated event files a row each time, but here the newest stands for the rest, and
+/// dismissing it dismisses them all (`dismiss_playlist_alert`). `all` is the alerts page: every
+/// row ever filed, repeats and dismissed ones included. With `all` the page loads them in pages:
+/// at most `limit` rows, older than the `before` cursor (`[at, id]` of the last row it has).
+/// Without `all` both are ignored.
+#[tauri::command]
+pub fn playlist_alerts(
+    state: St<'_>,
+    all: Option<bool>,
+    limit: Option<u32>,
+    before: Option<(i64, i64)>,
+) -> Vec<PlaylistAlert> {
+    let all = all.unwrap_or(false);
+    if all && (limit.is_some() || before.is_some()) {
+        return alerts_of(state.db.alert_rows_page(true, limit, before), true);
+    }
+    alerts_of(state.db.alert_rows(all), all)
+}
+
+/// Mark these alerts seen, or every one with no `ids`. Answers the unseen count after, which the
+/// `alerts-changed` event carries too (the sidebar badge).
+#[tauri::command]
+pub fn mark_alerts_seen(state: St<'_>, ids: Option<Vec<i64>>) -> u32 {
+    state.db.mark_alerts_seen(ids.as_deref());
+    let unseen = state.db.unseen_alert_count();
+    let _ = state.app.emit("alerts-changed", json!({ "unseen": unseen }));
+    unseen
+}
+
+/// One change between two snapshots of a playlist ([`monitor::Change`], as the UI reads it).
+#[derive(Debug, serde::Serialize)]
+pub struct TimelineChange {
+    video_id: String,
+    kind: &'static str,
+    song: Option<SongItem>,
+    /// Where the row was in the older snapshot (0-based), and where it is in the newer one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    from: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    to: Option<usize>,
+}
+
+/// One snapshot of a playlist and what changed since the one before it.
+#[derive(Debug, serde::Serialize)]
+pub struct TimelineEntry {
+    snapshot_id: i64,
+    taken_at: i64,
+    item_count: i64,
+    title: Option<String>,
+    /// The oldest snapshot kept: nothing before it to compare with, so no changes.
+    baseline: bool,
+    added: u32,
+    removed: u32,
+    moved: u32,
+    unavailable: u32,
+    restored: u32,
+    changes: Vec<TimelineChange>,
+}
+
+/// A snapshot row as the song [`monitor::diff`] compares against.
+fn snap_song(i: &crate::db::SnapItem) -> SongItem {
+    SongItem {
+        video_id: i.v.clone(),
+        set_video_id: i.s.clone(),
+        title: i.t.clone(),
+        artists: i.a.clone(),
+        duration: i.d.clone(),
+        unavailable: i.u,
+        thumbnail: i.th.clone(),
+        ..Default::default()
+    }
+}
+
+/// `snaps` newest first (as [`crate::db::Db::snapshots`] answers them), each with the changes
+/// from the snapshot right after it in the list, the older one: the same comparison a sync makes.
+fn timeline(snaps: &[crate::db::Snapshot]) -> Vec<TimelineEntry> {
+    snaps
+        .iter()
+        .enumerate()
+        .map(|(i, snap)| {
+            let changes = match snaps.get(i + 1) {
+                Some(older) => {
+                    let now: Vec<SongItem> = snap.items.iter().map(snap_song).collect();
+                    monitor::diff(&older.items, &now)
+                }
+                None => Vec::new(),
+            };
+            let mut entry = TimelineEntry {
+                snapshot_id: snap.id,
+                taken_at: snap.taken_at,
+                item_count: snap.item_count,
+                title: snap.title.clone(),
+                baseline: i + 1 == snaps.len(),
+                added: 0,
+                removed: 0,
+                moved: 0,
+                unavailable: 0,
+                restored: 0,
+                changes: Vec::with_capacity(changes.len()),
+            };
+            for c in changes {
+                let n = match c.kind {
+                    monitor::Kind::Added => &mut entry.added,
+                    monitor::Kind::Removed => &mut entry.removed,
+                    monitor::Kind::Moved => &mut entry.moved,
+                    monitor::Kind::Unavailable => &mut entry.unavailable,
+                    monitor::Kind::Restored => &mut entry.restored,
+                };
+                *n += 1;
+                entry.changes.push(TimelineChange {
+                    video_id: c.video_id,
+                    kind: c.kind.as_str(),
+                    song: c.song,
+                    from: c.from,
+                    to: c.to,
+                });
+            }
+            entry
+        })
+        .collect()
+}
+
+/// A playlist's history: every snapshot kept of it, newest first, each with what changed since
+/// the one before (PlaylistForge's timeline). Empty for a playlist never synced.
+#[tauri::command]
+pub fn playlist_timeline(state: St<'_>, playlist_id: String) -> Vec<TimelineEntry> {
+    timeline(&state.db.snapshots(&playlist_id))
 }
 
 #[tauri::command]
@@ -3089,6 +3220,106 @@ pub fn theater_fullscreen(window: tauri::WebviewWindow, on: bool) -> Result<(), 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn alert_row(id: i64, video: &str, kind: &str, dismissed: bool) -> crate::db::AlertRow {
+        crate::db::AlertRow {
+            id,
+            playlist_id: "VLPL1".into(),
+            video_id: video.into(),
+            kind: kind.into(),
+            song_json: None,
+            at: 1000 - id,
+            from_pos: None,
+            to_pos: None,
+            seen: false,
+            dismissed,
+        }
+    }
+
+    #[test]
+    fn alerts_collapse_repeats_unless_the_page_asks_for_all() {
+        // Newest first, as `alert_rows` answers: b removed twice, a dismissed once.
+        let rows = || {
+            vec![
+                alert_row(1, "b", "removed", false),
+                alert_row(2, "b", "removed", false),
+                alert_row(3, "b", "added", false),
+                alert_row(4, "a", "unavailable", true),
+            ]
+        };
+        let ids = |v: Vec<PlaylistAlert>| v.into_iter().map(|a| a.id).collect::<Vec<_>>();
+        assert_eq!(ids(alerts_of(rows(), false)), [1, 3]);
+        assert_eq!(ids(alerts_of(rows(), true)), [1, 2, 3, 4]);
+        let all = alerts_of(rows(), true);
+        assert!(all[3].dismissed && !all[0].dismissed);
+    }
+
+    #[test]
+    fn timeline_diffs_each_snapshot_against_the_one_before() {
+        let db = crate::db::Db::open(std::path::Path::new(":memory:")).unwrap();
+        let row = |v: &str, s: &str| SongItem {
+            video_id: v.into(),
+            title: v.to_uppercase(),
+            set_video_id: Some(s.into()),
+            ..Default::default()
+        };
+        let read = |songs: &[SongItem], at: i64| {
+            monitor::record(
+                &db,
+                &monitor::Read {
+                    playlist_id: "VLPL1",
+                    title: Some("Mix"),
+                    account_id: None,
+                    songs,
+                    complete: true,
+                    watch: true,
+                    at,
+                    listed: None,
+                },
+            );
+        };
+        assert!(timeline(&db.snapshots("VLPL1")).is_empty(), "never synced: no history");
+        read(&[row("a", "1"), row("b", "2"), row("c", "3")], 100);
+        // c to the top, b gone, d new.
+        read(&[row("c", "3"), row("a", "1"), row("d", "4")], 200);
+        // The same content again files no snapshot, so no entry.
+        read(&[row("c", "3"), row("a", "1"), row("d", "4")], 250);
+        // d turns unavailable.
+        let grey = SongItem { unavailable: true, ..row("d", "4") };
+        read(&[row("c", "3"), row("a", "1"), grey], 300);
+
+        let got = timeline(&db.snapshots("VLPL1"));
+        let at: Vec<i64> = got.iter().map(|e| e.taken_at).collect();
+        assert_eq!(at, [300, 200, 100], "newest first");
+        assert!(got[2].baseline && !got[1].baseline && !got[0].baseline);
+        assert!(got[2].changes.is_empty());
+        assert_eq!(got[2].item_count, 3);
+
+        let mid = &got[1];
+        assert_eq!((mid.added, mid.removed, mid.moved), (1, 1, 1));
+        let kinds: Vec<(&str, &str, Option<usize>, Option<usize>)> =
+            mid.changes.iter().map(|c| (c.video_id.as_str(), c.kind, c.from, c.to)).collect();
+        assert_eq!(
+            kinds,
+            [
+                ("b", "removed", Some(1), None),
+                ("d", "added", None, Some(2)),
+                ("c", "moved", Some(2), Some(0))
+            ]
+        );
+        assert_eq!(mid.changes[0].song.as_ref().map(|s| s.title.as_str()), Some("B"));
+
+        let last = &got[0];
+        assert_eq!((last.unavailable, last.added, last.removed, last.moved), (1, 0, 0, 0));
+        assert_eq!(last.changes[0].kind, "unavailable");
+        assert_eq!(last.title.as_deref(), Some("Mix"));
+
+        // What the UI reads: kinds as strings, positions only where known.
+        let json = serde_json::to_value(&got[1]).unwrap();
+        assert_eq!(json["changes"][0]["kind"], "removed");
+        assert!(json["changes"][0].get("to").is_none());
+        assert_eq!(json["snapshot_id"], got[1].snapshot_id);
+    }
 
     /// D1: the fork's `-forge.N` releases are stable; only rc/beta/alpha are prereleases.
     #[test]

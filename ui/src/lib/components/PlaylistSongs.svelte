@@ -132,6 +132,13 @@
 		}
 	}
 
+	// The alerts page, filtered to the one playlist these are about when they are all about one.
+	const alertsHref = $derived.by(() => {
+		const ids = new Set(alerts.map((a) => a.playlist_id));
+		const [only] = ids;
+		return ids.size === 1 ? `/alerts?playlist=${encodeURIComponent(only)}` : '/alerts';
+	});
+
 	const findIt = (s: SongItem | null) =>
 		s && goto(`/search?q=${encodeURIComponent(`${s.title} ${s.artists ?? ''}`.trim())}`);
 
@@ -151,13 +158,17 @@
 {:else}
 	{#if alerts.length}
 		<section class="mb-4 rounded-xl border border-destructive/30 bg-destructive/5 p-3">
-			<button class="flex w-full items-center gap-2 text-left text-sm font-medium" onclick={() => (alertsOpen = !alertsOpen)}>
-				<HugeiconsIcon icon={Alert02Icon} class="h-4 w-4 text-destructive" />
-				<span class="flex-1">
-					{alerts.length === 1 ? t('everywhere.alerts_one') : t('everywhere.alerts', { count: alerts.length })}
-				</span>
-				<span class="text-xs text-muted-foreground">{alertsOpen ? t('common.less') : t('common.more')}</span>
-			</button>
+			<div class="flex items-center gap-3">
+				<button class="flex min-w-0 flex-1 items-center gap-2 text-left text-sm font-medium" onclick={() => (alertsOpen = !alertsOpen)}>
+					<HugeiconsIcon icon={Alert02Icon} class="h-4 w-4 text-destructive" />
+					<span class="flex-1">
+						{alerts.length === 1 ? t('everywhere.alerts_one') : t('everywhere.alerts', { count: alerts.length })}
+					</span>
+					<span class="text-xs text-muted-foreground">{alertsOpen ? t('common.less') : t('common.more')}</span>
+				</button>
+				<!-- Every alert ever filed, repeats and dismissed ones included, with each playlist's history. -->
+				<a href={alertsHref} class="shrink-0 text-xs font-medium text-primary hover:underline">{t('everywhere.view_all')}</a>
+			</div>
 			{#if alertsOpen}
 				<ul class="mt-2 space-y-1">
 					{#each alerts as a (a.playlist_id + a.video_id + a.kind)}
