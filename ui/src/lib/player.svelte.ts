@@ -10,7 +10,9 @@ import type {
 	NowPlaying,
 	QueueState,
 	Rating,
-	SongItem
+	SongItem,
+	SyncProgress,
+	SyncSummary
 } from './api';
 import { applyLtState, lt } from './lt.svelte';
 import { clearCached, invalidateCached, invalidateCachedPrefix, LIBRARY_SONGS_KEY } from './pagecache';
@@ -399,9 +401,46 @@ export async function loadSavedIndex() {
 		.playlistIndex()
 		.then(apply)
 		.catch(() => {});
+	// The same due-check the backend's scheduler makes (interval, then the back-off after failed
+	// syncs), so it files as one: a launch or a sign-in
+	// is not someone pressing "sync". `busy` means the scheduler got there first, and its
+	// `playlist-index-synced` re-reads the index when it is done.
 	await api
-		.syncPlaylistIndex()
+		.syncPlaylistIndex({ trigger: 'scheduler' })
 		.then(apply)
+		.catch(() => {});
+}
+
+/**
+ * The playlist monitor as the backend reports it: alerts neither seen nor dismissed (the badge),
+ * the last full sync's summary, and the sync running now (null when none is).
+ */
+export const monitor = $state({
+	unseen: 0,
+	summary: null as SyncSummary | null,
+	progress: null as SyncProgress | null
+});
+
+/** Sync every playlist now, interval or not. Rejects with `busy` while a sync is running. */
+export async function syncAllPlaylists() {
+	const generation = libraryGeneration;
+	const map = await api.syncPlaylistIndex({ force: true, trigger: 'manual_ui' });
+	if (generation === libraryGeneration) savedIn.map = map;
+}
+
+/** A sync finished, whoever started it: re-read the index (SQLite, no crawl). A single playlist's
+ *  sync files no summary of its own, so only a full one replaces the stored line. */
+function playlistIndexSynced() {
+	const generation = libraryGeneration;
+	api
+		.playlistIndex()
+		.then((map) => {
+			if (generation === libraryGeneration) savedIn.map = map;
+		})
+		.catch(() => {});
+	api
+		.lastSyncSummary()
+		.then((s) => (monitor.summary = s))
 		.catch(() => {});
 }
 
@@ -1610,6 +1649,10 @@ export function initApp(mini = false): () => void {
 		api.onCoverError((msg) => toast.error(msg)), // playlist artwork YouTube wouldn't take
 		api.onLocalChanged(forgetLocal), // a local file turned out to be gone — drop it everywhere
 		api.onPlaylistsEdited(playlistsEdited), // a playlist tool or its undo changed these
+		// The playlist monitor: a sync's progress, its end (any trigger), and the alerts badge.
+		api.onPlaylistSyncProgress((p) => (monitor.progress = p.current === null ? null : p)),
+		api.onPlaylistIndexSynced(playlistIndexSynced),
+		api.onAlertsChanged((unseen) => (monitor.unseen = unseen)),
 		api.onAuthChanged((a) => {
 			auth.account = a;
 			resetLibraryForAccount();
@@ -1698,6 +1741,13 @@ export function initApp(mini = false): () => void {
 	// point, prunes shortcuts for music that was deleted while the app was closed.
 	scanLocal();
 	loadBlocked();
+	// The monitor's badge and last summary, before any sync this session reports on them.
+	api.unseenAlertCount()
+		.then((n) => (monitor.unseen = n))
+		.catch(() => {});
+	api.lastSyncSummary()
+		.then((s) => (monitor.summary = s))
+		.catch(() => {});
 	// Seed the Listen Together state (server URL, any active room after a UI reload).
 	api.ltGetState().then(applyLtState).catch(() => {});
 	return teardown;

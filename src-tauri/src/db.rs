@@ -1035,6 +1035,7 @@ impl Db {
 
     /// Replace one playlist's index rows with these songs, metadata included. `first_seen`
     /// survives (see [`replace_playlist_rows`]).
+    #[cfg(test)]
     pub fn set_playlist_songs(&self, playlist_id: &str, songs: &[(String, String)]) {
         self.set_playlist_songs_at(playlist_id, songs, now_secs());
     }
@@ -1048,6 +1049,42 @@ impl Db {
         let mut conn = self.0.lock().unwrap();
         let Ok(tx) = conn.transaction() else { return };
         if replace_playlist_rows(&tx, playlist_id, &rows, now).is_ok() {
+            let _ = tx.commit();
+        }
+    }
+
+    /// A read cut short (a failed page, the page cap): write down the songs it did see, metadata
+    /// included, and leave every other row of the playlist alone. Deleting the unread tail would
+    /// have the next complete read find it "new" and stamp it `first_seen = now`. A row already
+    /// there keeps its `first_seen`; one new to it is first seen `now` when the playlist was synced
+    /// before, NULL otherwise, as in [`Db::set_playlist_songs_at`].
+    pub fn upsert_playlist_songs_at(
+        &self,
+        playlist_id: &str,
+        songs: &[(String, String)],
+        now: i64,
+    ) {
+        let mut conn = self.0.lock().unwrap();
+        let Ok(tx) = conn.transaction() else { return };
+        let written = (|| -> rusqlite::Result<()> {
+            let synced: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM playlist_sync WHERE playlist_id = ?1)",
+                [playlist_id],
+                |r| r.get(0),
+            )?;
+            let fresh = synced.then_some(now);
+            for (video_id, json) in songs {
+                tx.execute(
+                    "INSERT INTO playlist_track(playlist_id, video_id, song_json, first_seen) \
+                     VALUES(?1, ?2, ?3, ?4) \
+                     ON CONFLICT(playlist_id, video_id) \
+                     DO UPDATE SET song_json = excluded.song_json",
+                    rusqlite::params![playlist_id, video_id, json, fresh],
+                )?;
+            }
+            Ok(())
+        })();
+        if written.is_ok() {
             let _ = tx.commit();
         }
     }
@@ -1085,6 +1122,7 @@ impl Db {
     /// Record an alert unless the same one is already there (dismissed ones included): one per
     /// playlist, track and kind, keyed by [`alert_dedupe_key`] with no scope. The pre-v3 `gone`
     /// is filed as `removed`.
+    #[cfg(test)]
     pub fn add_playlist_alert(
         &self,
         playlist_id: &str,
@@ -1108,6 +1146,7 @@ impl Db {
     }
 
     /// The alerts not dismissed, newest first: `(playlist id, videoId, kind, song_json, at)`.
+    #[cfg(test)]
     pub fn playlist_alerts(&self) -> Vec<(String, String, String, Option<String>, i64)> {
         let conn = self.0.lock().unwrap();
         let mut out = Vec::new();
@@ -2267,6 +2306,23 @@ impl Db {
             ],
         )?;
         Ok(conn.last_insert_rowid())
+    }
+
+    /// Fold a repeat into an existing run row: a failure just like the one before it moves that
+    /// row's `finished_at` and replaces its `detail_json` (which counts the repeats) instead of
+    /// logging a row of its own.
+    pub fn update_monitor_run_repeat(
+        &self,
+        id: i64,
+        finished_at: i64,
+        detail_json: &str,
+    ) -> rusqlite::Result<()> {
+        let conn = self.0.lock().unwrap();
+        conn.execute(
+            "UPDATE monitor_runs SET finished_at = ?2, detail_json = ?3 WHERE id = ?1",
+            rusqlite::params![id, finished_at, detail_json],
+        )?;
+        Ok(())
     }
 
     /// The newest `limit` monitor runs, newest first.
@@ -3878,6 +3934,57 @@ mod tests {
         d.put_playlist_song("VL2", "e", "{}");
         assert!(first_seen(&d, "VL1", "d").is_some());
         assert!(first_seen(&d, "VL2", "e").is_some());
+    }
+
+    #[test]
+    fn a_short_read_upserts_without_dropping_the_unread_tail() {
+        let d = db();
+        let songs = |ids: &[&str], json: &str| -> Vec<(String, String)> {
+            ids.iter().map(|v| (v.to_string(), json.to_string())).collect()
+        };
+        d.set_playlist_songs_at("VL1", &songs(&["a", "b", "c"], "{}"), 100);
+        let sync = PlaylistSync { synced_at: 100, item_count: 3, added: 0, removed: 0, moved: 0 };
+        d.set_playlist_sync("VL1", &sync).unwrap();
+        d.set_playlist_songs_at("VL1", &songs(&["a", "b", "c"], "{}"), 150);
+        // Cut short after the first page: a re-read and a newcomer, nothing taken away.
+        d.upsert_playlist_songs_at("VL1", &songs(&["a", "n"], "{\"t\":2}"), 200);
+        let mut got: Vec<(String, Option<String>)> = d.playlist_songs("VL1");
+        got.sort();
+        let ids: Vec<&str> = got.iter().map(|(v, _)| v.as_str()).collect();
+        assert_eq!(ids, ["a", "b", "c", "n"]);
+        assert_eq!(got[0].1.as_deref(), Some("{\"t\":2}"), "metadata refreshed");
+        assert_eq!(first_seen(&d, "VL1", "a"), None, "kept, not re-dated");
+        assert_eq!(first_seen(&d, "VL1", "n"), Some(200));
+        // The next complete read finds the tail where it was: nothing in it is new.
+        d.set_playlist_songs_at("VL1", &songs(&["a", "b", "c", "n"], "{}"), 300);
+        assert_eq!(first_seen(&d, "VL1", "c"), None);
+        assert_eq!(first_seen(&d, "VL1", "n"), Some(200));
+        // Never synced: a short first read dates nothing either.
+        d.upsert_playlist_songs_at("VL9", &songs(&["z"], "{}"), 400);
+        assert_eq!(first_seen(&d, "VL9", "z"), None);
+    }
+
+    #[test]
+    fn a_repeat_folds_into_its_monitor_run() {
+        let d = db();
+        let run = MonitorRun {
+            id: 0,
+            started_at: 10,
+            finished_at: 11,
+            trigger: "scheduler".into(),
+            outcome: "failed".into(),
+            playlists_ok: 0,
+            playlists_failed: 0,
+            alerts_new: 0,
+            units_spent: 0,
+            detail_json: "{}".into(),
+        };
+        let id = d.record_monitor_run(&run).unwrap();
+        d.update_monitor_run_repeat(id, 99, "{\"repeats\":1}").unwrap();
+        let got = d.monitor_runs(10);
+        assert_eq!(got.len(), 1);
+        assert_eq!((got[0].started_at, got[0].finished_at), (10, 99));
+        assert_eq!(got[0].detail_json, "{\"repeats\":1}");
     }
 
     #[test]

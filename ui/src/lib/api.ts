@@ -659,11 +659,52 @@ export const getPlaylistMore = (token: string) =>
  * answers instantly and is empty until `syncPlaylistIndex` has filled it in at least once.
  */
 export const playlistIndex = () => invoke<Record<string, string[]>>('playlist_index');
+/** Who started a sync, as `monitor_runs` files it. */
+export type SyncTrigger = 'manual_ui' | 'scheduler' | 'headless';
 /**
  * Re-walk your own playlists and answer with the rebuilt map. Skips the crawl while the stored one
- * is still inside its window, so calling this on every launch is cheap.
+ * is still inside `monitor_interval_hours`, so calling this on every launch is cheap; `force` crawls
+ * anyway. Rejects with `busy` while another sync runs (its `onPlaylistIndexSynced` will follow).
  */
-export const syncPlaylistIndex = () => invoke<Record<string, string[]>>('sync_playlist_index');
+export const syncPlaylistIndex = (opts: { force?: boolean; trigger?: SyncTrigger } = {}) =>
+	invoke<Record<string, string[]>>('sync_playlist_index', {
+		force: opts.force ?? null,
+		trigger: opts.trigger ?? null
+	});
+/** One sync run, summed over its playlists. */
+export type SyncSummary = {
+	at: number;
+	trigger: SyncTrigger;
+	/** Playlists read (yours; the ones merely saved are skipped). */
+	playlists: number;
+	/** Read to the end. */
+	complete: number;
+	/** Could not be read at all. */
+	failed: number;
+	added: number;
+	removed: number;
+	moved: number;
+	unavailable: number;
+	restored: number;
+	alerts_new: number;
+};
+/** Sync one playlist now, interval or not. Rejects with `busy` while another sync runs, and with
+ *  `unreadable` when YouTube would not hand the playlist over. */
+export const syncPlaylist = (playlistId: string) =>
+	invoke<SyncSummary>('sync_playlist', { playlistId });
+/** The last full sync's summary, null before the first. */
+export const lastSyncSummary = () => invoke<SyncSummary | null>('last_sync_summary');
+/** Alerts neither seen nor dismissed (the badge). */
+export const unseenAlertCount = () => invoke<number>('unseen_alert_count');
+/** A sync's progress: `current` is the playlist being read, null once it is done. */
+export type SyncProgress = { done: number; total: number; current: string | null };
+export const onPlaylistSyncProgress = (cb: (p: SyncProgress) => void): Promise<UnlistenFn> =>
+	listen<SyncProgress>('playlist-sync-progress', (e) => cb(e.payload));
+/** A sync finished (any trigger, the scheduler's included): the index is worth re-reading. */
+export const onPlaylistIndexSynced = (cb: (s: SyncSummary) => void): Promise<UnlistenFn> =>
+	listen<SyncSummary>('playlist-index-synced', (e) => cb(e.payload));
+export const onAlertsChanged = (cb: (unseen: number) => void): Promise<UnlistenFn> =>
+	listen<{ unseen: number }>('alerts-changed', (e) => cb(e.payload.unseen));
 /**
  * videoId → times played, from the local listening history. Same trailing window On Repeat uses
  * (a month): the history table is pruned to it, so there is no older data. A videoId that isn't in
@@ -899,13 +940,19 @@ export const keepOnlyIn = async (
 	});
 	return { ...r, op: r.op && op(r.op) };
 };
-/** A track that left a playlist of yours, or turned unavailable in it, since the sync before. */
+export type AlertKind = 'added' | 'removed' | 'moved' | 'unavailable' | 'restored';
+/** A change the monitor found in a playlist of yours since the sync before. `from`/`to` are the
+ *  0-based positions a row went between, where known (always on `moved`). */
 export type PlaylistAlert = {
+	id?: number;
 	playlist_id: string;
 	video_id: string;
-	kind: 'removed' | 'unavailable';
+	kind: AlertKind;
 	song: SongItem | null;
 	at: number;
+	seen: boolean;
+	from?: number;
+	to?: number;
 };
 export const playlistAlerts = () => invoke<PlaylistAlert[]>('playlist_alerts');
 export const dismissPlaylistAlert = (a: PlaylistAlert) =>

@@ -169,7 +169,12 @@ async fn run(state: &Arc<AppState>, step: &Step) -> Result<(), String> {
             rows::remove_rows(state, playlist_id, &gone, none).await
         }
         Step::Reorder { playlist_id, order } => {
-            rows::reorder(state, playlist_id, order, none).await.map(|_| ())
+            let (before, moved) = rows::reorder(state, playlist_id, order, none).await?;
+            // The order put back is yours too: no `moved` alerts for it on the next sync.
+            if moved > 0 {
+                super::monitor::after_reorder(&state.db, playlist_id, &before, order, now_secs());
+            }
+            Ok(())
         }
         Step::Restore { playlist_id, rows: back } => {
             let songs: Vec<SongItem> = back.iter().map(|r| r.song.clone()).collect();

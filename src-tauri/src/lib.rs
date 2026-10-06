@@ -832,6 +832,25 @@ pub fn run() {
                 });
             }
 
+            // The playlist monitor's clock: once a minute, a full sync if `monitor_interval_hours`
+            // says one is due (`commands::scheduled_sync`). The first look waits a minute: launch
+            // and sign-in already ask for the same due sync from the UI, which paints the saved
+            // marks from it, and the stamp and the monitor's lock keep the two from both crawling.
+            // A sync that failed is retried on a back-off (15 min doubling, up to the interval),
+            // not on every tick.
+            {
+                let st = app_state.clone();
+                tauri::async_runtime::spawn(async move {
+                    let mut tick = tokio::time::interval(Duration::from_secs(60));
+                    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                    tick.tick().await; // immediate
+                    loop {
+                        tick.tick().await;
+                        commands::scheduled_sync(&st).await;
+                    }
+                });
+            }
+
             // Pump mpv events → UI events + queue advance. context/11 events, context/14 §TrackEnded.
             #[cfg(any(target_os = "linux", windows))]
             let video_state = app_state.clone();
@@ -990,6 +1009,9 @@ pub fn run() {
             commands::get_playlist_more,
             commands::playlist_index,
             commands::sync_playlist_index,
+            commands::sync_playlist,
+            commands::last_sync_summary,
+            commands::unseen_alert_count,
             commands::play_counts,
             commands::get_album,
             commands::get_blocked_artists,

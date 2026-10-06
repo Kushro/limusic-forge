@@ -203,8 +203,11 @@
 		"empty_signed_out": "Sign in, or make a playlist on this device, and its songs show up here.",
 		"alerts_one": "1 track needs a look",
 		"alerts": "{count} tracks need a look",
+		"kind_added": "Added",
 		"kind_removed": "Removed",
+		"kind_moved": "Moved",
 		"kind_unavailable": "Unavailable",
+		"kind_restored": "Available again",
 		"find": "Find it again",
 		"dismiss": "Dismiss"
 	},

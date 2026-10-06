@@ -7,11 +7,13 @@ use innertube::{
     AlbumPage, ArtistPage, BrowseItem, HistoryGroup, HomePage, MoodSection, PlaylistContinuation,
     PlaylistPage, PlaylistSort, Rating, SearchResults, SearchSuggestions, SongItem,
 };
+use serde_json::{json, Value};
 use tauri::{Emitter, Manager, State};
 
 use crate::blocked::BlockedArtist;
 use crate::playlist_tools::journal::{self, Named, OpRecord, Restore, Summary};
-use crate::playlist_tools::{self, build, dedup, everywhere, export, merge, rows, split, transfer};
+use crate::playlist_tools::monitor::{self, SyncSummary};
+use crate::playlist_tools::{build, dedup, everywhere, export, merge, rows, split, transfer};
 use crate::state::{
     is_local_playlist, AppState, LOCAL_PLAYLIST_PREFIX, ON_REPEAT_ID, ON_REPEAT_LIMIT,
     ON_REPEAT_WINDOW_SECS,
@@ -224,7 +226,7 @@ pub async fn get_queue(state: St<'_>) -> Result<serde_json::Value, String> {
 /// `visitor_data`) and internal blobs (`queue_json`, `queue_index`, `queue_position`) never cross
 /// into the webview: they'd otherwise ship the login credential to the renderer on every open, and
 /// the webview can't overwrite them either.
-const UI_SETTINGS: [&str; 31] = [
+const UI_SETTINGS: [&str; 32] = [
     "volume",
     "proxy",
     "quality",
@@ -257,6 +259,8 @@ const UI_SETTINGS: [&str; 31] = [
     "drop_dupes",
     // The first-run import prompt's answer and the sources it covered (D8, onboarding.ts).
     "onboarding_import_prompted",
+    // Hours between playlist syncs: 0 (off), 1, 3, 6, 12 or 24 (monitor_interval_secs).
+    "monitor_interval_hours",
 ];
 
 /// Resolve the music video for `video_id` and hand back a `limusicvideo://` URL the player view
@@ -1171,9 +1175,16 @@ pub(crate) fn editable_playlist<'a>(
 /// membership of this list is the only way a result can draw its heart filled. Not shown in the
 /// "saved in" chip, though: the thumbs-up already says it (the UI filters it out there).
 pub(crate) const LIKED_MUSIC_ID: &str = "VLLM";
-/// How long the membership index is trusted before a re-crawl. Adds and removes made in this app
-/// patch it as they happen, so this window only ever covers edits made somewhere else.
-const PLAYLIST_INDEX_TTL_SECS: i64 = 6 * 3600;
+/// When the index was last rebuilt by a full crawl (unix seconds). The key changes whenever the
+/// index learns to hold something new, so an install with a fresh stamp re-crawls once: `_v2` when
+/// Liked Music joined it, `_v3` when each track's metadata did (the "in your playlists" view and
+/// the monitor read it).
+pub(crate) const PLAYLIST_INDEX_STAMP: &str = "playlist_index_synced_at_v3";
+/// How often the index is re-crawled by itself, in hours (`monitor_interval_hours`): the choices
+/// the UI offers, 0 being never. Adds and removes made in this app patch the index as they happen,
+/// so the interval only ever covers edits made somewhere else.
+const MONITOR_INTERVALS: [i64; 6] = [0, 1, 3, 6, 12, 24];
+const MONITOR_INTERVAL_DEFAULT: i64 = 6;
 /// Continuation pages per playlist. YouTube hands back 100 tracks a page, so this covers 5000 of
 /// them. ponytail: a hard stop, not paging state. A playlist past it marks its first 5000 tracks
 /// and no more, which beats one pathological list turning a sync into hundreds of requests.
@@ -1186,102 +1197,353 @@ pub fn playlist_index(state: St<'_>) -> std::collections::HashMap<String, Vec<St
     state.db.playlist_memberships()
 }
 
+/// The re-crawl interval in seconds, `None` when it is off. Anything the UI would not have written
+/// reads as the default.
+fn monitor_interval_secs(db: &crate::db::Db) -> Option<i64> {
+    let hours = db
+        .get_setting("monitor_interval_hours")
+        .and_then(|h| h.trim().parse::<i64>().ok())
+        .filter(|h| MONITOR_INTERVALS.contains(h))
+        .unwrap_or(MONITOR_INTERVAL_DEFAULT);
+    (hours > 0).then_some(hours * 3600)
+}
+
+/// Whether a sync nobody asked for (launch, sign-in, the scheduler) should crawl now. An index that
+/// was never built always should, interval off or not: the "saved" marks have nothing else to go
+/// on. After that, only once the interval has passed, and never with it off.
+pub(crate) fn playlist_index_due(db: &crate::db::Db, now: i64) -> bool {
+    let Some(at) = db.get_setting(PLAYLIST_INDEX_STAMP).and_then(|at| at.parse::<i64>().ok())
+    else {
+        return true;
+    };
+    monitor_interval_secs(db).is_some_and(|every| now >= at + every)
+}
+
+/// When the last full sync was tried (unix seconds), and how many failed in a row before now: what
+/// keeps a sync that cannot run (offline, an expired cookie) from being retried every minute.
+pub(crate) const MONITOR_LAST_ATTEMPT: &str = "monitor_last_attempt_at";
+pub(crate) const MONITOR_FAILURES: &str = "monitor_failures";
+
+fn monitor_failures(db: &crate::db::Db) -> u32 {
+    db.get_setting(MONITOR_FAILURES).and_then(|n| n.trim().parse().ok()).unwrap_or(0)
+}
+
+/// Write a full sync's attempt down: a success clears the failures, a failure adds one.
+fn note_sync_attempt(db: &crate::db::Db, at: i64, ok: bool) {
+    db.set_setting(MONITOR_LAST_ATTEMPT, &at.to_string());
+    let failures = if ok { 0 } else { monitor_failures(db).saturating_add(1) };
+    db.set_setting(MONITOR_FAILURES, &failures.to_string());
+}
+
+/// Whether the scheduler may try again after failed syncs ([`monitor::retry_due`]). Someone
+/// asking for a sync does not wait for this.
+pub(crate) fn monitor_retry_due(db: &crate::db::Db, now: i64) -> bool {
+    let last = db.get_setting(MONITOR_LAST_ATTEMPT).and_then(|at| at.parse::<i64>().ok());
+    monitor::retry_due(now, last, monitor_failures(db), monitor_interval_secs(db))
+}
+
+/// The `monitor_runs.trigger` for what the UI sent: the scheduler's and headless runs say so, and
+/// anything else is a person in the UI.
+fn sync_trigger(trigger: Option<&str>) -> &'static str {
+    match trigger {
+        Some("scheduler") => "scheduler",
+        Some("headless") => "headless",
+        _ => "manual_ui",
+    }
+}
+
+/// How one playlist's read went.
+enum PlaylistRead {
+    /// Someone else's playlist you merely saved: not indexed, not watched.
+    NotYours,
+    /// Its first page could not be read.
+    Failed,
+    Read {
+        complete: bool,
+        counts: monitor::Counts,
+    },
+}
+
+/// Read one playlist to the end (or the page cap) and write it down: index rows, snapshot,
+/// alerts, sync record ([`monitor::record`]).
+async fn sync_one(
+    state: &Arc<AppState>,
+    client: &innertube::YouTubeClient,
+    playlist_id: &str,
+    title: Option<&str>,
+    account_id: Option<&str>,
+) -> PlaylistRead {
+    let Ok(page) = state.it.playlist(client, playlist_id, None).await else {
+        return PlaylistRead::Failed;
+    };
+    // A collaborative playlist reads `owned: false` (YouTube drops the editable header on it) but
+    // is one you add to and remove from, so the membership index has to cover it too. Liked Music
+    // is exempt: YouTube sends it without the editable header, so it reads `owned: false` even
+    // though it is yours.
+    if playlist_id != LIKED_MUSIC_ID && !page.owned && !page.collaborative {
+        return PlaylistRead::NotYours;
+    }
+    let title = page.title.clone().or_else(|| title.map(str::to_owned));
+    let listed = page.subtitle.as_deref().and_then(monitor::header_track_count);
+    let mut songs: Vec<SongItem> = page.items;
+    let mut token = page.continuation;
+    // Read to the end, not cut short by a failed page or the page cap: only then may the monitor
+    // read a track missing from it as removed.
+    let mut complete = token.is_none();
+    for _ in 0..PLAYLIST_INDEX_MAX_PAGES {
+        let Some(next) = token.take() else {
+            complete = true;
+            break;
+        };
+        let Ok(more) = state.it.playlist_continuation(client, &next).await else { break };
+        songs.extend(more.items);
+        token = more.continuation;
+    }
+    complete = complete || token.is_none();
+    let read = monitor::Read {
+        playlist_id,
+        title: title.as_deref(),
+        account_id,
+        songs: &songs,
+        complete,
+        // Liked Music changes every time you like or unlike something anywhere: not news.
+        watch: playlist_id != LIKED_MUSIC_ID,
+        at: now_secs(),
+        listed,
+    };
+    // An empty read after one that held rows is doubted, and counts as cut short.
+    let complete = monitor::read_complete(&state.db, &read);
+    let counts = monitor::record(&state.db, &read);
+    PlaylistRead::Read { complete, counts }
+}
+
+/// Log a finished run in `monitor_runs`. `playlists_failed` is every playlist not read to the
+/// end; `detail` tells the unreadable ones from the cut-short ones. A scheduler failure right
+/// after another folds into that one's row (`detail.repeats`, [`monitor::fold_failure`]) rather
+/// than logging a row per retry.
+fn record_run(state: &AppState, summary: &SyncSummary, started: i64, outcome: &str, detail: Value) {
+    let run = crate::db::MonitorRun {
+        id: 0,
+        started_at: started,
+        finished_at: now_secs(),
+        trigger: summary.trigger.clone(),
+        outcome: outcome.to_owned(),
+        playlists_ok: i64::from(summary.complete),
+        playlists_failed: i64::from(summary.playlists.saturating_sub(summary.complete)),
+        alerts_new: i64::from(summary.alerts_new),
+        units_spent: 0,
+        detail_json: detail.to_string(),
+    };
+    let prev = state.db.monitor_runs(1).into_iter().next();
+    if let Some((id, detail)) = monitor::fold_failure(prev.as_ref(), &run) {
+        if let Err(e) = state.db.update_monitor_run_repeat(id, run.finished_at, &detail) {
+            tracing::warn!(error = %e, "could not log a monitor run");
+        }
+        return;
+    }
+    if let Err(e) = state.db.record_monitor_run(&run) {
+        tracing::warn!(error = %e, "could not log a monitor run");
+    }
+}
+
+/// Another run holds the monitor: log the attempt as `lock_busy` and answer `busy`.
+fn monitor_busy(state: &AppState, trigger: &str) -> String {
+    let now = now_secs();
+    record_run(state, &SyncSummary::new(trigger, now), now, "lock_busy", json!({}));
+    "busy".into()
+}
+
+/// Tell the UI a run finished: the index to re-read, and the alerts badge.
+fn announce_sync(state: &AppState, summary: &SyncSummary) {
+    let _ = state.app.emit("playlist-index-synced", summary);
+    let unseen = state.db.unseen_alert_count();
+    let _ = state.app.emit("alerts-changed", json!({ "unseen": unseen }));
+}
+
+/// The whole crawl: every playlist you own, then the index pruned to them, the stamp, the summary
+/// (`playlist_index_last_summary`) and a `monitor_runs` row. `Err("busy")` while another run
+/// holds the monitor, `Err("empty_library")` when YouTube answered with no playlists at all.
+pub(crate) async fn sync_all(state: &Arc<AppState>, trigger: &str) -> Result<SyncSummary, String> {
+    let Some(_running) = state.begin_monitor_run() else {
+        return Err(monitor_busy(state, trigger));
+    };
+    let started = now_secs();
+    let mut summary = SyncSummary::new(trigger, started);
+    let client = match metadata_client(state) {
+        Ok(client) => client,
+        Err(e) => return Err(sync_failed(state, &summary, started, e)),
+    };
+    let library = match state.it.library_playlists(client).await {
+        Ok(library) => library,
+        Err(e) => return Err(sync_failed(state, &summary, started, e.to_string())),
+    };
+    // A degraded response that parses as an empty library would otherwise wipe every mark and
+    // then call the wipe fresh for a whole interval. Nothing to index is nothing to trust: keep
+    // what is stored and try again later (the scheduler backing off, `monitor_retry_due`).
+    if library.is_empty() {
+        return Err(sync_failed(state, &summary, started, "empty_library".into()));
+    }
+    let account = state.db.get_setting("active_account");
+    let playlists: Vec<_> = library.into_iter().filter(|p| p.id != ON_REPEAT_ID).collect();
+    let total = playlists.len();
+    let mut indexed: Vec<String> = Vec::new();
+    let mut failed_ids: Vec<String> = Vec::new();
+    for (done, item) in playlists.into_iter().enumerate() {
+        let progress = json!({ "done": done, "total": total, "current": item.title });
+        let _ = state.app.emit("playlist-sync-progress", progress);
+        let read = sync_one(state, client, &item.id, Some(&item.title), account.as_deref()).await;
+        match read {
+            PlaylistRead::NotYours => continue,
+            // One playlist failing (a deleted id, a hiccup) must not abandon the rest of the
+            // crawl, and must not drop what is already indexed for it either: leaving it out of
+            // `indexed` would have `retain_playlists` forget the tracks we do know about.
+            PlaylistRead::Failed => {
+                summary.failed += 1;
+                failed_ids.push(item.id.clone());
+            }
+            PlaylistRead::Read { complete, counts } => {
+                summary.complete += u32::from(complete);
+                summary.add(counts);
+            }
+        }
+        summary.playlists += 1;
+        indexed.push(item.id);
+    }
+    let _ = state.app.emit(
+        "playlist-sync-progress",
+        json!({ "done": total, "total": total, "current": Value::Null }),
+    );
+    state.db.retain_playlists(&indexed);
+    state.db.set_setting(PLAYLIST_INDEX_STAMP, &now_secs().to_string());
+    note_sync_attempt(&state.db, started, summary.outcome() != "failed");
+    monitor::save_summary(&state.db, &summary);
+    let short = summary.playlists - summary.complete - summary.failed;
+    let detail = json!({ "scope": "all", "failed": failed_ids, "incomplete": short });
+    record_run(state, &summary, started, summary.outcome(), detail);
+    announce_sync(state, &summary);
+    Ok(summary)
+}
+
+/// A full sync that could not run at all: log the run as `failed`, count the failure for the
+/// scheduler's back-off, and answer the error.
+fn sync_failed(state: &AppState, summary: &SyncSummary, started: i64, error: String) -> String {
+    record_run(state, summary, started, "failed", json!({ "error": error }));
+    note_sync_attempt(&state.db, started, false);
+    error
+}
+
+/// The scheduler's tick (lib.rs, once a minute): a full sync with trigger `scheduler` when one is
+/// due, nothing otherwise. A run already in flight is no attempt, so it logs no `lock_busy`. After
+/// a failure it waits out the back-off first (`monitor_retry_due`), so a sync that cannot run is
+/// not retried, and logged, every minute.
+pub(crate) async fn scheduled_sync(state: &Arc<AppState>) {
+    if !state.it.is_logged_in() || state.monitor_running() {
+        return;
+    }
+    let now = now_secs();
+    if !playlist_index_due(&state.db, now) || !monitor_retry_due(&state.db, now) {
+        return;
+    }
+    if let Err(e) = sync_all(state, "scheduler").await {
+        tracing::info!(error = %e, "scheduled playlist sync did not run");
+    }
+}
+
 /// Rebuild that index by walking the playlists you own, then answer with it.
 ///
 /// Nothing else knows playlist membership: the library browse gives cards, a playlist browse gives
 /// one list's tracks, and InnerTube's per-video add-to-playlist dialog would be a request per row.
-/// So the crawl is the price, and it is paid at most once every `PLAYLIST_INDEX_TTL_SECS`, on a
-/// launch or a sign-in. Playlists you merely saved are skipped: they are someone else's, so "you
-/// saved this song to it" would be a lie, and their long mixes would double the walk.
+/// So the crawl is the price, and it is paid at most once per `monitor_interval_hours`, on a
+/// launch, a sign-in or the scheduler's tick, unless `force` asks for it now. Playlists you merely
+/// saved are skipped: they are someone else's, so "you saved this song to it" would be a lie, and
+/// their long mixes would double the walk. Each playlist read to the end is also compared with its
+/// last snapshot, which is what files the monitor's alerts (playlist_tools::monitor).
+///
+/// `trigger` is `manual_ui` (the default), `scheduler` or `headless`, for `monitor_runs`. Answers
+/// `Err("busy")` while another sync runs.
 #[tauri::command]
 pub async fn sync_playlist_index(
     state: St<'_>,
+    force: Option<bool>,
+    trigger: Option<String>,
 ) -> Result<std::collections::HashMap<String, Vec<String>>, String> {
     if !state.it.is_logged_in() {
         // What is left is the playlists on this machine, which no account owns.
         state.db.clear_playlist_index();
         return Ok(state.db.playlist_memberships());
     }
-    let fresh_until = state
-        .db
-        // The key changes whenever the index learns to hold something new, so an install with a
-        // fresh stamp re-crawls once: `_v2` when Liked Music joined it, `_v3` when each track's
-        // metadata did (the "in your playlists" view and the monitor read it).
-        .get_setting("playlist_index_synced_at_v3")
-        .and_then(|at| at.parse::<i64>().ok())
-        .map(|at| at + PLAYLIST_INDEX_TTL_SECS);
-    if fresh_until.is_some_and(|until| now_secs() < until) {
+    let trigger = sync_trigger(trigger.as_deref());
+    let now = now_secs();
+    // Unasked-for (`scheduler`: a launch, a sign-in) waits out the scheduler's back-off too, except
+    // with automatic checks off: then nothing else retries a failed first build, so each launch
+    // still gets one try, as before the back-off.
+    let backing_off = trigger == "scheduler"
+        && monitor_interval_secs(&state.db).is_some()
+        && !monitor_retry_due(&state.db, now);
+    if !force.unwrap_or(false) && (!playlist_index_due(&state.db, now) || backing_off) {
         return Ok(state.db.playlist_memberships());
     }
-    let client = metadata_client(&state)?;
-    let library = state.it.library_playlists(client).await.map_err(|e| e.to_string())?;
-    // A degraded response that parses as an empty library would otherwise wipe every mark and
-    // then call the wipe fresh for six hours. Nothing to index is nothing to trust: keep what is
-    // stored and try again on the next launch.
-    if library.is_empty() {
-        return Ok(state.db.playlist_memberships());
+    match sync_all(&state, trigger).await {
+        Ok(_) => {}
+        // Logged already; what is stored stands.
+        Err(e) if e == "empty_library" => {}
+        Err(e) => return Err(e),
     }
-    let mut indexed: Vec<String> = Vec::new();
-    for item in library {
-        if item.id == ON_REPEAT_ID {
-            continue;
-        }
-        // One playlist failing (a deleted id, a hiccup) must not abandon the rest of the crawl,
-        // and must not drop what is already indexed for it either: leaving it out of `indexed`
-        // would have `retain_playlists` forget the tracks we do know about.
-        let Ok(page) = state.it.playlist(client, &item.id, None).await else {
-            indexed.push(item.id);
-            continue;
-        };
-        // A collaborative playlist reads `owned: false` (YouTube drops the editable header on it)
-        // but is one you add to and remove from, so the membership index has to cover it too.
-        // Liked Music is exempt: YouTube sends it without the editable header, so it reads
-        // `owned: false` even though it is yours.
-        if item.id != LIKED_MUSIC_ID && !page.owned && !page.collaborative {
-            continue;
-        }
-        let mut songs: Vec<SongItem> = page.items;
-        let mut token = page.continuation;
-        // Read to the end, not cut short by a failed page or the page cap: only then may the
-        // monitor read a track missing from it as gone.
-        let mut complete = token.is_none();
-        for _ in 0..PLAYLIST_INDEX_MAX_PAGES {
-            let Some(next) = token.take() else {
-                complete = true;
-                break;
-            };
-            let Ok(more) = state.it.playlist_continuation(client, &next).await else { break };
-            songs.extend(more.items);
-            token = more.continuation;
-        }
-        complete = complete || token.is_none();
-        // Liked Music changes every time you like or unlike something anywhere: not news.
-        if complete && item.id != LIKED_MUSIC_ID {
-            let before = state.db.playlist_songs(&item.id);
-            for c in playlist_tools::monitor::diff(&before, &songs) {
-                let json = c.song.and_then(|s| serde_json::to_string(&s).ok());
-                state.db.add_playlist_alert(
-                    &item.id,
-                    &c.video_id,
-                    c.kind,
-                    json.as_deref(),
-                    now_secs(),
-                );
-            }
-        }
-        let rows: Vec<(String, String)> = songs
-            .into_iter()
-            .map(|s| {
-                let json = serde_json::to_string(&playlist_row(s.clone())).unwrap_or_default();
-                (s.video_id, json)
-            })
-            .collect();
-        state.db.set_playlist_songs(&item.id, &rows);
-        indexed.push(item.id);
-    }
-    state.db.retain_playlists(&indexed);
-    state.db.set_setting("playlist_index_synced_at_v3", &now_secs().to_string());
     Ok(state.db.playlist_memberships())
+}
+
+/// Sync one playlist now, whatever the interval says: its index rows, snapshot and alerts, as the
+/// full crawl would. The rest of the index is left alone (no pruning), and so are the crawl's
+/// stamp and stored summary. Answers what this one read found; `Err("busy")` while another sync
+/// runs.
+#[tauri::command]
+pub async fn sync_playlist(state: St<'_>, playlist_id: String) -> Result<SyncSummary, String> {
+    if playlist_id == ON_REPEAT_ID || is_local_playlist(&playlist_id) {
+        return Err("This playlist is on this device, so there is nothing to sync.".into());
+    }
+    let client = require_login(&state)?;
+    let Some(_running) = state.begin_monitor_run() else {
+        return Err(monitor_busy(&state, "manual_ui"));
+    };
+    let started = now_secs();
+    let mut summary = SyncSummary::new("manual_ui", started);
+    let account = state.db.get_setting("active_account");
+    let progress = json!({ "done": 0, "total": 1, "current": playlist_id });
+    let _ = state.app.emit("playlist-sync-progress", progress);
+    match sync_one(&state, client, &playlist_id, None, account.as_deref()).await {
+        PlaylistRead::NotYours => {}
+        PlaylistRead::Failed => {
+            summary.playlists = 1;
+            summary.failed = 1;
+        }
+        PlaylistRead::Read { complete, counts } => {
+            summary.playlists = 1;
+            summary.complete = u32::from(complete);
+            summary.add(counts);
+        }
+    }
+    let _ = state
+        .app
+        .emit("playlist-sync-progress", json!({ "done": 1, "total": 1, "current": Value::Null }));
+    let detail = json!({ "scope": playlist_id });
+    record_run(&state, &summary, started, summary.outcome(), detail);
+    announce_sync(&state, &summary);
+    if summary.failed > 0 {
+        return Err("unreadable".into());
+    }
+    Ok(summary)
+}
+
+/// The last full sync's summary ("+N −N ~N" and the rest), `None` before the first.
+#[tauri::command]
+pub fn last_sync_summary(state: St<'_>) -> Option<SyncSummary> {
+    monitor::last_summary(&state.db)
+}
+
+/// Alerts neither seen nor dismissed: the badge's number before any `alerts-changed` arrives.
+#[tauri::command]
+pub fn unseen_alert_count(state: St<'_>) -> u32 {
+    state.db.unseen_alert_count()
 }
 
 /// `false` means the playlist already had the track and YouTube added nothing — not an error, but
@@ -1642,6 +1904,8 @@ pub async fn reorder_playlist(
     if moved == 0 {
         return Ok(None);
     }
+    // Your order, not news: the next sync compares against it and files no `moved` for it.
+    monitor::after_reorder(&state.db, &playlist_id, &before, &order, now_secs());
     journal::announce(&state, std::slice::from_ref(&playlist_id));
     let summary =
         Summary { playlists: vec![Named { id: playlist_id.clone(), title }], count: moved };
@@ -1808,28 +2072,45 @@ pub async fn keep_only_in(
     everywhere::keep_only_in(&state, songs, target, titles).await
 }
 
-/// A track that left one of your playlists, or turned unavailable in it, since the sync before.
+/// A change the monitor found in one of your playlists since the sync before: a track added,
+/// removed, moved, turned unavailable or restored (playlist_tools::monitor).
 #[derive(serde::Serialize)]
 pub struct PlaylistAlert {
+    id: i64,
     playlist_id: String,
     video_id: String,
     kind: String,
     song: Option<SongItem>,
     at: i64,
+    seen: bool,
+    /// The positions a `moved` row went between (0-based), where known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    from: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    to: Option<i64>,
 }
 
+/// The alerts not dismissed, newest first, one per playlist, track and kind: a repeated event
+/// files a row each time (the alerts page lists them all), but here the newest stands for the
+/// rest, and dismissing it dismisses them all (`dismiss_playlist_alert`).
 #[tauri::command]
 pub fn playlist_alerts(state: St<'_>) -> Vec<PlaylistAlert> {
+    let mut shown = std::collections::HashSet::new();
     state
         .db
-        .playlist_alerts()
+        .alert_rows(false)
         .into_iter()
-        .map(|(playlist_id, video_id, kind, json, at)| PlaylistAlert {
-            playlist_id,
-            video_id,
-            kind,
-            song: json.and_then(|j| serde_json::from_str(&j).ok()),
-            at,
+        .filter(|a| shown.insert((a.playlist_id.clone(), a.video_id.clone(), a.kind.clone())))
+        .map(|a| PlaylistAlert {
+            id: a.id,
+            playlist_id: a.playlist_id,
+            video_id: a.video_id,
+            kind: a.kind,
+            song: a.song_json.and_then(|j| serde_json::from_str(&j).ok()),
+            at: a.at,
+            seen: a.seen,
+            from: a.from_pos,
+            to: a.to_pos,
         })
         .collect()
 }
@@ -2845,5 +3126,46 @@ mod tests {
         // Guards the scan itself: a moved ui/src or a renamed call would otherwise pass vacuously.
         assert!(seen.iter().any(|k| k == "drop_mode"), "scan found no setSetting calls");
         assert!(seen.iter().any(|k| k == "drop_dupes"));
+    }
+
+    #[test]
+    fn the_monitor_interval_decides_when_a_sync_is_due() {
+        let db = crate::db::Db::open(std::path::Path::new(":memory:")).unwrap();
+        // Never built: due, whatever the interval says.
+        db.set_setting("monitor_interval_hours", "0");
+        assert!(playlist_index_due(&db, 0));
+        db.set_setting(PLAYLIST_INDEX_STAMP, "1000");
+        assert!(!playlist_index_due(&db, 1000 + 365 * 86_400), "off means never again");
+        // The default is six hours, and so is anything the UI would not have written.
+        for stored in [None, Some("5"), Some("soon")] {
+            match stored {
+                Some(v) => db.set_setting("monitor_interval_hours", v),
+                None => db.delete_setting("monitor_interval_hours"),
+            }
+            assert!(!playlist_index_due(&db, 1000 + 6 * 3600 - 1), "{stored:?}");
+            assert!(playlist_index_due(&db, 1000 + 6 * 3600), "{stored:?}");
+        }
+        db.set_setting("monitor_interval_hours", "1");
+        assert!(playlist_index_due(&db, 1000 + 3600));
+        assert_eq!(sync_trigger(Some("scheduler")), "scheduler");
+        assert_eq!(sync_trigger(Some("anything")), "manual_ui");
+        assert_eq!(sync_trigger(None), "manual_ui");
+    }
+
+    #[test]
+    fn failed_syncs_back_the_scheduler_off_until_one_succeeds() {
+        let db = crate::db::Db::open(std::path::Path::new(":memory:")).unwrap();
+        assert!(monitor_retry_due(&db, 0), "nothing failed yet");
+        note_sync_attempt(&db, 1000, false);
+        assert!(!monitor_retry_due(&db, 1000 + 60), "not a minute later");
+        assert!(monitor_retry_due(&db, 1000 + 15 * 60));
+        note_sync_attempt(&db, 2000, false);
+        assert!(!monitor_retry_due(&db, 2000 + 15 * 60), "the wait doubles");
+        assert!(monitor_retry_due(&db, 2000 + 30 * 60));
+        note_sync_attempt(&db, 5000, true);
+        assert!(monitor_retry_due(&db, 5001), "a success clears it");
+        db.set_setting("monitor_interval_hours", "0");
+        note_sync_attempt(&db, 6000, false);
+        assert!(!monitor_retry_due(&db, 6000 + 365 * 86_400), "interval off: no retries");
     }
 }
