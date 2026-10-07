@@ -43,6 +43,7 @@ mod tray;
 mod videoproxy;
 mod webview;
 mod winstate;
+mod ytdata_secrets;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;

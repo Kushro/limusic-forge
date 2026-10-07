@@ -21,6 +21,14 @@ tokio = { workspace = true }
 rand = { workspace = true }
 url = "2.5"
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
+# Refresh tokens in the OS keyring (auth/store.rs). Default feature "v1": Windows Credential
+# Manager, macOS Keychain, Secret Service over zbus on Linux (pure-Rust crypto, no libdbus).
+keyring = "4.1.5"
+
+# DPAPI-encrypted token files for portable builds (auth/dpapi.rs). Same `windows` version the
+# app already uses.
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.61", features = ["Win32_Foundation", "Win32_Security_Cryptography"] }
 
 [dev-dependencies]
 wiremock = "0.6"

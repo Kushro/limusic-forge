@@ -6,7 +6,7 @@ license.workspace = true
 description = "LiMusic Forge — desktop YouTube Music client, a fork of LiMusic"
 repository = "https://github.com/Kushro/limusic-forge"
 homepage = "https://github.com/Kushro/limusic-forge"
-rust-version = "1.80"
+rust-version = "1.88"
 
 [lib]
 name = "app_lib"
@@ -52,6 +52,8 @@ http-body-util = "0.1"
 
 innertube = { path = "../crates/innertube" }
 player = { path = "../crates/player" }
+# YouTube Data API client + OAuth; ytdata_secrets.rs picks its token store (keyring or DPAPI).
+ytdata = { path = "../crates/ytdata" }
 souvlaki = { version = "0.8.3", default-features = false, features = ["use_zbus"] }
 # Listen Together: shared wire types + WebSocket client (wss via rustls). context/19.
 listen-protocol = { workspace = true }

@@ -109,6 +109,31 @@ impl Error {
     pub fn is_invalid_grant(&self) -> bool {
         matches!(self, Error::Auth(AuthError::InvalidGrant))
     }
+
+    /// `true` when a stored secret exists but cannot be decrypted (DPAPI file written by another
+    /// Windows user or machine, or corrupted). The file is left in place.
+    pub fn is_secret_undecryptable(&self) -> bool {
+        matches!(self, Error::Auth(AuthError::SecretUndecryptable))
+    }
+
+    /// `true` when there is no usable OS keyring (Linux without a Secret Service, or a locked
+    /// one). The app reports `reason: keyring_unavailable`; tokens are never stored in clear.
+    pub fn is_keyring_unavailable(&self) -> bool {
+        matches!(self, Error::Auth(AuthError::KeyringUnavailable(_)))
+    }
+
+    /// `true` for every failure the user fixes by connecting the account again: a rejected or
+    /// missing refresh token, or one that can no longer be decrypted.
+    pub fn needs_reauthorization(&self) -> bool {
+        matches!(
+            self,
+            Error::Auth(
+                AuthError::InvalidGrant
+                    | AuthError::NoRefreshToken
+                    | AuthError::SecretUndecryptable
+            )
+        )
+    }
 }
 
 /// OAuth/token-handling errors.
@@ -155,6 +180,25 @@ pub enum AuthError {
     /// (keyring, DPAPI file). The message never contains the secret itself.
     #[error("secure credential storage error: {0}")]
     Store(String),
+
+    /// A stored secret exists but could not be decrypted (DPAPI file from another Windows user
+    /// or machine, or a corrupted one). Maps to "re-authorization required"; the file is never
+    /// deleted because of it.
+    #[error("the stored credential could not be decrypted — re-authorization is required")]
+    SecretUndecryptable,
+
+    /// No usable OS keyring: on Linux, no Secret Service is running (or it is locked). The Data
+    /// API stays disabled; the token is never written anywhere in clear instead.
+    #[error(
+        "no OS keyring is available (on Linux, install and unlock a Secret Service such as \
+         GNOME Keyring or KWallet): {0}"
+    )]
+    KeyringUnavailable(String),
+
+    /// The account id cannot name a credential: only ASCII letters, digits, `-` and `_` are
+    /// accepted (YouTube channel ids use nothing else).
+    #[error("invalid account id {0:?}: only letters, digits, '-' and '_' are allowed")]
+    InvalidAccountId(String),
 
     #[error("could not open the system browser: {0}")]
     BrowserOpen(String),
@@ -247,6 +291,24 @@ mod tests {
     #[test]
     fn api_error_kind_is_none_for_non_api_errors() {
         assert_eq!(Error::from(AuthError::InvalidGrant).api_error_kind(), None);
+    }
+
+    #[test]
+    fn reauthorization_covers_rejected_missing_and_undecryptable_tokens() {
+        assert!(Error::from(AuthError::InvalidGrant).needs_reauthorization());
+        assert!(Error::from(AuthError::NoRefreshToken).needs_reauthorization());
+        assert!(Error::from(AuthError::SecretUndecryptable).needs_reauthorization());
+        assert!(!Error::from(AuthError::KeyringUnavailable("x".into())).needs_reauthorization());
+        assert!(!Error::from(AuthError::Store("x".into())).needs_reauthorization());
+        assert!(!api(401, None).needs_reauthorization());
+    }
+
+    #[test]
+    fn storage_error_predicates() {
+        assert!(Error::from(AuthError::SecretUndecryptable).is_secret_undecryptable());
+        assert!(!Error::from(AuthError::InvalidGrant).is_secret_undecryptable());
+        assert!(Error::from(AuthError::KeyringUnavailable("x".into())).is_keyring_unavailable());
+        assert!(!Error::from(AuthError::Store("x".into())).is_keyring_unavailable());
     }
 
     #[test]
