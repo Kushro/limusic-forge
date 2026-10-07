@@ -573,6 +573,11 @@
 		"no_channels": "YouTube did not return any selectable channels."
 	},
 	"player": {
+		"quality": {
+			"hires": "HI-RES",
+			"lossless": "LOSSLESS",
+			"lossy": "LOSSY"
+		},
 		"play": "Play",
 		"pause": "Pause",
 		"next": "Next",
@@ -894,6 +899,19 @@
 			"artwork_background_hint": "Tint the player view with the playing track's cover, blurred. Off leaves it plain.",
 			"artwork_accent": "Adapt colors to artwork",
 			"artwork_accent_hint": "Recolor the app from the playing track's cover: accent, surfaces and borders, fading between tracks. Off keeps the selected theme's own colors.",
+			"format_info_bar": "Quality info in the player bar",
+			"format_info_bar_hint": "Codec, bit depth, sample rate and bitrate of what is playing, with a Hi-Res, Lossless or Lossy badge. Bit depth only exists for lossless files.",
+			"format_info_mini": "Quality info in the mini player",
+			"format_info_mini_hint": "Same readout in the floating mini player. The compact size has no room for it.",
+			"format_info_at": {
+				"volume": "Under the volume",
+				"artist": "Under the artist",
+				"title": "Badge by the title",
+				"time": "Next to the time",
+				"top": "Top of the cover",
+				"hover": "Under the artist, on hover",
+				"off": "Hidden"
+			},
 			"reset_theme_hint": "Drop the color, roundness and font overrides. Keeps the preset.",
 			"interface_font_label": "Interface font",
 			"interface_font_short_hint": "Everything except headings.",

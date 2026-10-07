@@ -573,6 +573,11 @@
 		"no_channels": "YouTube no devolvió ningún canal seleccionable."
 	},
 	"player": {
+		"quality": {
+			"hires": "HI-RES",
+			"lossless": "LOSSLESS",
+			"lossy": "LOSSY"
+		},
 		"play": "Reproducir",
 		"pause": "Pausar",
 		"next": "Siguiente",
@@ -894,6 +899,19 @@
 			"artwork_background_hint": "Tiñe la vista del reproductor con la portada de la canción, desenfocada. Al desactivar, la deja plana.",
 			"artwork_accent": "Adaptar colores a la portada",
 			"artwork_accent_hint": "Recolorea la aplicación según la portada de la canción: acento, superficies y bordes, cambiando entre canciones. Al desactivar, mantiene los colores del tema seleccionado.",
+			"format_info_bar": "Info de calidad en la barra del reproductor",
+			"format_info_bar_hint": "Códec, profundidad de bits, frecuencia de muestreo y bitrate de lo que suena, con una insignia Hi-Res, Lossless o Lossy. La profundidad de bits solo existe en archivos sin pérdida.",
+			"format_info_mini": "Info de calidad en el mini reproductor",
+			"format_info_mini_hint": "La misma información en el mini reproductor flotante. El tamaño compacto no tiene lugar para ella.",
+			"format_info_at": {
+				"volume": "Debajo del volumen",
+				"artist": "Debajo del artista",
+				"title": "Insignia junto al título",
+				"time": "Junto al tiempo",
+				"top": "Arriba de la portada",
+				"hover": "Debajo del artista, al pasar el mouse",
+				"off": "Oculta"
+			},
 			"reset_theme_hint": "Elimina las personalizaciones de color, redondez y fuente. Mantiene el preajuste.",
 			"interface_font_label": "Fuente de la interfaz",
 			"interface_font_short_hint": "Todo excepto los encabezados.",

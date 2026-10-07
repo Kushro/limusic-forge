@@ -38,9 +38,11 @@
 	} from '$lib/player.svelte';
 	import { thumb } from '$lib/thumb';
 	import ArtistLine from './ArtistLine.svelte';
+	import AudioFormatInfo from './AudioFormatInfo.svelte';
 	import Marquee from './Marquee.svelte';
 	import TrackMenu from './TrackMenu.svelte';
 	import { t } from '$lib/i18n.svelte';
+	import { appearance } from '$lib/theme.svelte';
 
 	let {
 		onToggleQueue,
@@ -192,6 +194,9 @@
 						<HugeiconsIcon icon={InfinityIcon} class="h-3.5 w-3.5" />
 					</span>
 				{/if}
+				{#if appearance.formatInfoBar === 'title'}
+					<AudioFormatInfo badgeOnly class="shrink-0" />
+				{/if}
 			</div>
 			<ArtistLine
 				runs={playback.now?.artistRuns}
@@ -199,6 +204,9 @@
 				marquee
 				class="block max-w-full text-xs text-muted-foreground"
 			/>
+			{#if appearance.formatInfoBar === 'artist'}
+				<AudioFormatInfo class="mt-0.5 flex max-w-full" />
+			{/if}
 		</div>
 		{#if playback.now}
 			<div class="flex items-center">
@@ -333,40 +341,50 @@
 				aria-label={t('player.seek')}
 			/>
 			<span class="tabular-nums">{fmt(playback.duration)}</span>
+			{#if appearance.formatInfoBar === 'time'}
+				<AudioFormatInfo class="shrink-0" />
+			{/if}
 		</div>
 	</div>
 
 	<!-- Volume + queue -->
 	<div class="flex flex-1 items-center justify-end gap-2">
-		<!-- Volume is the first control to drop on a narrow window (OS volume still works). -->
-		<div class="hidden items-center gap-1 md:flex">
-			<Button
-				variant="ghost"
-				size="icon-sm"
-				class="text-muted-foreground"
-				onclick={toggleMute}
-				aria-label={playback.volume === 0 ? t('player.unmute') : t('player.mute')}
-			>
-				<!-- icon swap via altIcon/showAlt — `icon` is frozen at mount (see play/pause above) -->
-				<HugeiconsIcon
-					icon={VolumeHighIcon}
-					altIcon={VolumeMute02Icon}
-					showAlt={playback.volume === 0}
-					class="h-4 w-4"
+		<!-- Volume is the first control to drop on a narrow window (OS volume still works). The quality
+		     readout hangs under it, right-aligned, and is free to run wider than the slider: the
+		     space to its left is empty. -->
+		<div class="hidden flex-col items-end md:flex">
+			<div class="flex items-center gap-1">
+				<Button
+					variant="ghost"
+					size="icon-sm"
+					class="text-muted-foreground"
+					onclick={toggleMute}
+					aria-label={playback.volume === 0 ? t('player.unmute') : t('player.mute')}
+				>
+					<!-- icon swap via altIcon/showAlt — `icon` is frozen at mount (see play/pause above) -->
+					<HugeiconsIcon
+						icon={VolumeHighIcon}
+						altIcon={VolumeMute02Icon}
+						showAlt={playback.volume === 0}
+						class="h-4 w-4"
+					/>
+				</Button>
+				<input
+					type="range"
+					class="range w-24"
+					style="--pct:{playback.volume}%"
+					min="0"
+					max="100"
+					value={playback.volume}
+					oninput={onVolume}
+					onchange={onVolumeCommit}
+					onwheel={wheelVolume}
+					aria-label={t('player.volume')}
 				/>
-			</Button>
-			<input
-				type="range"
-				class="range w-24"
-				style="--pct:{playback.volume}%"
-				min="0"
-				max="100"
-				value={playback.volume}
-				oninput={onVolume}
-				onchange={onVolumeCommit}
-				onwheel={wheelVolume}
-				aria-label={t('player.volume')}
-			/>
+			</div>
+			{#if appearance.formatInfoBar === 'volume'}
+				<AudioFormatInfo class="-mt-0.5" />
+			{/if}
 		</div>
 		<!-- One cluster, so they sit tighter to each other than to the volume slider. -->
 		<div class="flex items-center gap-0.5">
