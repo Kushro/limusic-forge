@@ -1386,6 +1386,11 @@ fn spawn_event_pump(
                     state.on_lookahead_failed().await;
                 }
                 PlayerEvent::VideoFailed(audio) => state.on_video_failed(&audio).await,
+                PlayerEvent::AudioFormat(f) => {
+                    let json = state::audio_format_json(&f);
+                    state.set_audio_format(json.clone());
+                    let _ = app.emit("audio-format", json);
+                }
                 PlayerEvent::Error(msg) => {
                     tracing::error!(error = %msg, "player error");
                     let _ = app.emit("playback-error", serde_json::json!({ "message": msg }));
