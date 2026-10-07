@@ -700,6 +700,28 @@ pub fn run() {
             app.manage(downloads.clone());
             download::runner::spawn(app_state.clone(), downloads);
 
+            // The playlist job queue (jobs/): one runner for both engines, holding the runner lock
+            // so a headless run never writes the same playlists at once. The Data API's account
+            // manager reads its channels from the database and its client secret from the data
+            // dir; with neither, Data API jobs wait for the user and InnerTube ones run as usual.
+            let jobs_state = jobs::JobsState::new();
+            {
+                let store = ytdata_secrets::token_store(&handle);
+                let repo = Arc::new(ytdata_accounts::DbAccountsRepo::new(db.clone()));
+                match ytdata::auth::accounts::AccountManager::new(store, repo) {
+                    Ok(manager) => {
+                        let data_dir = paths::data_dir(&handle);
+                        if let Some(secret) = ytdata::client_secret::load_existing(&data_dir) {
+                            manager.set_client_secret(secret);
+                        }
+                        jobs_state.set_account_manager(Some(Arc::new(manager)));
+                    }
+                    Err(e) => tracing::warn!(error = %e, "jobs: no Data API account manager"),
+                }
+            }
+            app.manage(jobs_state.clone());
+            jobs::runner::spawn(app_state.clone(), jobs_state);
+
             // The player view's <video> pulls its bytes from Rust over loopback, so the webview
             // never sees a googlevideo URL (context/11). videoproxy.rs explains why a socket and
             // not a custom scheme.

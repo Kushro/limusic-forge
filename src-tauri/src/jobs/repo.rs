@@ -436,6 +436,34 @@ pub fn set_paused_network(
     Ok(())
 }
 
+/// A starting runner's second step (after reconciling in-flight items): every job left
+/// `running` or `verifying` by the process before goes back to `queued`. Returns how many.
+pub fn requeue_running_jobs(db: &Db) -> rusqlite::Result<usize> {
+    db.conn()
+        .execute("UPDATE jobs SET status = 'queued' WHERE status IN ('running', 'verifying')", [])
+}
+
+/// Replaces an item's `params_json` whole (a Data API delete once its row is resolved, an
+/// interrupted InnerTube add made safe to repeat).
+pub fn set_item_params(db: &Db, item_id: i64, params: &serde_json::Value) -> rusqlite::Result<()> {
+    db.conn().execute(
+        "UPDATE job_items SET params_json = ?2 WHERE id = ?1",
+        params![item_id, json_to_text(params)],
+    )?;
+    Ok(())
+}
+
+/// The earliest `resume_at` of a job that will resume by itself: when the runner next has to look.
+pub fn next_resume_at(db: &Db) -> rusqlite::Result<Option<DateTime<Utc>>> {
+    let at: Option<String> = db.conn().query_row(
+        "SELECT MIN(resume_at) FROM jobs \
+         WHERE status IN ('waiting_quota', 'paused_network') AND resume_at IS NOT NULL",
+        [],
+        |row| row.get(0),
+    )?;
+    Ok(at.map(|s| parse_rfc3339(&s)))
+}
+
 /// The user's pause, from `queued`, `running`, `waiting_quota` or `paused_network`.
 pub fn pause_job(db: &Db, job_id: i64) -> rusqlite::Result<()> {
     db.conn().execute(
@@ -1189,6 +1217,39 @@ mod tests {
         let j = job(&db, job_id);
         assert_eq!(j.account_id, None);
         assert_eq!(list_job_items(&db, job_id).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_restart_requeues_running_jobs_and_leaves_the_rest() {
+        let db = db();
+        let running = insert_job(&db, &sample_job(1), now()).unwrap();
+        let item = next_pending_item(&db, running).unwrap().unwrap();
+        begin_item(&db, item.id, now()).unwrap();
+        let paused = insert_job(&db, &sample_job(1), now()).unwrap();
+        pause_job(&db, paused).unwrap();
+        assert_eq!(requeue_running_jobs(&db).unwrap(), 1);
+        assert_eq!(job(&db, running).status, JobStatus::Queued);
+        assert_eq!(job(&db, paused).status, JobStatus::PausedUser);
+        assert_eq!(get_job_item(&db, item.id).unwrap().unwrap().status, JobItemStatus::InFlight);
+    }
+
+    #[test]
+    fn item_params_are_replaced_and_the_next_resume_is_the_earliest() {
+        let db = db();
+        let a = insert_job(&db, &sample_job(1), now()).unwrap();
+        let b = insert_job(&db, &sample_job(1), now()).unwrap();
+        let item = next_pending_item(&db, a).unwrap().unwrap();
+        set_item_params(&db, item.id, &json!({"video_id": "v0", "playlist_item_id": "pi"}))
+            .unwrap();
+        let params = get_job_item(&db, item.id).unwrap().unwrap().params;
+        assert_eq!(params["playlist_item_id"], json!("pi"));
+
+        assert_eq!(next_resume_at(&db).unwrap(), None);
+        set_waiting_quota(&db, a, dt("2026-07-16T07:00:00Z")).unwrap();
+        set_paused_network(&db, b, dt("2026-07-15T12:04:00Z"), "reset").unwrap();
+        assert_eq!(next_resume_at(&db).unwrap(), Some(dt("2026-07-15T12:04:00Z")));
+        pause_job(&db, b).unwrap();
+        assert_eq!(next_resume_at(&db).unwrap(), Some(dt("2026-07-16T07:00:00Z")));
     }
 
     #[test]

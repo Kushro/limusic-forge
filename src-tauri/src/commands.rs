@@ -226,7 +226,7 @@ pub async fn get_queue(state: St<'_>) -> Result<serde_json::Value, String> {
 /// `visitor_data`) and internal blobs (`queue_json`, `queue_index`, `queue_position`) never cross
 /// into the webview: they'd otherwise ship the login credential to the renderer on every open, and
 /// the webview can't overwrite them either.
-const UI_SETTINGS: [&str; 44] = [
+const UI_SETTINGS: [&str; 54] = [
     "volume",
     "proxy",
     "quality",
@@ -280,6 +280,20 @@ const UI_SETTINGS: [&str; 44] = [
     "downloads.thumbnail_mode",
     "downloads.cookies",
     "downloads.ytdlp_channel",
+    // The job queue (jobs/): which engine writes playlists (`auto|ytdata|innertube`), whether
+    // InnerTube writes are queued too (`unified|ytdata_only`), the day's Data API budget, the
+    // priority a new job gets, the local echo's window (seconds; 0 off, -1 always) and whether a
+    // headless run advances the queue.
+    "playlist_engine",
+    "job_queue_mode",
+    "budget.safety_margin_percent",
+    "budget.backup_reserve_units",
+    "budget.opportunistic_mode",
+    "budget.backup_runs_per_day",
+    "budget.daily_units",
+    "jobs.default_job_priority",
+    "jobs.local_echo_max_age_s",
+    "jobs.advance_jobs_headless",
 ];
 
 /// Resolve the music video for `video_id` and hand back a `limusicvideo://` URL the player view
@@ -2250,15 +2264,39 @@ pub async fn reorder_playlist(
 /// Take rows out of a playlist, undoably. Each row comes with the handle of the row after it that
 /// stays (`before`), which is where an undo puts it back. `kind` names it in the history: a plain
 /// removal, or the duplicate finder's.
+///
+/// With the job queue on (`jobs::engine`), an account playlist's removal runs as a job, on
+/// InnerTube or the Data API; this waits for it to settle and answers its journal entry, or
+/// `None` while it still waits its turn. `engine` overrides `playlist_engine` for this call.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn remove_tracks(
     state: St<'_>,
+    jobs: Jobs<'_>,
     playlist_id: String,
     title: String,
     rows: Vec<Restore>,
     kind: Option<String>,
+    engine: Option<String>,
 ) -> Result<Option<OpRecord>, String> {
     let kind = if kind.as_deref() == Some("dedupe") { "dedupe" } else { "remove" };
+    let est = crate::jobs::planner::estimate_remove_units(rows.len(), rows.len());
+    let touched = [playlist_id.as_str()];
+    if let Some(q) = queue_target(&state, &jobs, &touched, est, engine.as_deref()) {
+        let occurrences = if q.engine == crate::jobs::engine::Engine::Ytdata {
+            let picked: Vec<SongItem> = rows.iter().map(|r| r.song.clone()).collect();
+            let current = rows::read_all(&state, &playlist_id).await.unwrap_or_default();
+            crate::jobs::planner::occurrences(&current, &picked)
+        } else {
+            Vec::new()
+        };
+        let named = Named { id: playlist_id.clone(), title };
+        let Some(new) = dedup::removal_job(&named, &rows, kind, &occurrences, &q) else {
+            return Ok(None);
+        };
+        let job = enqueue_and_wait(&state, &jobs, &new).await?;
+        return Ok(job_op(&state, job.as_ref()).await);
+    }
     let songs: Vec<SongItem> = rows.iter().map(|r| r.song.clone()).collect();
     rows::remove_rows(&state, &playlist_id, &songs, &|| false).await?;
     journal::announce(&state, std::slice::from_ref(&playlist_id));
@@ -2290,10 +2328,17 @@ pub async fn find_duplicates(
 
 /// Copy or move tracks into another playlist: a drop on a sidebar playlist, or "Move to…".
 /// `source` is the playlist they came from (`None` for a list that isn't one, which can only copy).
+///
+/// With the job queue on (`jobs::engine`), a write to account playlists runs as a job: on
+/// InnerTube in `unified` mode, or on the Data API when that is the engine (a move then copies,
+/// verifies the copies landed, and only then deletes). This waits for the job to settle and
+/// answers what it did, with `job_id` set; the counts are zero while it still waits its turn.
+/// `engine` overrides `playlist_engine` for this call.
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn transfer_tracks(
     state: St<'_>,
+    jobs: Jobs<'_>,
     source: Option<String>,
     source_title: Option<String>,
     target: String,
@@ -2301,6 +2346,7 @@ pub async fn transfer_tracks(
     rows: Vec<Restore>,
     mode: transfer::Mode,
     duplicates: transfer::Duplicates,
+    engine: Option<String>,
 ) -> Result<transfer::Transferred, String> {
     let req = transfer::Request {
         source: source.map(|id| Named { id, title: source_title.unwrap_or_default() }),
@@ -2309,7 +2355,123 @@ pub async fn transfer_tracks(
         mode,
         duplicates,
     };
-    transfer::run(&state, req).await
+    let moving = transfer::is_move(&req);
+    let mut touched = vec![req.target.id.as_str()];
+    if let (true, Some(source)) = (moving, &req.source) {
+        touched.push(source.id.as_str());
+    }
+    let est = crate::jobs::planner::estimate_transfer_units(req.rows.len(), moving);
+    let Some(q) = queue_target(&state, &jobs, &touched, est, engine.as_deref()) else {
+        return transfer::run(&state, req).await;
+    };
+    let index = state.db.playlist_memberships();
+    let (known, add) = transfer::split_known(&req.rows, &req.target.id, req.duplicates, &index);
+    let occurrences = match (&req.source, q.engine) {
+        (Some(source), crate::jobs::engine::Engine::Ytdata) if moving => {
+            let picked: Vec<SongItem> = req.rows.iter().map(|r| r.song.clone()).collect();
+            let current = rows::read_all(&state, &source.id).await.unwrap_or_default();
+            crate::jobs::planner::occurrences(&current, &picked)
+        }
+        _ => Vec::new(),
+    };
+    let Some(new) = transfer::queued_job(&req, &known, &add, &occurrences, &q) else {
+        // Everything was already there: nothing to write.
+        let mut nothing = transfer::from_job(0, &[], known.len());
+        nothing.job_id = None;
+        return Ok(nothing);
+    };
+    let job = enqueue_and_wait(&state, &jobs, &new).await?;
+    let Some(job) = job else { return Err("The queued job is gone.".into()) };
+    let op = job_op(&state, Some(&job)).await;
+    let items = crate::jobs::repo::list_job_items(&state.db, job.id).map_err(db_err)?;
+    let mut done = transfer::from_job(job.id, &items, known.len());
+    done.op = op;
+    Ok(done)
+}
+
+// --- job queue dispatch (jobs/) ------------------------------------------------------------------
+// The playlist tools' writes to account playlists go through the queue when `jobs::engine` says
+// so, keeping their commands' signatures: the command queues, waits for the job to settle, and
+// answers from it. Local playlists never queue.
+
+type Jobs<'a> = State<'a, Arc<crate::jobs::JobsState>>;
+
+/// How long a command waits for its job before answering "still queued".
+const QUEUED_WAIT: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// Where a write to `playlists` goes: `Some` to queue it (engine, channel, account, priority),
+/// `None` to run it directly as before (a local playlist, or InnerTube with the Data-API-only
+/// queue). See `jobs::engine::resolve_engine`.
+fn queue_target(
+    state: &Arc<AppState>,
+    jobs: &crate::jobs::JobsState,
+    playlists: &[&str],
+    est_units: i64,
+    override_: Option<&str>,
+) -> Option<crate::jobs::engine::QueueTarget> {
+    use crate::jobs::engine::{self, DataApiState, Engine, EngineSetting, QueueMode, QueueTarget};
+    if playlists.iter().any(|id| is_local_playlist(id)) {
+        return None;
+    }
+    let db = &state.db;
+    let now = chrono::Utc::now();
+    let account = db.get_setting("active_account");
+    let addressable =
+        playlists.iter().all(|id| crate::jobs::planner::ytdata_playlist_id(id).is_some());
+    let ctx = engine::data_api_state(db, jobs.client_secret_present(), account.as_deref(), now);
+    let status = if addressable { ctx.state } else { DataApiState::NotConfigured };
+    let available = crate::jobs::budget::available_for_jobs_now(db, now).unwrap_or(0);
+    let chosen = engine::resolve_engine(
+        engine::playlist_engine(db),
+        override_.and_then(EngineSetting::parse),
+        status,
+        est_units,
+        available,
+    );
+    let priority = engine::default_job_priority(db);
+    match chosen {
+        Engine::Ytdata => {
+            Some(QueueTarget { engine: chosen, channel_id: ctx.channel_id, account, priority })
+        }
+        Engine::Innertube if engine::queue_mode(db) == QueueMode::Unified => {
+            Some(QueueTarget { engine: chosen, channel_id: None, account, priority })
+        }
+        Engine::Innertube => None,
+    }
+}
+
+/// Queues `new`, wakes the runner, and waits for the job to settle (or [`QUEUED_WAIT`]).
+async fn enqueue_and_wait(
+    state: &Arc<AppState>,
+    jobs: &crate::jobs::JobsState,
+    new: &crate::jobs::NewJob,
+) -> Result<Option<crate::jobs::Job>, String> {
+    let job_id =
+        crate::jobs::repo::insert_job(&state.db, new, chrono::Utc::now()).map_err(db_err)?;
+    {
+        use tauri::Emitter;
+        let _ = state.app.emit("jobs-changed", json!({ "job_id": job_id }));
+    }
+    jobs.nudge();
+    Ok(jobs.wait_settled(&state.db, job_id, QUEUED_WAIT).await)
+}
+
+/// The journal entry a settled job left (`jobs::control::on_job_finished`). The runner writes it
+/// just after the job's status, so a job that ended without one yet gets a moment for it.
+async fn job_op(state: &Arc<AppState>, job: Option<&crate::jobs::Job>) -> Option<OpRecord> {
+    let id = job?.id;
+    for _ in 0..20 {
+        let job = crate::jobs::repo::get_job(&state.db, id).ok().flatten()?;
+        if let Some(op) = job.params.get("op_id").and_then(Value::as_i64) {
+            return journal::get(state, op);
+        }
+        let items = crate::jobs::repo::list_job_items(&state.db, id).unwrap_or_default();
+        if !job.status.is_terminal() || !crate::jobs::control::should_journal(&job, &items) {
+            return None;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    None
 }
 
 /// Every row of a playlist, in its order, each with its handle (`set_video_id`) when it is yours to

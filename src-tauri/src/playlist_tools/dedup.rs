@@ -24,7 +24,72 @@ use std::collections::HashMap;
 
 use innertube::SongItem;
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use unicode_normalization::UnicodeNormalization;
+
+use super::journal::{Named, Restore, Summary};
+use crate::jobs::engine::{Engine, QueueTarget};
+use crate::jobs::planner::{self, action_name, INNERTUBE_ROWS_PER_ITEM};
+use crate::jobs::{JobKind, NewJob, NewJobItem, ENGINE_KEY};
+
+/// The job that takes the duplicates (or any picked rows) out of one playlist, queued
+/// (`remove_tracks` with the queue on): InnerTube removes by handle, 100 rows a request, and its
+/// undo puts each row back where it was; the Data API deletes the `occurrences[i]`-th copy of each
+/// row's video (`planner::occurrences`). `kind` is the journal's (`dedupe` or `remove`). `None`
+/// when there is nothing to remove, or the Data API can't address the playlist.
+pub fn removal_job(
+    playlist: &Named,
+    rows: &[Restore],
+    kind: &str,
+    occurrences: &[i64],
+    q: &QueueTarget,
+) -> Option<NewJob> {
+    if rows.is_empty() {
+        return None;
+    }
+    let summary = Summary { playlists: vec![playlist.clone()], count: rows.len() };
+    let params = json!({
+        ENGINE_KEY: q.engine.as_str(),
+        "account": q.account,
+        "op_kind": kind,
+        "summary": summary,
+        "target_id": playlist.id,
+    });
+    let (account_id, items, est) = match q.engine {
+        Engine::Innertube => {
+            let items: Vec<NewJobItem> = rows
+                .chunks(INNERTUBE_ROWS_PER_ITEM)
+                .map(|chunk| NewJobItem {
+                    phase: 1,
+                    action: action_name::IT_REMOVE_ROWS.to_string(),
+                    params: json!({"playlist_id": playlist.id, "rows": chunk}),
+                })
+                .collect();
+            (None, items, 0)
+        }
+        Engine::Ytdata => {
+            let id = planner::ytdata_playlist_id(&playlist.id)?;
+            let items: Vec<NewJobItem> = rows
+                .iter()
+                .enumerate()
+                .map(|(i, r)| {
+                    let k = occurrences.get(i).copied().unwrap_or(0);
+                    planner::unresolved_delete(&id, &r.song.video_id, k)
+                })
+                .collect();
+            (q.channel_id.clone(), items, planner::estimate_remove_units(rows.len(), rows.len()))
+        }
+    };
+    Some(NewJob {
+        account_id,
+        kind: JobKind::RemoveItems,
+        params,
+        priority: q.priority,
+        total_phases: 1,
+        est_units_total: est,
+        items,
+    })
+}
 
 #[derive(Debug, Clone, Copy, Deserialize)]
 pub struct Options {
@@ -332,6 +397,42 @@ mod tests {
         assert_eq!(find_clusters(&rows, &only_exact, Keep::First)[0].rows, vec![0, 1]);
         let none = Options { exact: false, title: false, similar: false };
         assert!(find_clusters(&rows, &none, Keep::First).is_empty());
+    }
+
+    #[test]
+    fn a_queued_removal_is_batched_on_innertube_and_per_copy_on_the_data_api() {
+        let named = Named { id: "VLPLx".into(), title: "X".into() };
+        let rows: Vec<Restore> = (0..150)
+            .map(|i| Restore {
+                song: SongItem {
+                    video_id: "dup".into(),
+                    set_video_id: Some(i.to_string()),
+                    ..Default::default()
+                },
+                before: None,
+            })
+            .collect();
+        let q = |engine: Engine| QueueTarget {
+            engine,
+            channel_id: (engine == Engine::Ytdata).then(|| "UC1".to_string()),
+            account: Some("ga1".into()),
+            priority: 2,
+        };
+        let it = removal_job(&named, &rows, "dedupe", &[], &q(Engine::Innertube)).unwrap();
+        assert_eq!(it.items.len(), 2, "100 rows a request");
+        assert_eq!(it.items[0].action, action_name::IT_REMOVE_ROWS);
+        assert_eq!(it.params["op_kind"], serde_json::json!("dedupe"));
+        assert_eq!(it.kind, JobKind::RemoveItems);
+
+        let occ: Vec<i64> = (0..150).collect();
+        let yt = removal_job(&named, &rows, "dedupe", &occ, &q(Engine::Ytdata)).unwrap();
+        assert_eq!(yt.items.len(), 150);
+        assert_eq!(yt.items[149].params["occurrence"], serde_json::json!(149));
+        assert_eq!(yt.items[0].params["playlist_id"], serde_json::json!("PLx"));
+        assert_eq!(yt.account_id.as_deref(), Some("UC1"));
+        assert!(removal_job(&named, &[], "remove", &[], &q(Engine::Innertube)).is_none());
+        let liked = Named { id: "VLLM".into(), title: "Liked".into() };
+        assert!(removal_job(&liked, &rows, "remove", &occ, &q(Engine::Ytdata)).is_none());
     }
 
     #[test]

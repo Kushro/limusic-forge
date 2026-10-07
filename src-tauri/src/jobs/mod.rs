@@ -1,14 +1,46 @@
-//! The playlist job queue's storage: jobs, their items, and the lock that lets one process run
-//! them at a time. Port of PlaylistForge's `pf-core/src/db/repo/{jobs,runner_lock}.rs`; the
-//! runner, the executors and the controls arrive with commit 25.
+//! The playlist job queue: jobs, their items, the lock that lets one process run them at a time
+//! (port of PlaylistForge's `pf-core/src/db/repo/{jobs,runner_lock}.rs`), and the runner that
+//! works through them on either engine.
+//!
+//! - `repo`, `lock`: storage, one transaction per transition.
+//! - `runner`: the loop, the [`runner::Executor`] trait, the app's `JobsState`.
+//! - `exec_ytdata`, `exec_innertube`: the two engines' executors.
+//! - `engine`: which engine an operation runs on, and whether it is queued.
+//! - `planner`, `budget`: what items cost and what the day allows.
+//! - `control`: pause, resume, priority, cancel (and revert), retry.
+//! - `local_echo`: mirroring a Data API write into the local index.
 //!
 //! Dates are UTC RFC 3339 text ([`crate::db::rfc3339_text`]); every function takes `now` from its
 //! caller so the tests can pin it.
-// used by commit 25+ (runner, control, planner and the jobs page).
+// Parts are used by the jobs page and the settings (commits 27 and 28) and the headless run (29).
 #![allow(dead_code)]
 
+pub mod budget;
+pub mod control;
+pub mod engine;
+pub mod exec_innertube;
+pub mod exec_ytdata;
+pub mod local_echo;
 pub mod lock;
+pub mod planner;
 pub mod repo;
+pub mod runner;
+
+pub use runner::JobsState;
+
+/// `params` with `key` set to `value`. A `params` that isn't an object (a corrupt row) is
+/// replaced by one rather than panicking.
+pub(crate) fn set_param(
+    mut params: serde_json::Value,
+    key: &str,
+    value: serde_json::Value,
+) -> serde_json::Value {
+    if !params.is_object() {
+        params = serde_json::json!({});
+    }
+    params[key] = value;
+    params
+}
 
 /// `jobs.priority`. Lower runs first; 0 is for jobs the app queues itself (an undo, a backup).
 pub const PRIORITY_SYSTEM: i64 = 0;
@@ -231,7 +263,7 @@ pub struct NewJob {
     pub items: Vec<NewJobItem>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct NewJobItem {
     pub phase: i64,
     pub action: String,
