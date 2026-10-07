@@ -94,6 +94,8 @@ auto-launch = "0.5"
 # Snapshot backups (backups.rs) in PlaylistForge's JSON format: RFC 3339 timestamps through serde.
 # Already in the lockfile with serde on (serde_with, under tauri).
 chrono = { version = "0.4.45", features = ["serde"] }
+# The Data API quota day (quota.rs): it resets at midnight America/Los_Angeles, DST included.
+chrono-tz = "0.10"
 # Checking the yt-dlp and ffmpeg downloads against their releases' SHA-256 sums (download/tools.rs).
 # Already in the lockfile (0.10.9).
 sha2 = "0.10"

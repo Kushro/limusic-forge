@@ -355,6 +355,16 @@ impl Db {
                 migration_error = Some(format!("schema v3 migration failed: {e}"));
             }
         }
+        // v4: the Data API's accounts, the job queue, the quota ledger and the runner lock, plus
+        // each indexed track's date added and each synced playlist's privacy. Same rules as v3
+        // (artefact check, one transaction, never lowers the number), and only on top of a
+        // complete v3: `playlist_sync`, which v4 extends, is a v3 table.
+        if migration_error.is_none() && (version < 4 || !v4_complete(&conn)) {
+            if let Err(e) = migrate_v4(&conn) {
+                tracing::error!("schema v4 migration failed, rolled back: {e}");
+                migration_error = Some(format!("schema v4 migration failed: {e}"));
+            }
+        }
         // One-time migration of the pre-multi-account single session into `accounts`. The legacy
         // settings rows stay in place as projections of the active account (see `StoredAccount`).
         let legacy_cookie = conn
@@ -455,6 +465,14 @@ impl Db {
     /// nothing to do). The file still opens at its old schema; the next launch tries again.
     pub fn migration_error(&self) -> Option<String> {
         self.1.clone()
+    }
+
+    /// The connection itself, for the modules that keep their own SQL next to their types
+    /// (`quota`, `jobs`, `ytdata_accounts`). A poisoned lock is taken over rather than
+    /// propagated: every write here is a transaction or a single statement, so a panic elsewhere
+    /// cannot have left the file half-written.
+    pub(crate) fn conn(&self) -> std::sync::MutexGuard<'_, Connection> {
+        self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     // --- settings ---------------------------------------------------------------------------
@@ -1759,16 +1777,129 @@ fn v3_complete(conn: &Connection) -> bool {
         ("playlist_alert", "seen"),
         ("playlist_track", "first_seen"),
     ];
-    let has_table = |name: &str| {
-        conn.query_row(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
-            [name],
-            |r| r.get::<_, i64>(0),
-        )
-        .is_ok_and(|n| n > 0)
-    };
-    tables.iter().all(|t| has_table(t))
+    tables.iter().all(|t| has_table(conn, t))
         && columns.iter().all(|(t, c)| has_column(conn, t, c).unwrap_or(false))
+}
+
+/// The tables v4 adds. Dates are RFC 3339 text in UTC, as PlaylistForge stores them, so the quota
+/// day is cut by comparing strings and PlaylistForge's ledger imports as is; `added_at` on the
+/// accounts is epoch seconds like every other account column in this file.
+///
+/// Foreign keys are on (`Db::open`), and each one says what a delete does:
+/// - a job's items go with it (`ON DELETE CASCADE`; `jobs::repo::delete_job` deletes them by hand
+///   as well, so nothing depends on the pragma alone);
+/// - disconnecting an account keeps its jobs, unowned (`ON DELETE SET NULL`);
+/// - the ledger has no key to the account at all: the day's spend is the Google project's, and
+///   it has to survive the account that spent it. Its job link is cleared with the job.
+const V4_TABLES: &str = r#"
+    CREATE TABLE IF NOT EXISTS ytdata_accounts (
+        channel_id     TEXT PRIMARY KEY,
+        title          TEXT NOT NULL,
+        thumb          TEXT,
+        status         TEXT NOT NULL DEFAULT 'connected'
+                       CHECK (status IN ('connected', 'reauth_required')),
+        added_at       INTEGER NOT NULL,
+        linked_account TEXT
+    );
+    CREATE TABLE IF NOT EXISTS jobs (
+        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        account_id      TEXT REFERENCES ytdata_accounts(channel_id) ON DELETE SET NULL,
+        kind            TEXT NOT NULL,
+        params_json     TEXT NOT NULL DEFAULT '{}',
+        status          TEXT NOT NULL DEFAULT 'queued',
+        priority        INTEGER NOT NULL DEFAULT 2,
+        phase           INTEGER NOT NULL DEFAULT 1,
+        total_phases    INTEGER NOT NULL DEFAULT 1,
+        resume_at       TEXT,
+        created_at      TEXT NOT NULL,
+        started_at      TEXT,
+        finished_at     TEXT,
+        est_units_total INTEGER NOT NULL DEFAULT 0,
+        spent_units     INTEGER NOT NULL DEFAULT 0,
+        total_items     INTEGER NOT NULL DEFAULT 0,
+        done_items      INTEGER NOT NULL DEFAULT 0,
+        failed_items    INTEGER NOT NULL DEFAULT 0,
+        skipped_items   INTEGER NOT NULL DEFAULT 0,
+        last_error      TEXT,
+        planned_items   INTEGER NOT NULL DEFAULT 0,
+        retried_items   INTEGER NOT NULL DEFAULT 0
+    );
+    CREATE INDEX IF NOT EXISTS idx_jobs_status_priority_created
+        ON jobs(status, priority, created_at);
+    CREATE INDEX IF NOT EXISTS idx_jobs_account ON jobs(account_id);
+    CREATE TABLE IF NOT EXISTS job_items (
+        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        job_id          INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+        seq             INTEGER NOT NULL,
+        phase           INTEGER NOT NULL DEFAULT 1,
+        action          TEXT NOT NULL,
+        params_json     TEXT NOT NULL DEFAULT '{}',
+        status          TEXT NOT NULL DEFAULT 'pending',
+        api_result_json TEXT,
+        inverse_json    TEXT,
+        attempts        INTEGER NOT NULL DEFAULT 0,
+        last_error      TEXT,
+        updated_at      TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_job_items_job_phase_seq ON job_items(job_id, phase, seq);
+    CREATE TABLE IF NOT EXISTS quota_ledger (
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        ts         TEXT NOT NULL,
+        endpoint   TEXT NOT NULL,
+        units      INTEGER NOT NULL,
+        account_id TEXT,
+        job_id     INTEGER REFERENCES jobs(id) ON DELETE SET NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_quota_ledger_ts ON quota_ledger(ts);
+    CREATE INDEX IF NOT EXISTS idx_quota_ledger_job ON quota_ledger(job_id);
+    -- One row at most: the process running jobs right now, and when it last said so.
+    CREATE TABLE IF NOT EXISTS runner_lock (
+        id           INTEGER PRIMARY KEY CHECK (id = 1),
+        pid          INTEGER NOT NULL,
+        heartbeat_at TEXT NOT NULL
+    );
+"#;
+
+/// Schema v4, in one transaction, like [`migrate_v3`]: new tables and two added columns, nothing
+/// rebuilt, so the foreign-key pragma can stay on throughout.
+fn migrate_v4(conn: &Connection) -> rusqlite::Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    // When the track was added to the playlist, epoch seconds, as the Data API reports it.
+    // NULL = unknown (InnerTube does not say, and rows indexed before v4 never had it).
+    if !has_column(&tx, "playlist_track", "added_at")? {
+        tx.execute("ALTER TABLE playlist_track ADD COLUMN added_at INTEGER", [])?;
+    }
+    // The playlist's privacy at its last sync. NULL = not known yet.
+    if !has_column(&tx, "playlist_sync", "privacy")? {
+        tx.execute(
+            "ALTER TABLE playlist_sync ADD COLUMN privacy TEXT \
+             CHECK (privacy IN ('public', 'unlisted', 'private'))",
+            [],
+        )?;
+    }
+    tx.execute_batch(V4_TABLES)?;
+    let version: i64 = tx.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+    if version < 4 {
+        tx.execute_batch("PRAGMA user_version = 4")?;
+    }
+    tx.commit()
+}
+
+/// Whether every table and column v4 adds is there. Same contract as [`v3_complete`].
+fn v4_complete(conn: &Connection) -> bool {
+    let tables = ["ytdata_accounts", "jobs", "job_items", "quota_ledger", "runner_lock"];
+    let columns = [("playlist_track", "added_at"), ("playlist_sync", "privacy")];
+    tables.iter().all(|t| has_table(conn, t))
+        && columns.iter().all(|(t, c)| has_column(conn, t, c).unwrap_or(false))
+}
+
+fn has_table(conn: &Connection, name: &str) -> bool {
+    conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+        [name],
+        |r| r.get::<_, i64>(0),
+    )
+    .is_ok_and(|n| n > 0)
 }
 
 fn has_column(conn: &Connection, table: &str, column: &str) -> rusqlite::Result<bool> {
@@ -1794,22 +1925,25 @@ fn replace_playlist_rows(
         [playlist_id],
         |r| r.get(0),
     )?;
-    let known: std::collections::HashMap<String, Option<i64>> = {
-        let mut stmt =
-            conn.prepare("SELECT video_id, first_seen FROM playlist_track WHERE playlist_id = ?1")?;
+    // A surviving track also keeps its v4 `added_at`: only the Data API knows it, and an
+    // InnerTube rewrite must not wipe what the last Data API sync stored.
+    let known: std::collections::HashMap<String, (Option<i64>, Option<i64>)> = {
+        let mut stmt = conn.prepare(
+            "SELECT video_id, first_seen, added_at FROM playlist_track WHERE playlist_id = ?1",
+        )?;
         let found = stmt
-            .query_map([playlist_id], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .query_map([playlist_id], |r| Ok((r.get(0)?, (r.get(1)?, r.get(2)?))))?
             .collect::<rusqlite::Result<_>>()?;
         found
     };
     conn.execute("DELETE FROM playlist_track WHERE playlist_id = ?1", [playlist_id])?;
     let fresh = synced.then_some(now);
     for (video_id, json) in rows {
-        let first_seen = known.get(*video_id).copied().unwrap_or(fresh);
+        let (first_seen, added_at) = known.get(*video_id).copied().unwrap_or((fresh, None));
         conn.execute(
-            "INSERT OR IGNORE INTO playlist_track(playlist_id, video_id, song_json, first_seen) \
-             VALUES(?1, ?2, ?3, ?4)",
-            rusqlite::params![playlist_id, video_id, json, first_seen],
+            "INSERT OR IGNORE INTO playlist_track(playlist_id, video_id, song_json, first_seen, \
+             added_at) VALUES(?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![playlist_id, video_id, json, first_seen, added_at],
         )?;
     }
     Ok(())
@@ -2105,6 +2239,20 @@ fn upsert_video_in(conn: &Connection, video: &VideoMeta<'_>, now: i64) -> rusqli
         rusqlite::params![video.video_id, video.title, video.channel, video.duration_s, now],
     )?;
     Ok(())
+}
+
+/// The v4 tables' date form: [`rfc3339_utc`] of a chrono instant, so every stored date has one
+/// fixed width and the quota day can be cut by comparing text. Sub-second precision is dropped.
+pub(crate) fn rfc3339_text(at: chrono::DateTime<chrono::Utc>) -> String {
+    rfc3339_utc(at.timestamp())
+}
+
+/// Reads a stored RFC 3339 date in any offset (PlaylistForge writes `+00:00`). An unreadable
+/// value reads as the epoch rather than failing the whole row: it is a display date, never a key.
+pub(crate) fn parse_rfc3339(raw: &str) -> chrono::DateTime<chrono::Utc> {
+    chrono::DateTime::parse_from_rfc3339(raw)
+        .map(|d| d.with_timezone(&chrono::Utc))
+        .unwrap_or(chrono::DateTime::<chrono::Utc>::UNIX_EPOCH)
 }
 
 /// Unix seconds as RFC 3339 UTC (`2023-11-14T22:13:20Z`), the form `downloads` stores its dates
@@ -3872,7 +4020,7 @@ mod tests {
         rusqlite::Connection::open(&path).unwrap().execute_batch(SCHEMA_V2_MONITOR).unwrap();
 
         let d = Db::open(&path).unwrap();
-        assert_eq!(user_version(&d), 3);
+        assert_eq!(user_version(&d), 4, "on through v3 to v4");
         let rows = d.alert_rows(true);
         let kinds: Vec<(&str, &str, bool, bool)> = rows
             .iter()
@@ -3902,7 +4050,7 @@ mod tests {
         d.0.lock().unwrap().execute_batch("PRAGMA user_version = 2").unwrap();
         drop(d);
         let d = Db::open(&path).unwrap();
-        assert_eq!(user_version(&d), 3);
+        assert_eq!(user_version(&d), 4, "on through v3 to v4");
         assert_eq!(d.alert_rows(true).len(), 3);
         assert_eq!(d.snapshots("VL1").len(), 1);
         assert_eq!(d.monitor_runs(10).len(), 1);
@@ -3917,7 +4065,7 @@ mod tests {
 
         let d = Db::open(&path).unwrap();
         assert_eq!(d.migration_error(), None);
-        assert_eq!(user_version(&d), 3);
+        assert_eq!(user_version(&d), 4, "on through v3 to v4");
         {
             let conn = d.0.lock().unwrap();
             assert!(v3_complete(&conn), "every v3 table and column is there");
@@ -3952,16 +4100,16 @@ mod tests {
         let path = dir.path().join("limusic.sqlite");
         let d = Db::open(&path).unwrap();
         d.record_monitor_run(&run(10, "manual_ui", "ok")).unwrap();
-        d.0.lock().unwrap().execute_batch("PRAGMA user_version = 4").unwrap();
+        d.0.lock().unwrap().execute_batch("PRAGMA user_version = 5").unwrap();
         drop(d);
 
         let d = Db::open(&path).unwrap();
         assert_eq!(d.migration_error(), None);
-        assert_eq!(user_version(&d), 4, "never lowered");
+        assert_eq!(user_version(&d), 5, "never lowered");
         assert_eq!(d.monitor_runs(10).len(), 1);
         // Even a run of the migration itself leaves the number alone.
         migrate_v3(&d.0.lock().unwrap()).unwrap();
-        assert_eq!(user_version(&d), 4);
+        assert_eq!(user_version(&d), 5);
     }
 
     #[test]
@@ -3983,7 +4131,7 @@ mod tests {
         drop(d);
         let d = Db::open(&path).unwrap();
         assert_eq!(d.migration_error(), None);
-        assert_eq!(user_version(&d), 3);
+        assert_eq!(user_version(&d), 4, "on through v3 to v4");
         assert_eq!(dump(&d), schema_once);
         assert_eq!(d.alert_rows(true), alerts_once);
     }
@@ -4011,7 +4159,7 @@ mod tests {
     #[test]
     fn v3_tables_refuse_values_outside_their_checks() {
         let d = db();
-        assert_eq!(user_version(&d), 3, "a fresh file is created at v3");
+        assert_eq!(user_version(&d), 4, "a fresh file is created at v4");
         let alert = |kind| NewAlert {
             playlist_id: "VL1",
             video_id: "a",
@@ -4413,6 +4561,208 @@ mod tests {
         assert_eq!(rfc3339_utc(951_782_400), "2000-02-29T00:00:00Z");
         assert_eq!(rfc3339_utc(1_700_000_000), "2023-11-14T22:13:20Z");
         assert!(rfc3339_utc(99) < rfc3339_utc(1_000), "sorts as text in time order");
+    }
+
+    // --- schema v4 ------------------------------------------------------------------------------
+
+    /// A v3 file exactly as the v3 code leaves it: the v2 monitor tables run through
+    /// `migrate_v3`, with a synced playlist. `Db::open` creates everything else.
+    fn v3_file(path: &std::path::Path) {
+        let conn = rusqlite::Connection::open(path).unwrap();
+        conn.execute_batch(SCHEMA_V2_MONITOR).unwrap();
+        migrate_v3(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO playlist_sync(playlist_id, synced_at, item_count) VALUES('VL1', 5, 1)",
+            [],
+        )
+        .unwrap();
+        let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        assert_eq!(version, 3);
+        assert!(v3_complete(&conn));
+        assert!(!v4_complete(&conn));
+    }
+
+    fn schema_dump(d: &Db) -> Vec<(String, Option<String>)> {
+        let conn = d.conn();
+        let mut stmt = conn.prepare("SELECT name, sql FROM sqlite_master ORDER BY name").unwrap();
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+        rows.collect::<rusqlite::Result<_>>().unwrap()
+    }
+
+    fn count(d: &Db, sql: &str) -> i64 {
+        d.conn().query_row(sql, [], |r| r.get(0)).unwrap()
+    }
+
+    #[test]
+    fn a_v3_database_migrates_to_v4_once_and_keeps_its_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("limusic.sqlite");
+        v3_file(&path);
+
+        let d = Db::open(&path).unwrap();
+        assert_eq!(d.migration_error(), None);
+        assert_eq!(user_version(&d), 4);
+        assert!(v4_complete(&d.conn()));
+        assert_eq!(count(&d, "SELECT COUNT(*) FROM playlist_track"), 1);
+        assert_eq!(
+            count(&d, "SELECT COUNT(*) FROM playlist_track WHERE added_at IS NULL"),
+            1,
+            "a track indexed before v4 has no known date"
+        );
+        assert_eq!(count(&d, "SELECT COUNT(*) FROM playlist_sync WHERE privacy IS NULL"), 1);
+        assert_eq!(d.alert_rows(true).len(), 3, "v3's alerts are untouched");
+        let once = schema_dump(&d);
+        drop(d);
+
+        // Opening again changes nothing, and neither does running the whole migration again.
+        let d = Db::open(&path).unwrap();
+        assert_eq!(schema_dump(&d), once);
+        d.conn().execute_batch("PRAGMA user_version = 3").unwrap();
+        drop(d);
+        let d = Db::open(&path).unwrap();
+        assert_eq!(d.migration_error(), None);
+        assert_eq!(user_version(&d), 4);
+        assert_eq!(schema_dump(&d), once);
+        assert_eq!(count(&d, "SELECT COUNT(*) FROM playlist_sync"), 1);
+    }
+
+    #[test]
+    fn a_file_numbered_4_without_the_v4_tables_still_migrates() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("limusic.sqlite");
+        v3_file(&path);
+        let raw = rusqlite::Connection::open(&path).unwrap();
+        raw.execute_batch("PRAGMA user_version = 4").unwrap();
+        drop(raw);
+
+        let d = Db::open(&path).unwrap();
+        assert_eq!(d.migration_error(), None);
+        assert_eq!(user_version(&d), 4);
+        assert!(v4_complete(&d.conn()), "the artefact check, not the number, decides");
+    }
+
+    #[test]
+    fn a_complete_v4_file_numbered_past_4_keeps_its_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("limusic.sqlite");
+        let d = Db::open(&path).unwrap();
+        d.conn()
+            .execute(
+                "INSERT INTO quota_ledger(ts, endpoint, units) VALUES('2026-07-15T18:00:00+00:00', \
+                 'playlists.list', 1)",
+                [],
+            )
+            .unwrap();
+        d.conn().execute_batch("PRAGMA user_version = 7").unwrap();
+        drop(d);
+
+        let d = Db::open(&path).unwrap();
+        assert_eq!(d.migration_error(), None);
+        assert_eq!(user_version(&d), 7, "never lowered");
+        assert_eq!(count(&d, "SELECT COUNT(*) FROM quota_ledger"), 1);
+        migrate_v4(&d.conn()).unwrap();
+        assert_eq!(user_version(&d), 7, "not even by the migration itself");
+    }
+
+    #[test]
+    fn a_failed_v4_migration_is_kept_for_the_ui_and_rolled_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("limusic.sqlite");
+        v3_file(&path);
+        // Something else's `jobs` table: v4's index on it cannot be built.
+        rusqlite::Connection::open(&path)
+            .unwrap()
+            .execute_batch("CREATE TABLE jobs (id INTEGER PRIMARY KEY)")
+            .unwrap();
+
+        let d = Db::open(&path).unwrap();
+        let err = d.migration_error().expect("the failure is kept");
+        assert!(err.contains("schema v4 migration failed"), "{err}");
+        assert_eq!(user_version(&d), 3, "rolled back");
+        let conn = d.conn();
+        assert!(!has_column(&conn, "playlist_track", "added_at").unwrap(), "the ALTER too");
+        assert!(!has_table(&conn, "quota_ledger"));
+        assert!(v3_complete(&conn), "v3 is left as it was");
+    }
+
+    #[test]
+    fn v4_foreign_keys_cascade_items_and_unlink_jobs_and_ledger() {
+        let d = db();
+        let conn = d.conn();
+        let fk: i64 = conn.query_row("PRAGMA foreign_keys", [], |r| r.get(0)).unwrap();
+        assert_eq!(fk, 1, "foreign keys are enforced on this connection");
+        conn.execute_batch(
+            "INSERT INTO ytdata_accounts(channel_id, title, added_at) VALUES('UC1', 'Me', 1);
+             INSERT INTO jobs(id, account_id, kind, created_at) VALUES(1, 'UC1', 'copy_items', 't');
+             INSERT INTO jobs(id, account_id, kind, created_at) VALUES(2, 'UC1', 'copy_items', 't');
+             INSERT INTO job_items(job_id, seq, action, updated_at)
+                 VALUES(1, 0, 'a', 't'), (1, 1, 'a', 't'), (2, 0, 'a', 't');
+             INSERT INTO quota_ledger(ts, endpoint, units, account_id, job_id)
+                 VALUES('t', 'playlistItems.insert', 50, 'UC1', 1),
+                       ('t', 'playlists.list', 1, 'UC1', NULL);",
+        )
+        .unwrap();
+        let n = |sql: &str| -> i64 { conn.query_row(sql, [], |r| r.get(0)).unwrap() };
+
+        conn.execute("DELETE FROM jobs WHERE id = 1", []).unwrap();
+        assert_eq!(n("SELECT COUNT(*) FROM job_items WHERE job_id = 1"), 0, "items go with it");
+        assert_eq!(n("SELECT COUNT(*) FROM job_items"), 1);
+        assert_eq!(n("SELECT COUNT(*) FROM quota_ledger"), 2, "the spend stays");
+        assert_eq!(n("SELECT COUNT(*) FROM quota_ledger WHERE job_id IS NOT NULL"), 0);
+
+        conn.execute("DELETE FROM ytdata_accounts WHERE channel_id = 'UC1'", []).unwrap();
+        assert_eq!(n("SELECT COUNT(*) FROM jobs WHERE account_id IS NULL"), 1, "job kept, unowned");
+        assert_eq!(
+            n("SELECT COUNT(*) FROM quota_ledger WHERE account_id = 'UC1'"),
+            2,
+            "the ledger keeps naming the account that spent the units"
+        );
+        let no = |sql: &str| conn.execute(sql, []).is_err();
+        assert!(
+            no("INSERT INTO jobs(account_id, kind, created_at) VALUES('UC9', 'k', 't')"),
+            "a job cannot name an account that is not connected"
+        );
+        assert!(
+            no("INSERT INTO job_items(job_id, seq, action, updated_at) VALUES(9, 0, 'a', 't')"),
+            "an item cannot outlive its job"
+        );
+    }
+
+    #[test]
+    fn v4_tables_refuse_values_outside_their_checks() {
+        let d = db();
+        let conn = d.conn();
+        conn.execute(
+            "INSERT INTO playlist_sync(playlist_id, synced_at, item_count) VALUES('VL1', 1, 0)",
+            [],
+        )
+        .unwrap();
+        for ok in ["public", "unlisted", "private"] {
+            assert!(conn.execute("UPDATE playlist_sync SET privacy = ?1", [ok]).is_ok(), "{ok}");
+        }
+        let no = |sql: &str| conn.execute(sql, []).is_err();
+        assert!(no("UPDATE playlist_sync SET privacy = 'secret'"));
+        assert!(no("INSERT INTO ytdata_accounts(channel_id, title, status, added_at) \
+                    VALUES('UC1', 'Me', 'gone', 1)"));
+        assert!(no("INSERT INTO runner_lock(id, pid, heartbeat_at) VALUES(2, 1, 't')"));
+    }
+
+    #[test]
+    fn added_at_survives_an_index_rewrite_and_starts_unknown() {
+        let d = db();
+        let song = |v: &str| (v.to_owned(), "{}".to_owned());
+        d.set_playlist_songs_at("VL1", &[song("a")], 10);
+        d.conn().execute_batch("UPDATE playlist_track SET added_at = 1234").unwrap();
+        d.set_playlist_songs_at("VL1", &[song("a"), song("b")], 20);
+        let added = |v: &str| -> Option<i64> {
+            d.conn()
+                .query_row("SELECT added_at FROM playlist_track WHERE video_id = ?1", [v], |r| {
+                    r.get(0)
+                })
+                .unwrap()
+        };
+        assert_eq!(added("a"), Some(1234), "kept across the rewrite");
+        assert_eq!(added("b"), None, "a new track's date is unknown until the Data API says");
     }
 }
 

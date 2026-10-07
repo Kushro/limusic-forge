@@ -16,6 +16,7 @@ mod http;
 mod import;
 #[cfg(target_os = "linux")]
 mod inhibit;
+mod jobs;
 mod lastfm;
 mod listentogether;
 mod local;
@@ -33,6 +34,7 @@ mod orchestrator;
 mod paths;
 mod playlist_tools;
 mod potoken;
+mod quota;
 mod romanize;
 mod session;
 mod spotify;
@@ -43,6 +45,7 @@ mod tray;
 mod videoproxy;
 mod webview;
 mod winstate;
+mod ytdata_accounts;
 mod ytdata_secrets;
 
 use std::sync::atomic::{AtomicBool, Ordering};
