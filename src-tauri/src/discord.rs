@@ -262,9 +262,20 @@ impl DiscordHandle {
     }
 }
 
-/// A Discord application id: a non-empty run of digits.
+/// A Discord application id: a snowflake, i.e. a `u64` written in decimal whose creation time
+/// (`id >> 22` ms after Discord's 2015 epoch) is not in the future. A pasted id with a digit too
+/// many still parses, but dates centuries ahead: Discord answers it with "Invalid Client ID".
+/// `build.rs` applies the same check to refuse such a build.
 fn is_app_id(id: &str) -> bool {
-    !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit())
+    const DISCORD_EPOCH_MS: u64 = 1_420_070_400_000;
+    if id.is_empty() || !id.bytes().all(|b| b.is_ascii_digit()) {
+        return false;
+    }
+    let Ok(n) = id.parse::<u64>() else { return false };
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(u64::MAX, |d| d.as_millis() as u64);
+    (n >> 22).saturating_add(DISCORD_EPOCH_MS) <= now_ms.saturating_add(86_400_000)
 }
 
 /// Whether this build was compiled with a Discord application id, i.e. whether rich presence can
@@ -729,7 +740,7 @@ impl Presence {
         }
         self.last_connect_try = Some(Instant::now());
         let mut client = DiscordIpcClient::new(APP_ID);
-        match client.connect() {
+        match handshake(&mut client) {
             Ok(()) => {
                 tracing::info!("discord rich presence connected");
                 self.client = Some(client);
@@ -737,9 +748,18 @@ impl Presence {
                 self.sent = None; // fresh socket shows nothing — re-push everything
                 true
             }
+            // Discord is running and said no (4000 "Invalid Client ID": the build's id is not an
+            // application). Retrying cannot help, so wait the longest, and say why at warn level:
+            // this is a build or portal problem, not "Discord isn't open".
+            Err(HandshakeError::Rejected(why)) => {
+                tracing::warn!(reason = %why, APP_ID, "discord refused rich presence for this application id");
+                let _ = client.close();
+                self.connect_backoff = CONNECT_RETRY_MAX;
+                false
+            }
             // Not an error: Discord simply isn't running. Ease off, so a machine that never runs
             // Discord isn't probing a nonexistent socket every second forever.
-            Err(e) => {
+            Err(HandshakeError::Io(e)) => {
                 tracing::debug!(error = %e, backoff = ?self.connect_backoff, "discord not available");
                 self.connect_backoff = (self.connect_backoff * 2).min(CONNECT_RETRY_MAX);
                 false
@@ -756,6 +776,36 @@ impl Presence {
         self.last_connect_try = None;
         self.connect_backoff = CONNECT_RETRY_MIN;
     }
+}
+
+enum HandshakeError {
+    /// No Discord to talk to (no pipe, or it went away mid-handshake).
+    Io(discord_rich_presence::error::Error),
+    /// Discord answered the handshake by closing: `code: message`, e.g. `4000: Invalid Client ID`.
+    Rejected(String),
+}
+
+/// The crate's `connect()` reads Discord's answer to the handshake and throws it away, so an
+/// application id Discord refuses still "connects", and the refusal only shows up as the next
+/// read failing on a closed socket, every retry, with no reason given. Doing the handshake here
+/// keeps that answer: `READY` is success, a close frame (opcode 2) carries why.
+fn handshake(client: &mut DiscordIpcClient) -> Result<(), HandshakeError> {
+    client.connect_ipc().map_err(HandshakeError::Io)?;
+    client
+        .send(serde_json::json!({ "v": 1, "client_id": APP_ID }), 0)
+        .map_err(HandshakeError::Io)?;
+    let (op, resp) = client.recv().map_err(HandshakeError::Io)?;
+    handshake_outcome(op, &resp)
+}
+
+/// [`handshake`]'s verdict on Discord's first frame. Pure, for the tests.
+fn handshake_outcome(op: u32, resp: &serde_json::Value) -> Result<(), HandshakeError> {
+    if op == 2 {
+        let code = resp.get("code").map_or_else(|| "?".to_owned(), |c| c.to_string());
+        let message = resp.get("message").and_then(|m| m.as_str()).unwrap_or("closed");
+        return Err(HandshakeError::Rejected(format!("{code}: {message}")));
+    }
+    Ok(())
 }
 
 /// Read the response frame Discord sends for every command. The crate's `set_activity` only
@@ -862,13 +912,29 @@ mod tests {
     fn app_id_is_empty_or_a_snowflake() {
         assert!(
             APP_ID.is_empty() || is_app_id(APP_ID),
-            "LIMUSIC_DISCORD_APP_ID must be a Discord application id (digits only) — got {APP_ID:?}"
+            "LIMUSIC_DISCORD_APP_ID must be a Discord application id (a snowflake) — got {APP_ID:?}"
         );
         assert_eq!(available(), !APP_ID.is_empty());
         assert!(is_app_id("1525891596804161727"));
         assert!(!is_app_id(""));
         assert!(!is_app_id("12a4"));
         assert!(!is_app_id(" 123"));
+        // The one that shipped in v1.2.0-forge.1: the real id with a digit pasted twice. It still
+        // parses as a u64, but its timestamp lands about a century from now.
+        assert!(is_app_id("1557023582004183131"));
+        assert!(!is_app_id("15557023582004183131"));
+        assert!(!is_app_id("99999999999999999999"), "past u64::MAX");
+    }
+
+    #[test]
+    fn a_refused_handshake_carries_discords_reason() {
+        let closed = serde_json::json!({ "code": 4000, "message": "Invalid Client ID" });
+        match handshake_outcome(2, &closed) {
+            Err(HandshakeError::Rejected(why)) => assert_eq!(why, "4000: Invalid Client ID"),
+            _ => panic!("a close frame is a refusal"),
+        }
+        let ready = serde_json::json!({ "cmd": "DISPATCH", "evt": "READY", "data": {} });
+        assert!(handshake_outcome(1, &ready).is_ok());
     }
 
     fn track(id: &str) -> Box<Track> {
