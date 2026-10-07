@@ -505,6 +505,58 @@ pub fn reprioritize_job(db: &Db, job_id: i64, priority: i64) -> rusqlite::Result
     Ok(())
 }
 
+/// The user's drag in the queue: `ids` in the order wanted. The runner orders by `(priority,
+/// created_at, id)`, so within each priority level the named jobs swap their `created_at` values
+/// to follow `ids` (kept strictly increasing, a second apart where two were equal); priorities are
+/// left alone, so a job never jumps a level by being dragged. Unknown, repeated and ended jobs are
+/// ignored. Returns how many jobs changed.
+pub fn reorder_queue(db: &Db, ids: &[i64]) -> rusqlite::Result<usize> {
+    let conn = db.conn();
+    let tx = conn.unchecked_transaction()?;
+    // (id, priority, created_at) of each named open job, in the order given.
+    let mut rows: Vec<(i64, i64, String)> = Vec::new();
+    {
+        let mut stmt = tx.prepare(
+            "SELECT priority, created_at FROM jobs WHERE id = ?1 \
+               AND status NOT IN ('completed', 'completed_with_errors', 'failed', 'cancelled')",
+        )?;
+        for &id in ids {
+            if rows.iter().any(|r| r.0 == id) {
+                continue;
+            }
+            let found: Option<(i64, String)> =
+                stmt.query_row(params![id], |row| Ok((row.get(0)?, row.get(1)?))).optional()?;
+            if let Some((priority, created_at)) = found {
+                rows.push((id, priority, created_at));
+            }
+        }
+    }
+    let mut levels: Vec<i64> = rows.iter().map(|r| r.1).collect();
+    levels.sort_unstable();
+    levels.dedup();
+    let mut changed = 0;
+    for level in levels {
+        let group: Vec<&(i64, i64, String)> = rows.iter().filter(|r| r.1 == level).collect();
+        let mut stamps: Vec<DateTime<Utc>> = group.iter().map(|r| parse_rfc3339(&r.2)).collect();
+        stamps.sort_unstable();
+        let mut prev: Option<DateTime<Utc>> = None;
+        for (row, stamp) in group.iter().zip(stamps) {
+            let at = match prev {
+                Some(p) if stamp <= p => p + chrono::Duration::seconds(1),
+                _ => stamp,
+            };
+            prev = Some(at);
+            let text = rfc3339_text(at);
+            if text != row.2 {
+                tx.execute("UPDATE jobs SET created_at = ?2 WHERE id = ?1", params![row.0, text])?;
+                changed += 1;
+            }
+        }
+    }
+    tx.commit()?;
+    Ok(changed)
+}
+
 /// "Retry failed": every `failed` item back to `pending` with a fresh attempt count, and a job
 /// that had ended (`failed`, `completed_with_errors`, `cancelled`) back to `queued`. Returns how
 /// many items were retried.
@@ -1250,6 +1302,36 @@ mod tests {
         assert_eq!(next_resume_at(&db).unwrap(), Some(dt("2026-07-15T12:04:00Z")));
         pause_job(&db, b).unwrap();
         assert_eq!(next_resume_at(&db).unwrap(), Some(dt("2026-07-16T07:00:00Z")));
+    }
+
+    #[test]
+    fn reorder_queue_follows_the_given_order_within_each_priority() {
+        let db = db();
+        let a = insert_job(&db, &sample_job(1), now()).unwrap();
+        let b = insert_job(&db, &sample_job(1), later()).unwrap();
+        // Same second as `b`: the reorder has to separate them.
+        let c = insert_job(&db, &sample_job(1), later()).unwrap();
+        let mut high = sample_job(1);
+        high.priority = PRIORITY_HIGH;
+        let h = insert_job(&db, &high, later() + chrono::Duration::minutes(1)).unwrap();
+        let done = insert_job(&db, &sample_job(1), now()).unwrap();
+        cancel_job(&db, done, now()).unwrap();
+
+        // c, a, b among the NORMAL ones; `h` stays first as HIGH; the ended one and an unknown id
+        // are ignored, and a repeat counts once.
+        reorder_queue(&db, &[c, done, a, 999, h, b, c]).unwrap();
+        // The runner's picks, one after another (pausing each so the next comes up).
+        let mut order = Vec::new();
+        while let Some(next) = next_eligible_job(&db).unwrap() {
+            pause_job(&db, next.id).unwrap();
+            order.push(next.id);
+        }
+        assert_eq!(order, [h, c, a, b]);
+        assert_eq!(job(&db, h).priority, PRIORITY_HIGH, "a drag never changes the level");
+        assert_eq!(job(&db, done).created_at, now(), "an ended job is left alone");
+        let stamps: Vec<_> = [c, a, b].iter().map(|id| job(&db, *id).created_at).collect();
+        assert!(stamps[0] < stamps[1] && stamps[1] < stamps[2], "{stamps:?}");
+        assert_eq!(reorder_queue(&db, &[]).unwrap(), 0);
     }
 
     #[test]

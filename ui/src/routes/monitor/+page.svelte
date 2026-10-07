@@ -19,6 +19,7 @@
 	import { Button } from '$lib/components/ui/button';
 	import * as Select from '$lib/components/ui/select';
 	import ErrorState from '$lib/components/ErrorState.svelte';
+	import QuotaWidget from '$lib/components/jobs/QuotaWidget.svelte';
 
 	const CHART_DAYS = 14;
 	// The choices the backend accepts (commands.rs MONITOR_INTERVALS); anything else reads as 6.
@@ -235,6 +236,9 @@
 				</div>
 			{/each}
 		</div>
+
+		<!-- Today's Data API quota, when a channel is connected; links to the jobs page -->
+		<QuotaWidget compact />
 
 		<!-- Last check, Check now, interval -->
 		<section class="mb-4 rounded-xl border px-4 py-3">

@@ -167,6 +167,48 @@ pub fn daily_history(db: &Db, now: DateTime<Utc>, days: i64) -> rusqlite::Result
     Ok(out)
 }
 
+/// One endpoint's share of a day: how many calls it billed and what they cost.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct EndpointUsage {
+    pub endpoint: String,
+    pub calls: i64,
+    pub units: i64,
+}
+
+/// Today's spend by endpoint (Pacific day containing `now`), costliest first, ties by name.
+pub fn endpoint_totals_today(db: &Db, now: DateTime<Utc>) -> rusqlite::Result<Vec<EndpointUsage>> {
+    let (start, end) = pt_day_bounds_utc(now);
+    let conn = db.conn();
+    let mut stmt = conn.prepare(
+        "SELECT endpoint, COUNT(*), COALESCE(SUM(units), 0) FROM quota_ledger \
+         WHERE ts >= ?1 AND ts < ?2 GROUP BY endpoint \
+         ORDER BY COALESCE(SUM(units), 0) DESC, endpoint ASC",
+    )?;
+    let rows = stmt.query_map(params![rfc3339_text(start), rfc3339_text(end)], |row| {
+        Ok(EndpointUsage { endpoint: row.get(0)?, calls: row.get(1)?, units: row.get(2)? })
+    })?;
+    rows.collect()
+}
+
+/// The quota widget: what today cost, the project's daily quota, when it resets, and by endpoint.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct QuotaToday {
+    pub spent: i64,
+    pub daily_units: i64,
+    /// The next reset (midnight Pacific), RFC 3339 UTC.
+    pub next_reset: String,
+    pub endpoints: Vec<EndpointUsage>,
+}
+
+pub fn today(db: &Db, now: DateTime<Utc>) -> rusqlite::Result<QuotaToday> {
+    Ok(QuotaToday {
+        spent: spent_today(db, now)?,
+        daily_units: crate::jobs::budget::daily_units(db),
+        next_reset: rfc3339_text(next_reset_utc(now)),
+        endpoints: endpoint_totals_today(db, now)?,
+    })
+}
+
 /// The [`ytdata::quota::QuotaSink`] that writes this ledger: every billed call the client makes
 /// lands here with the units the client reports. Reads only; the job runner writes its own rows
 /// in the same transaction as the item they paid for, with a client that has no sink.
@@ -381,6 +423,35 @@ mod tests {
         // Stamped with the clock, so summed over a range no midnight can split.
         let all = units_between(&db, DateTime::<Utc>::UNIX_EPOCH, Utc::now() + Duration::days(1));
         assert_eq!(all.unwrap(), 51);
+    }
+
+    #[test]
+    fn endpoint_totals_and_today_cover_only_the_pt_day() {
+        let db = db();
+        let now = dt("2026-07-15T19:00:00Z");
+        record(&db, endpoint::PLAYLISTS_LIST, None, None, now).unwrap();
+        record(&db, endpoint::PLAYLISTS_LIST, None, None, now).unwrap();
+        record(&db, endpoint::PLAYLIST_ITEMS_INSERT, None, None, now).unwrap();
+        // Yesterday in Pacific time: left out.
+        record(&db, endpoint::VIDEOS_LIST, None, None, dt("2026-07-14T19:00:00Z")).unwrap();
+
+        let totals = endpoint_totals_today(&db, now).unwrap();
+        assert_eq!(
+            totals,
+            [
+                EndpointUsage {
+                    endpoint: endpoint::PLAYLIST_ITEMS_INSERT.into(),
+                    calls: 1,
+                    units: 50
+                },
+                EndpointUsage { endpoint: endpoint::PLAYLISTS_LIST.into(), calls: 2, units: 2 },
+            ]
+        );
+        let t = today(&db, now).unwrap();
+        assert_eq!((t.spent, t.daily_units), (52, DAILY_PROJECT_QUOTA));
+        assert_eq!(t.next_reset, "2026-07-16T07:00:00Z");
+        assert_eq!(t.endpoints, totals);
+        assert!(endpoint_totals_today(&db, dt("2026-07-20T19:00:00Z")).unwrap().is_empty());
     }
 
     #[test]

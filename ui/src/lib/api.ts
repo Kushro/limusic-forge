@@ -1667,3 +1667,121 @@ export const onLtState = (cb: (s: LtState) => void): Promise<UnlistenFn> =>
 	listen<LtState>('lt-state', (e) => cb(e.payload));
 export const onLtNotice = (cb: (msg: string) => void): Promise<UnlistenFn> =>
 	listen<string>('lt-notice', (e) => cb(e.payload));
+
+// --- jobs page ---
+// The playlist job queue and its history (src-tauri/src/jobs/control.rs), today's Data API quota
+// and its last two weeks. Dates are RFC 3339 UTC.
+export type JobStatus =
+	| 'queued'
+	| 'running'
+	| 'paused_user'
+	| 'waiting_quota'
+	| 'waiting_auth'
+	| 'paused_network'
+	| 'verifying'
+	| 'completed'
+	| 'completed_with_errors'
+	| 'failed'
+	| 'cancelled';
+export type JobEngine = 'ytdata' | 'innertube';
+/** One job as the jobs page shows it. `priority`: 0 the app's own, 1 high, 2 normal, 3 low. */
+export type JobView = {
+	id: number;
+	kind: string;
+	/** The operation asked for (`copy`, `move`, `dedupe`...), when the dispatch named it. */
+	op_kind: string | null;
+	status: JobStatus;
+	priority: number;
+	engine: JobEngine;
+	account_id: string | null;
+	phase: number;
+	total_phases: number;
+	created_at: string;
+	started_at: string | null;
+	finished_at: string | null;
+	resume_at: string | null;
+	est_units_total: number;
+	spent_units: number;
+	total_items: number;
+	done_items: number;
+	failed_items: number;
+	skipped_items: number;
+	/** The tracks asked for; unlike `total_items` it does not grow with a move's later phases. */
+	planned_items: number;
+	retried_items: number;
+	last_error: string | null;
+	summary: { playlists: { id: string; title: string }[]; count: number } | null;
+	undo_of_job_id: number | null;
+	revert_job_id: number | null;
+	revert_requested: boolean;
+	/** Its entry in the undo history (`playlistHistory`). */
+	op_id: number | null;
+};
+export type JobItemStatus = 'pending' | 'in_flight' | 'done' | 'failed' | 'skipped';
+export type JobItemView = {
+	id: number;
+	seq: number;
+	phase: number;
+	action: string;
+	status: JobItemStatus;
+	attempts: number;
+	last_error: string | null;
+	video_id: string | null;
+	playlist_id: string | null;
+	updated_at: string;
+};
+export type JobDetail = {
+	job: JobView;
+	items: JobItemView[];
+	/** What undoing it would take: the done items with an inverse, and their cost on the Data API. */
+	revert: { item_count: number; estimated_units: number };
+};
+/** `active`: not ended, in the order they run. `history`: ended, newest first. `all`: both. */
+export type JobsFilter = 'active' | 'history' | 'all';
+export const jobsList = (filter?: JobsFilter, limit?: number) =>
+	invoke<JobView[]>('jobs_list', { filter: filter ?? null, limit: limit ?? null });
+export const jobDetail = (id: number) => invoke<JobDetail | null>('job_detail', { id });
+export const jobPause = (id: number) => invoke<void>('job_pause', { id });
+export const jobResume = (id: number) => invoke<void>('job_resume', { id });
+/** Cancel; with `revert`, also undo what it did (on an ended job that is the whole request). */
+export const jobCancel = (id: number, revert: boolean) => invoke<void>('job_cancel', { id, revert });
+/** Put its failed items back in the queue. Answers how many. */
+export const jobRetryFailed = (id: number) => invoke<number>('job_retry_failed', { id });
+/** 1 high, 2 normal, 3 low. */
+export const jobSetPriority = (id: number, priority: number) =>
+	invoke<void>('job_set_priority', { id, priority });
+/** The queue in a new order. Jobs keep their priority; within one they run in this order. */
+export const jobsReorder = (ids: number[]) => invoke<number>('jobs_reorder', { ids });
+export type EndpointUsage = { endpoint: string; calls: number; units: number };
+export type QuotaToday = {
+	spent: number;
+	daily_units: number;
+	next_reset: string;
+	/** Costliest first. */
+	endpoints: EndpointUsage[];
+};
+export const quotaToday = () => invoke<QuotaToday>('quota_today');
+/** One Pacific day's spend; `date` is `YYYY-MM-DD`. */
+export type DailyUsage = { date: string; units: number };
+/** The last `days` Pacific days (14 by default), oldest first, today last. */
+export const quotaHistory = (days?: number) =>
+	invoke<DailyUsage[]>('quota_history', { days: days ?? null });
+/** Today's quota as the budget bar splits it. Units; `daily_units` is the whole bar. */
+export type BudgetPartition = {
+	daily_units: number;
+	spent_total: number;
+	spent_backup: number;
+	spent_jobs: number;
+	spent_other: number;
+	reserve_remaining: number;
+	safety_margin: number;
+	available_for_jobs: number;
+	next_reset: string;
+};
+export const budgetPartition = () => invoke<BudgetPartition>('budget_partition');
+/** A job changed; `jobId` 0 means possibly any. */
+export const onJobsChanged = (cb: (jobId: number) => void): Promise<UnlistenFn> =>
+	listen<{ job_id?: number } | null>('jobs-changed', (e) => cb(e.payload?.job_id ?? 0));
+/** Data API units were spent. */
+export const onQuotaChanged = (cb: () => void): Promise<UnlistenFn> =>
+	listen('quota-changed', () => cb());

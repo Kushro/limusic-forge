@@ -1171,6 +1171,17 @@ pub fn run() {
             commands::diagnostics_summary,
             commands::save_diagnostics,
             commands::log_ui,
+            commands::jobs_list,
+            commands::job_detail,
+            commands::job_pause,
+            commands::job_resume,
+            commands::job_cancel,
+            commands::job_retry_failed,
+            commands::job_set_priority,
+            commands::jobs_reorder,
+            commands::quota_today,
+            commands::quota_history,
+            commands::budget_partition,
         ])
         .on_window_event(|window, event| {
             // Close-to-tray: ✕ hides the main window and playback keeps running; real quit is

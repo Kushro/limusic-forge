@@ -200,6 +200,233 @@ pub fn queue_summary(db: &Db) -> rusqlite::Result<QueueSummary> {
     Ok(summary)
 }
 
+/// The user's drag in the queue (see [`repo::reorder_queue`]).
+pub fn reorder(db: &Db, ids: &[i64]) -> rusqlite::Result<usize> {
+    repo::reorder_queue(db, ids)
+}
+
+// --- the jobs page --------------------------------------------------------------------------------
+
+/// A job as the jobs page shows it. Dates are RFC 3339 UTC. From `params_json` only what the page
+/// words its title and its history with: the summary (playlists, count), the operation's kind, and
+/// the undo links.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct JobView {
+    pub id: i64,
+    pub kind: String,
+    /// The operation the user asked for (`copy`, `move`, `dedupe`...), when the dispatch named it.
+    pub op_kind: Option<String>,
+    pub status: &'static str,
+    pub priority: i64,
+    pub engine: &'static str,
+    pub account_id: Option<String>,
+    pub phase: i64,
+    pub total_phases: i64,
+    pub created_at: String,
+    pub started_at: Option<String>,
+    pub finished_at: Option<String>,
+    pub resume_at: Option<String>,
+    pub est_units_total: i64,
+    pub spent_units: i64,
+    pub total_items: i64,
+    pub done_items: i64,
+    pub failed_items: i64,
+    pub skipped_items: i64,
+    pub planned_items: i64,
+    pub retried_items: i64,
+    pub last_error: Option<String>,
+    pub summary: Option<Summary>,
+    /// The job this one undoes.
+    pub undo_of_job_id: Option<i64>,
+    /// The job queued to undo this one.
+    pub revert_job_id: Option<i64>,
+    /// A revert asked for and not queued yet.
+    pub revert_requested: bool,
+    /// Its entry in the undo history (`playlist_ops`).
+    pub op_id: Option<i64>,
+}
+
+fn text(at: chrono::DateTime<chrono::Utc>) -> String {
+    crate::db::rfc3339_text(at)
+}
+
+pub fn job_view(job: &Job) -> JobView {
+    let p = &job.params;
+    let int = |key: &str| p.get(key).and_then(Value::as_i64);
+    JobView {
+        id: job.id,
+        kind: job.kind.as_str().to_string(),
+        op_kind: p.get("op_kind").and_then(Value::as_str).map(str::to_string),
+        status: job.status.as_str(),
+        priority: job.priority,
+        engine: engine_of(job).as_str(),
+        account_id: job.account_id.clone(),
+        phase: job.phase,
+        total_phases: job.total_phases,
+        created_at: text(job.created_at),
+        started_at: job.started_at.map(text),
+        finished_at: job.finished_at.map(text),
+        resume_at: job.resume_at.map(text),
+        est_units_total: job.est_units_total,
+        spent_units: job.spent_units,
+        total_items: job.total_items,
+        done_items: job.done_items,
+        failed_items: job.failed_items,
+        skipped_items: job.skipped_items,
+        planned_items: job.planned_items,
+        retried_items: job.retried_items,
+        last_error: job.last_error.clone(),
+        summary: p.get("summary").and_then(|s| serde_json::from_value(s.clone()).ok()),
+        undo_of_job_id: int("undo_of_job_id"),
+        revert_job_id: int("revert_job_id"),
+        revert_requested: p.get("revert_requested").and_then(Value::as_bool).unwrap_or(false),
+        op_id: int("op_id"),
+    }
+}
+
+/// Which jobs the page lists.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ListFilter {
+    /// Every job that has not ended, in the order the runner takes them.
+    #[default]
+    Active,
+    /// The jobs that ended, newest first.
+    History,
+    /// Both: the active ones first, then the history.
+    All,
+}
+
+/// How many ended jobs the history shows unless asked for another number.
+pub const HISTORY_LIMIT: i64 = 100;
+
+const TERMINAL: [JobStatus; 4] =
+    [JobStatus::Completed, JobStatus::CompletedWithErrors, JobStatus::Failed, JobStatus::Cancelled];
+
+fn active_jobs(db: &Db) -> rusqlite::Result<Vec<Job>> {
+    let statuses = JobStatus::ALL.into_iter().filter(|s| !s.is_terminal()).collect();
+    let filter = JobFilter { statuses: Some(statuses), ..Default::default() };
+    let mut jobs = repo::list_jobs(db, &filter)?;
+    jobs.sort_by(|a, b| (a.priority, a.created_at, a.id).cmp(&(b.priority, b.created_at, b.id)));
+    Ok(jobs)
+}
+
+fn ended_jobs(db: &Db, limit: i64) -> rusqlite::Result<Vec<Job>> {
+    let statuses = Some(TERMINAL.to_vec());
+    let filter = JobFilter { statuses, limit: Some(limit.max(1)), ..Default::default() };
+    repo::list_jobs(db, &filter)
+}
+
+/// The page's list. `limit` caps the history (default [`HISTORY_LIMIT`]); the active jobs are
+/// always all there.
+pub fn list(db: &Db, filter: ListFilter, limit: Option<i64>) -> rusqlite::Result<Vec<JobView>> {
+    let limit = limit.unwrap_or(HISTORY_LIMIT);
+    let jobs = match filter {
+        ListFilter::Active => active_jobs(db)?,
+        ListFilter::History => ended_jobs(db, limit)?,
+        ListFilter::All => {
+            let mut all = active_jobs(db)?;
+            all.extend(ended_jobs(db, limit)?);
+            all
+        }
+    };
+    Ok(jobs.iter().map(job_view).collect())
+}
+
+/// One item as the job's detail lists it: what it does, how it went, and why not.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ItemView {
+    pub id: i64,
+    pub seq: i64,
+    pub phase: i64,
+    pub action: String,
+    pub status: &'static str,
+    pub attempts: i64,
+    pub last_error: Option<String>,
+    pub video_id: Option<String>,
+    pub playlist_id: Option<String>,
+    pub updated_at: String,
+}
+
+fn item_view(item: &JobItem) -> ItemView {
+    let param = |key: &str| item.params.get(key).and_then(Value::as_str).map(str::to_string);
+    ItemView {
+        id: item.id,
+        seq: item.seq,
+        phase: item.phase,
+        action: item.action.clone(),
+        status: item.status.as_str(),
+        attempts: item.attempts,
+        last_error: item.last_error.clone(),
+        video_id: param("video_id"),
+        playlist_id: param("playlist_id"),
+        updated_at: text(item.updated_at),
+    }
+}
+
+/// A job opened on the page: the job, its items in run order, and what reverting it would take.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct JobDetail {
+    pub job: JobView,
+    pub items: Vec<ItemView>,
+    pub revert: RevertPreview,
+}
+
+pub fn detail(db: &Db, job_id: i64) -> rusqlite::Result<Option<JobDetail>> {
+    let Some(job) = repo::get_job(db, job_id)? else { return Ok(None) };
+    let items = repo::list_job_items(db, job_id)?;
+    let inverse = inverse_items(&items);
+    let revert = RevertPreview {
+        item_count: inverse.len(),
+        estimated_units: inverse.iter().map(|i| cost_for_action_name(&i.action)).sum(),
+    };
+    Ok(Some(JobDetail {
+        job: job_view(&job),
+        items: items.iter().map(item_view).collect(),
+        revert,
+    }))
+}
+
+/// Today's quota as the page's budget bar splits it (port of PlaylistForge's `BudgetGauge`): what
+/// the monitor's backups, the jobs and everything else spent, the backup reserve still walled off,
+/// the safety margin, and what jobs may still spend. Units; `daily_units` is the whole bar.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct BudgetPartition {
+    pub daily_units: i64,
+    pub spent_total: i64,
+    pub spent_backup: i64,
+    pub spent_jobs: i64,
+    /// What neither a backup run nor a job spent (a sync read by hand, a settings check): the
+    /// bar still has to account for every unit.
+    pub spent_other: i64,
+    pub reserve_remaining: i64,
+    pub safety_margin: i64,
+    pub available_for_jobs: i64,
+    /// The next reset (midnight Pacific), RFC 3339 UTC.
+    pub next_reset: String,
+}
+
+pub fn budget_partition(
+    db: &Db,
+    now: chrono::DateTime<chrono::Utc>,
+) -> rusqlite::Result<BudgetPartition> {
+    use super::budget;
+    let spent_total = crate::quota::spent_today(db, now)?;
+    let spent_backup = budget::backup_spent_today(db, now)?;
+    let spent_jobs = budget::jobs_spent_today(db, now)?;
+    Ok(BudgetPartition {
+        daily_units: budget::daily_units(db),
+        spent_total,
+        spent_backup,
+        spent_jobs,
+        spent_other: (spent_total - spent_backup - spent_jobs).max(0),
+        reserve_remaining: budget::backup_reserve_remaining_today(db, now)?,
+        safety_margin: budget::safety_margin_units(db),
+        available_for_jobs: budget::available_for_jobs_now(db, now)?,
+        next_reset: text(crate::quota::next_reset_utc(now)),
+    })
+}
+
 /// Whether a job that ended belongs in the undo history: it changed something that can be undone,
 /// it is not itself an undo, and it was not already reverted.
 pub fn should_journal(job: &Job, items: &[JobItem]) -> bool {
@@ -365,6 +592,97 @@ mod tests {
         let journaled = set_param(job.params.clone(), "op_id", json!(7));
         repo::set_job_params(&db, id, &journaled).unwrap();
         assert!(!should_journal(&get(&db, id), &items), "already in the history");
+    }
+
+    #[test]
+    fn budget_partition_accounts_for_every_unit_spent_today() {
+        let db = db();
+        db.set_setting(super::super::budget::OPPORTUNISTIC_MODE_KEY, "false");
+        let empty = budget_partition(&db, now()).unwrap();
+        assert_eq!(
+            (empty.daily_units, empty.spent_total, empty.safety_margin, empty.reserve_remaining),
+            (10_000, 0, 300, 500)
+        );
+        assert_eq!(empty.available_for_jobs, 10_000 - 300 - 500);
+        assert_eq!(empty.next_reset, "2026-07-16T07:00:00Z");
+
+        // A job's write (ledger row with its job id), a backup run, and a sync read by hand.
+        let id = seed(&db, &["a"]);
+        complete_all(&db, id);
+        db.record_monitor_run(&crate::db::MonitorRun {
+            id: 0,
+            started_at: now().timestamp(),
+            finished_at: now().timestamp() + 5,
+            trigger: "scheduler".into(),
+            outcome: "ok".into(),
+            playlists_ok: 1,
+            playlists_failed: 0,
+            alerts_new: 0,
+            units_spent: 20,
+            detail_json: "{}".into(),
+        })
+        .unwrap();
+        crate::quota::record_units(&db, "playlistItems.list", 20, Some("UC1"), None, now())
+            .unwrap();
+        crate::quota::record_units(&db, "playlists.list", 3, Some("UC1"), None, now()).unwrap();
+
+        let p = budget_partition(&db, now()).unwrap();
+        assert_eq!((p.spent_total, p.spent_jobs, p.spent_backup, p.spent_other), (73, 50, 20, 3));
+        assert_eq!(p.spent_jobs + p.spent_backup + p.spent_other, p.spent_total);
+        assert_eq!(p.reserve_remaining, 480, "the reserve shrinks by what the backup spent");
+        assert_eq!(p.available_for_jobs, 10_000 - 300 - 480 - 73);
+        let snapshot = super::super::budget::snapshot(&db, now()).unwrap();
+        assert_eq!(p.available_for_jobs, snapshot.available_for_jobs_now, "one rule, one number");
+    }
+
+    #[test]
+    fn the_page_lists_active_jobs_in_run_order_and_ended_ones_newest_first() {
+        let db = db();
+        let low = seed(&db, &["a"]);
+        set_priority(&db, low, PRIORITY_LOW).unwrap();
+        let normal = seed(&db, &["b"]);
+        let ended = seed(&db, &["c"]);
+        complete_all(&db, ended);
+        repo::finalize_if_complete(&db, ended, now()).unwrap();
+        let cancelled = seed(&db, &["d"]);
+        cancel(&db, cancelled, false, now()).unwrap();
+
+        let ids = |v: Vec<JobView>| v.into_iter().map(|j| j.id).collect::<Vec<_>>();
+        assert_eq!(ids(list(&db, ListFilter::Active, None).unwrap()), [normal, low]);
+        assert_eq!(ids(list(&db, ListFilter::History, None).unwrap()), [cancelled, ended]);
+        assert_eq!(ids(list(&db, ListFilter::History, Some(1)).unwrap()), [cancelled]);
+        assert_eq!(ids(list(&db, ListFilter::All, None).unwrap()), [normal, low, cancelled, ended]);
+
+        let view = &list(&db, ListFilter::History, Some(1)).unwrap()[0];
+        assert_eq!(
+            (view.status, view.engine, view.kind.as_str()),
+            ("cancelled", "ytdata", "copy_items")
+        );
+        assert_eq!(view.summary.as_ref().map(|s| s.count), Some(2));
+        assert!(!view.revert_requested);
+    }
+
+    #[test]
+    fn a_jobs_detail_lists_its_items_and_what_a_revert_would_take() {
+        let db = db();
+        let id = seed(&db, &["a", "b"]);
+        let item = repo::next_pending_item(&db, id).unwrap().unwrap();
+        repo::begin_item(&db, item.id, now()).unwrap();
+        repo::fail_item(&db, item.id, "videoNotFound", now()).unwrap();
+        complete_all(&db, id);
+
+        let d = detail(&db, id).unwrap().unwrap();
+        assert_eq!(d.job.id, id);
+        let items: Vec<_> = d
+            .items
+            .iter()
+            .map(|i| (i.status, i.video_id.as_deref(), i.last_error.as_deref()))
+            .collect();
+        let failed = ("failed", Some("a"), Some("videoNotFound"));
+        assert_eq!(items, [failed, ("done", Some("b"), None)]);
+        assert_eq!(d.items[0].playlist_id.as_deref(), Some("PLdst"));
+        assert_eq!(d.revert, RevertPreview { item_count: 1, estimated_units: 50 });
+        assert!(detail(&db, 999).unwrap().is_none());
     }
 
     #[test]

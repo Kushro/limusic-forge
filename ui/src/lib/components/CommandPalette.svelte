@@ -29,6 +29,7 @@
 		Sun01Icon,
 		Radar01Icon,
 		RefreshIcon,
+		TaskDaily01Icon,
 		Wrench01Icon
 	} from '@hugeicons/core-free-icons';
 	import * as Command from '$lib/components/ui/command/index.js';
@@ -172,6 +173,13 @@
 			run: go('/monitor')
 		},
 		{
+			id: 'goto:jobs',
+			group: 'goto',
+			label: t('jobs.nav'),
+			keywords: ['queue', 'quota', 'budget', 'undo', 'history', 'downloads', 'data api'],
+			run: go('/jobs')
+		},
+		{
 			id: 'goto:tools',
 			group: 'goto',
 			label: t('nav.tools'),
@@ -243,6 +251,7 @@
 		'goto:search': Search01Icon,
 		'goto:alerts': Notification03Icon,
 		'goto:monitor': Radar01Icon,
+		'goto:jobs': TaskDaily01Icon,
 		'goto:tools': Wrench01Icon,
 		'action:check-playlists': RefreshIcon,
 		'action:settings': Settings01Icon,

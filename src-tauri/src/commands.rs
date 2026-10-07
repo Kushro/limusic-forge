@@ -4267,6 +4267,123 @@ pub fn theater_fullscreen(window: tauri::WebviewWindow, on: bool) -> Result<(), 
     }
 }
 
+// --- jobs page ---
+// The queue and its history (`jobs::control`), today's quota and its last two weeks. Every control
+// writes the job's row, then announces it (`jobs-changed`) and wakes the runner, which picks the
+// change up on its next step.
+
+fn jobs_changed(state: &AppState, jobs: &crate::jobs::JobsState, job_id: i64) {
+    let _ = state.app.emit("jobs-changed", json!({ "job_id": job_id }));
+    jobs.nudge();
+}
+
+/// The jobs page's list: `active` (the default; in the order the runner takes them), `history`
+/// (ended, newest first, `limit` of them, 100 unless said) or `all`.
+#[tauri::command]
+pub async fn jobs_list(
+    state: St<'_>,
+    filter: Option<crate::jobs::control::ListFilter>,
+    limit: Option<u32>,
+) -> Result<Vec<crate::jobs::control::JobView>, String> {
+    let limit = limit.map(|n| i64::from(n.clamp(1, 1000)));
+    crate::jobs::control::list(&state.db, filter.unwrap_or_default(), limit).map_err(db_err)
+}
+
+/// One job with its items (state and error of each) and what reverting it would take. `null` for
+/// a job that no longer exists.
+#[tauri::command]
+pub async fn job_detail(
+    state: St<'_>,
+    id: i64,
+) -> Result<Option<crate::jobs::control::JobDetail>, String> {
+    crate::jobs::control::detail(&state.db, id).map_err(db_err)
+}
+
+#[tauri::command]
+pub async fn job_pause(state: St<'_>, jobs: Jobs<'_>, id: i64) -> Result<(), String> {
+    crate::jobs::control::pause(&state.db, id).map_err(db_err)?;
+    jobs_changed(&state, &jobs, id);
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn job_resume(state: St<'_>, jobs: Jobs<'_>, id: i64) -> Result<(), String> {
+    crate::jobs::control::resume(&state.db, id).map_err(db_err)?;
+    jobs_changed(&state, &jobs, id);
+    Ok(())
+}
+
+/// Cancels a job; with `revert`, what it already did is undone too (a SYSTEM job the runner queues
+/// on its next step). On a job that already ended, `revert` is the same request: an undo.
+#[tauri::command]
+pub async fn job_cancel(
+    state: St<'_>,
+    jobs: Jobs<'_>,
+    id: i64,
+    revert: bool,
+) -> Result<(), String> {
+    crate::jobs::control::cancel(&state.db, id, revert, chrono::Utc::now()).map_err(db_err)?;
+    jobs_changed(&state, &jobs, id);
+    Ok(())
+}
+
+/// Puts the job's failed items back in the queue (an ended job with them runs again). Answers how
+/// many items were retried.
+#[tauri::command]
+pub async fn job_retry_failed(state: St<'_>, jobs: Jobs<'_>, id: i64) -> Result<usize, String> {
+    let n =
+        crate::jobs::control::retry_failed(&state.db, id, chrono::Utc::now()).map_err(db_err)?;
+    jobs_changed(&state, &jobs, id);
+    Ok(n)
+}
+
+/// HIGH (1), NORMAL (2) or LOW (3); anything else is clamped to those.
+#[tauri::command]
+pub async fn job_set_priority(
+    state: St<'_>,
+    jobs: Jobs<'_>,
+    id: i64,
+    priority: i64,
+) -> Result<(), String> {
+    crate::jobs::control::set_priority(&state.db, id, priority).map_err(db_err)?;
+    jobs_changed(&state, &jobs, id);
+    Ok(())
+}
+
+/// The queue dragged into a new order: `ids` as wanted. Jobs keep their priority level; within a
+/// level they run in this order. Answers how many jobs moved.
+#[tauri::command]
+pub async fn jobs_reorder(state: St<'_>, jobs: Jobs<'_>, ids: Vec<i64>) -> Result<usize, String> {
+    let n = crate::jobs::control::reorder(&state.db, &ids).map_err(db_err)?;
+    jobs_changed(&state, &jobs, 0);
+    Ok(n)
+}
+
+/// Today's Data API spend, the daily quota, the next reset and the spend by endpoint.
+#[tauri::command]
+pub async fn quota_today(state: St<'_>) -> Result<crate::quota::QuotaToday, String> {
+    crate::quota::today(&state.db, chrono::Utc::now()).map_err(db_err)
+}
+
+/// Units spent per Pacific day over the last `days` days (14 unless said, at most 90), oldest
+/// first, today last.
+#[tauri::command]
+pub async fn quota_history(
+    state: St<'_>,
+    days: Option<u32>,
+) -> Result<Vec<crate::quota::DailyUsage>, String> {
+    let days = i64::from(days.unwrap_or(14).clamp(1, 90));
+    crate::quota::daily_history(&state.db, chrono::Utc::now(), days).map_err(db_err)
+}
+
+/// Today's quota split the way the budget bar draws it (`jobs::control::budget_partition`).
+#[tauri::command]
+pub async fn budget_partition(
+    state: St<'_>,
+) -> Result<crate::jobs::control::BudgetPartition, String> {
+    crate::jobs::control::budget_partition(&state.db, chrono::Utc::now()).map_err(db_err)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

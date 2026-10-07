@@ -1754,5 +1754,194 @@
 			"unavailable": "The Data API cannot make this change: it will go through InnerTube.",
 			"tools_applies": "Used when removing duplicates and when copying or moving tracks."
 		}
+	},
+	"jobs": {
+		"nav": "Jobs",
+		"page_title": "Jobs",
+		"intro": "Playlist changes waiting their turn or done, what today's YouTube Data API quota allows, and your downloads.",
+		"loading_failed": "Couldn't read the jobs: {error}",
+		"section_budget": "Today's budget",
+		"section_downloads": "Downloads",
+		"section_queue": "Queue",
+		"section_history": "History",
+		"queue_empty": "Nothing in the queue. Playlist changes that have to wait show up here.",
+		"history_empty": "No playlist changes yet.",
+		"summary_active": "{count} running or next",
+		"summary_waiting_quota": "{count} waiting for quota",
+		"summary_waiting_auth": "{count} waiting for a reconnection",
+		"summary_paused": "{count} paused",
+		"status": {
+			"queued": "Queued",
+			"running": "Running",
+			"paused_user": "Paused",
+			"waiting_quota": "Waiting for quota",
+			"waiting_auth": "Needs reconnecting",
+			"paused_network": "Waiting for the network",
+			"verifying": "Checking",
+			"completed": "Done",
+			"completed_with_errors": "Done with problems",
+			"failed": "Failed",
+			"cancelled": "Cancelled"
+		},
+		"status_hint": {
+			"queued": "Runs as soon as the jobs before it are done.",
+			"running": "Making the changes now.",
+			"paused_user": "Paused by you. Resume it to carry on.",
+			"waiting_quota": "Paused until the quota resets. The daily backup keeps its reserve.",
+			"waiting_auth": "Google stopped accepting the channel's sign-in. Connect it again in Settings ▸ YouTube Data API, then resume.",
+			"paused_network": "The connection dropped. It tries again by itself.",
+			"verifying": "Checking the copies landed before removing the originals.",
+			"completed": "All the changes were made.",
+			"completed_with_errors": "Some tracks could not be changed. Open it to see which and why.",
+			"failed": "It stopped before finishing.",
+			"cancelled": "Cancelled. What it already did stays unless you undo it."
+		},
+		"priority": {
+			"label": "Priority",
+			"system": "App",
+			"high": "High",
+			"normal": "Normal",
+			"low": "Low"
+		},
+		"engine": {
+			"ytdata": "Data API",
+			"innertube": "InnerTube"
+		},
+		"title": {
+			"copy": "Copy {count} tracks to {playlist}",
+			"copy_bare": "Copy {count} tracks",
+			"move": "Move {count} tracks to {playlist}",
+			"move_bare": "Move {count} tracks",
+			"remove": "Remove {count} tracks from {playlist}",
+			"remove_bare": "Remove {count} tracks",
+			"dedupe": "Remove {count} duplicates from {playlist}",
+			"dedupe_bare": "Remove {count} duplicates",
+			"reorder": "Reorder {playlist}",
+			"reorder_bare": "Reorder a playlist",
+			"create": "Create {playlist}",
+			"create_bare": "Create a playlist",
+			"rename": "Rename {playlist}",
+			"rename_bare": "Rename a playlist",
+			"undo": "Undo job #{id}",
+			"other": "{kind} (#{id})"
+		},
+		"row": {
+			"progress": "{settled} of {total}",
+			"units": "{spent} of ≈ {estimate} u",
+			"problems": "{failed} failed, {skipped} skipped",
+			"retried": "{count} needed another try",
+			"resumes": "Resumes {when}",
+			"created": "Queued {when}",
+			"finished": "Ended {when}",
+			"pause": "Pause",
+			"resume": "Resume",
+			"cancel": "Cancel",
+			"retry": "Retry failed",
+			"undo": "Undo",
+			"details": "Details",
+			"hide_details": "Hide details",
+			"move_up": "Run earlier",
+			"move_down": "Run later",
+			"undo_pending": "Undo queued",
+			"undone": "Undone"
+		},
+		"cancel_dialog": {
+			"title": "Cancel this job?",
+			"desc": "What it already changed stays, unless you undo it too.",
+			"revert": "Also undo what it already did",
+			"revert_cost": "{count} changes to undo, ≈ {units} u on the Data API",
+			"revert_none": "It has not changed anything yet.",
+			"confirm": "Cancel job",
+			"keep": "Keep it"
+		},
+		"undo_dialog": {
+			"title": "Undo this job?",
+			"desc": "Its {count} changes are undone in the queue, newest first (≈ {units} u on the Data API).",
+			"confirm": "Undo"
+		},
+		"detail": {
+			"loading": "Reading the job…",
+			"empty": "No items.",
+			"failed_only": "Only problems",
+			"col_track": "Track",
+			"col_action": "Action",
+			"col_status": "State",
+			"col_attempts": "Tries",
+			"col_error": "Error",
+			"phase": "Step {phase} of {total}"
+		},
+		"item_status": {
+			"pending": "Waiting",
+			"in_flight": "Sending",
+			"done": "Done",
+			"failed": "Failed",
+			"skipped": "Skipped"
+		},
+		"toast": {
+			"paused": "Job paused",
+			"resumed": "Job resumed",
+			"cancelled": "Job cancelled",
+			"cancelled_revert": "Job cancelled; its undo is queued",
+			"undo_queued": "Undo queued",
+			"retried": "{count} items queued again",
+			"retried_none": "Nothing failed to retry",
+			"failed": "Couldn't do that: {error}"
+		},
+		"op": {
+			"copy": "Copied {count} tracks",
+			"move": "Moved {count} tracks",
+			"remove": "Removed {count} tracks",
+			"dedupe": "Removed {count} duplicates",
+			"reorder": "Reordered {count} tracks",
+			"split": "Split into {count} playlists",
+			"merge": "Merged {count} tracks",
+			"extract": "Extracted {count} tracks",
+			"add": "Added {count} tracks",
+			"in": "in {playlists}",
+			"undone": "Undone",
+			"local": "Not undoable from this account"
+		},
+		"budget": {
+			"title": "Today's quota",
+			"resets_in": "Resets in {hours} h {minutes} min",
+			"available": "{units} u left for jobs",
+			"of_daily": "{spent} of {daily} u used",
+			"legend": {
+				"backup": "Backups",
+				"jobs": "Jobs",
+				"other": "Other",
+				"reserve": "Backup reserve",
+				"margin": "Safety margin",
+				"available": "Available"
+			},
+			"units": "{label}: {units} u",
+			"not_connected": "Connect the YouTube Data API in Settings to see its quota here. Without it, playlist changes go through YouTube Music."
+		},
+		"quota": {
+			"title": "Data API quota",
+			"spent": "{spent} / {daily} u",
+			"resets_in": "Resets in {hours} h {minutes} min",
+			"by_endpoint": "Today by call",
+			"calls": "{count} calls",
+			"none_today": "Nothing spent today.",
+			"open_jobs": "Jobs and quota"
+		},
+		"usage": {
+			"title": "Last 14 days",
+			"empty": "No Data API units spent in the last 14 days.",
+			"day": "{day}: {units} u ({percent}% of the quota)"
+		},
+		"downloads": {
+			"summary_queued": "{count} queued",
+			"summary_running": "{count} downloading",
+			"summary_available": "{count} downloaded",
+			"summary_error": "{count} failed",
+			"summary_missing": "{count} with the file gone",
+			"empty": "No downloads yet. Pick Download on a song, an album or a playlist.",
+			"active": "Downloading {id}: {percent}%",
+			"open_folder": "Open folder",
+			"retry_failed": "Retry failed",
+			"retried": "{count} downloads queued again"
+		}
 	}
 }
