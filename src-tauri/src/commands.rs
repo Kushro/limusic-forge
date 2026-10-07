@@ -226,7 +226,7 @@ pub async fn get_queue(state: St<'_>) -> Result<serde_json::Value, String> {
 /// `visitor_data`) and internal blobs (`queue_json`, `queue_index`, `queue_position`) never cross
 /// into the webview: they'd otherwise ship the login credential to the renderer on every open, and
 /// the webview can't overwrite them either.
-const UI_SETTINGS: [&str; 54] = [
+const UI_SETTINGS: &[&str] = &[
     "volume",
     "proxy",
     "quality",
@@ -295,6 +295,69 @@ const UI_SETTINGS: [&str; 54] = [
     "jobs.local_echo_max_age_s",
     "jobs.advance_jobs_headless",
 ];
+
+/// What a setting accepts. Keys without a rule take any string, as every key did before.
+#[derive(Debug, Clone)]
+enum SettingRule {
+    OneOf(&'static [&'static str]),
+    /// A whole number in the range.
+    Int(std::ops::RangeInclusive<i64>),
+    /// `true` or `false`.
+    Bool,
+    /// One of the local echo slider's positions (`jobs::local_echo::EchoWindow::SLIDER`).
+    EchoSlider,
+}
+
+/// Per-key validation for [`set_setting`]: a value its reader would misread (an engine it does not
+/// know, a margin of 400 %) is refused with a message, instead of stored and silently ignored.
+fn setting_rule(key: &str) -> Option<SettingRule> {
+    use crate::jobs::budget as b;
+    use crate::jobs::engine as e;
+    use SettingRule::{Bool, EchoSlider, Int, OneOf};
+    Some(match key {
+        "playlist_engine" => OneOf(&e::PLAYLIST_ENGINE_VALUES),
+        "job_queue_mode" => OneOf(&e::JOB_QUEUE_MODE_VALUES),
+        "budget.daily_units" => Int(b::DAILY_UNITS_RANGE),
+        "budget.safety_margin_percent" => Int(b::SAFETY_MARGIN_PERCENT_RANGE),
+        "budget.backup_reserve_units" => Int(b::BACKUP_RESERVE_UNITS_RANGE),
+        "budget.backup_runs_per_day" => Int(b::BACKUP_RUNS_PER_DAY_RANGE),
+        "budget.opportunistic_mode" => Bool,
+        "jobs.default_job_priority" => Int(crate::jobs::PRIORITY_HIGH..=crate::jobs::PRIORITY_LOW),
+        "jobs.local_echo_max_age_s" => EchoSlider,
+        "jobs.advance_jobs_headless" => Bool,
+        "drop_mode" => OneOf(&["ask", "copy", "move"]),
+        "drop_dupes" => OneOf(&["skip", "allow", "consolidate"]),
+        "tools.extract_new_mode" => OneOf(&["build", "create_transfer"]),
+        _ => return None,
+    })
+}
+
+/// The local echo slider's positions as `jobs.local_echo_max_age_s` stores them.
+fn echo_slider_values() -> Vec<String> {
+    crate::jobs::local_echo::EchoWindow::SLIDER.iter().map(|w| w.to_setting_value()).collect()
+}
+
+pub(crate) fn validate_setting(key: &str, value: &str) -> Result<(), String> {
+    let Some(rule) = setting_rule(key) else { return Ok(()) };
+    let ok = match &rule {
+        SettingRule::OneOf(allowed) => allowed.contains(&value),
+        SettingRule::Int(range) => value.parse::<i64>().is_ok_and(|n| range.contains(&n)),
+        SettingRule::Bool => matches!(value, "true" | "false"),
+        SettingRule::EchoSlider => echo_slider_values().iter().any(|v| v == value),
+    };
+    if ok {
+        return Ok(());
+    }
+    let expected = match rule {
+        SettingRule::OneOf(allowed) => format!("one of {}", allowed.join(", ")),
+        SettingRule::Int(range) => {
+            format!("a whole number from {} to {}", range.start(), range.end())
+        }
+        SettingRule::Bool => "true or false".to_string(),
+        SettingRule::EchoSlider => format!("one of {}", echo_slider_values().join(", ")),
+    };
+    Err(format!("invalid value {value:?} for {key}: expected {expected}"))
+}
 
 /// Resolve the music video for `video_id` and hand back a `limusicvideo://` URL the player view
 /// can put in a `<video src>`. `None` when YouTube has no usable video stream for it, which is the
@@ -431,6 +494,7 @@ pub async fn set_setting(
     if !UI_SETTINGS.contains(&key.as_str()) {
         return Err(format!("unknown setting: {key}"));
     }
+    validate_setting(&key, &value)?;
     // Registers/removes the login autostart entry on toggle; the OS persists it from there, and
     // startup repoints an existing entry at the running binary (lib.rs). Before the write, so a
     // failure leaves the setting as it was. A dev build would register itself, and at login its
@@ -506,6 +570,10 @@ pub async fn set_setting(
     // songs never played. Songs whose source was picked by hand keep it.
     if key == "lyrics_providers" {
         state.db.clear_lyrics_cache();
+    }
+    // The daily units and the margin decide when the quota reads as used up.
+    if key.starts_with("budget.") {
+        crate::ytdata_status::announce(&state).await;
     }
     // Hand the frame back to the compositor (or take it again). macOS is not on this path: its
     // titlebar style is fixed at window creation, so the setting is hidden there.
@@ -1970,6 +2038,372 @@ pub async fn ytdata_status(state: St<'_>) -> Result<crate::ytdata_status::YtData
     Ok(crate::ytdata_status::current(&state).await)
 }
 
+// --- Settings ▸ YouTube Data API ---------------------------------------------------------------
+// The imported client secret, the channels connected through OAuth, the budget. Only the masked
+// client id, channel metadata and states cross into the webview: never a token, never the client
+// secret. The authorization opens in the system browser, never in the webview.
+
+/// Sent once a connection started by [`ytdata_connect_start`] ends, however it ends.
+const CONNECT_FINISHED_EVENT: &str = "ytdata-connect-finished";
+/// How long the browser has to come back to the loopback before the attempt gives up.
+const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+
+/// The connection in progress: its number and its cancel flag. Starting another cancels it.
+type Connecting = Option<(u64, Arc<std::sync::atomic::AtomicBool>)>;
+static CONNECTING: std::sync::Mutex<Connecting> = std::sync::Mutex::new(None);
+static CONNECT_ATTEMPTS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn connecting() -> std::sync::MutexGuard<'static, Connecting> {
+    CONNECTING.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ClientSecretInfo {
+    masked_client_id: String,
+}
+
+/// An import failure in words. serde's message can quote a piece of the file, so a file that is
+/// not JSON gets a fixed sentence instead.
+fn import_error(e: &ytdata::error::Error) -> String {
+    match e {
+        ytdata::error::Error::Serde(_) => {
+            "That file is not a client_secret.json: it is not valid JSON.".to_string()
+        }
+        other => other.to_string(),
+    }
+}
+
+/// Validates the `client_secret.json` the user picked and copies it to the data folder
+/// (`ytdata_secrets::client_secret_path`). Answers only its masked client id.
+#[tauri::command]
+pub async fn ytdata_import_client_secret(
+    state: St<'_>,
+    jobs: Jobs<'_>,
+    path: String,
+) -> Result<ClientSecretInfo, String> {
+    let dest = crate::ytdata_secrets::client_secret_path(&state.app);
+    let dir = dest.parent().map(std::path::Path::to_path_buf).ok_or("no data folder")?;
+    let source = std::path::PathBuf::from(path);
+    let parsed = tokio::task::spawn_blocking(move || ytdata::client_secret::import(&source, &dir))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| import_error(&e))?;
+    let info = ClientSecretInfo { masked_client_id: parsed.masked_client_id() };
+    if let Some(manager) = jobs.account_manager() {
+        manager.set_client_secret(parsed);
+    }
+    tracing::info!("ytdata: client_secret.json imported");
+    crate::ytdata_status::announce(&state).await;
+    Ok(info)
+}
+
+/// The imported client secret's masked client id, or `None` before one is imported.
+#[tauri::command]
+pub async fn ytdata_client_secret_info(
+    state: St<'_>,
+    jobs: Jobs<'_>,
+) -> Result<Option<ClientSecretInfo>, String> {
+    let secret = jobs.account_manager().and_then(|m| m.client_secret()).or_else(|| {
+        let path = crate::ytdata_secrets::client_secret_path(&state.app);
+        path.parent().and_then(ytdata::client_secret::load_existing)
+    });
+    Ok(secret.map(|s| ClientSecretInfo { masked_client_id: s.masked_client_id() }))
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct ConnectStarted {
+    /// Google's consent page, already opened in the system browser; shown so it can be copied
+    /// when no browser opened. Carries the client id, PKCE challenge and state, no secret.
+    authorize_url: String,
+    /// Which attempt this is: [`CONNECT_FINISHED_EVENT`] names it.
+    attempt: u64,
+}
+
+/// How a connection ended, as [`CONNECT_FINISHED_EVENT`] carries it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+struct ConnectFinished {
+    attempt: u64,
+    ok: bool,
+    /// `cancelled`, `timed_out` or `failed` when not ok.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    code: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    channel_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    title: Option<String>,
+}
+
+impl ConnectFinished {
+    fn failed(attempt: u64, e: &ytdata::error::Error) -> Self {
+        use ytdata::error::{AuthError, Error};
+        let (code, error) = match e {
+            Error::Auth(AuthError::Cancelled) => ("cancelled", None),
+            Error::Auth(AuthError::TimedOut) => ("timed_out", Some(e.to_string())),
+            _ => ("failed", Some(e.to_string())),
+        };
+        Self { attempt, ok: false, code: Some(code), error, channel_id: None, title: None }
+    }
+}
+
+/// Starts connecting a channel: binds the loopback, opens Google's consent page in the system
+/// browser, and waits in the background (up to five minutes, or until cancelled) for it to come
+/// back. The end arrives as `ytdata-connect-finished` (and `ytdata-status-changed`).
+#[tauri::command]
+pub async fn ytdata_connect_start(state: St<'_>, jobs: Jobs<'_>) -> Result<ConnectStarted, String> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use ytdata::auth::flow::{PendingAuthorization, YOUTUBE_SCOPE};
+    let manager =
+        jobs.account_manager().ok_or("The YouTube Data API is not available in this session.")?;
+    let no_secret = || ytdata::error::AuthError::NoClientSecret.to_string();
+    let secret = manager.client_secret().ok_or_else(no_secret)?;
+    let pending =
+        PendingAuthorization::start(&secret, &[YOUTUBE_SCOPE]).map_err(|e| e.to_string())?;
+    let authorize_url = pending.authorize_url.clone();
+    let attempt = CONNECT_ATTEMPTS.fetch_add(1, Ordering::SeqCst) + 1;
+    let cancel = Arc::new(AtomicBool::new(false));
+    if let Some((_, previous)) = connecting().replace((attempt, cancel.clone())) {
+        previous.store(true, Ordering::SeqCst);
+    }
+    // The system browser: Google refuses sign-in inside embedded webviews, and the app's own
+    // webview must never hold the consent page.
+    if let Err(e) = crate::lastfm::open_browser(&authorize_url) {
+        tracing::warn!(error = %e, "ytdata: could not open the browser for the authorization");
+    }
+    let app_state = state.inner().clone();
+    tauri::async_runtime::spawn(async move {
+        let finished = finish_connect(&app_state, manager, pending, cancel, attempt).await;
+        {
+            let mut slot = connecting();
+            if slot.as_ref().is_some_and(|(n, _)| *n == attempt) {
+                *slot = None;
+            }
+        }
+        if finished.ok {
+            tracing::info!("ytdata: channel connected");
+        } else {
+            tracing::info!(code = ?finished.code, "ytdata: connection ended without a channel");
+        }
+        crate::ytdata_status::announce(&app_state).await;
+        let _ = app_state.app.emit(CONNECT_FINISHED_EVENT, &finished);
+    });
+    Ok(ConnectStarted { authorize_url, attempt })
+}
+
+/// Waits for the browser, then saves the channel ([`save_connected`]) on a blocking thread: the
+/// token store blocks.
+async fn finish_connect(
+    state: &Arc<AppState>,
+    manager: Arc<ytdata::auth::accounts::AccountManager>,
+    pending: ytdata::auth::flow::PendingAuthorization,
+    cancel: Arc<std::sync::atomic::AtomicBool>,
+    attempt: u64,
+) -> ConnectFinished {
+    let tokens = match pending.wait_for_tokens(cancel, CONNECT_TIMEOUT).await {
+        Ok(tokens) => tokens,
+        Err(e) => return ConnectFinished::failed(attempt, &e),
+    };
+    let db = state.db.clone();
+    let active = db.get_setting("active_account");
+    let joined = tokio::task::spawn_blocking(move || {
+        let saving = save_connected(&manager, &db, tokens, active.as_deref(), chrono::Utc::now());
+        tokio::runtime::Handle::current().block_on(saving)
+    })
+    .await;
+    match joined {
+        Ok(Ok(account)) => ConnectFinished {
+            attempt,
+            ok: true,
+            code: None,
+            error: None,
+            channel_id: Some(account.channel_id),
+            title: Some(account.title),
+        },
+        Ok(Err(e)) => ConnectFinished::failed(attempt, &e),
+        Err(e) => ConnectFinished::failed(attempt, &ytdata_io(e)),
+    }
+}
+
+/// Something that went wrong around a Data API call, as the crate's error type.
+fn ytdata_io(e: impl std::fmt::Display) -> ytdata::error::Error {
+    ytdata::error::Error::Io(std::io::Error::other(e.to_string()))
+}
+
+/// Saves a channel the browser just authorized. The account manager names it (`channels.list`),
+/// puts its refresh token in the token store and its row in `ytdata_accounts` (through
+/// `DbAccountsRepo`, so the manager's own list stays in step with the table). Then the call's unit
+/// goes to the ledger and the channel is linked to the signed-in cookie account when that one has
+/// none yet. A Data API refusal is filed with `ytdata_status` (an API turned off shows as such).
+/// The token store blocks: call this off the async runtime.
+async fn save_connected(
+    manager: &ytdata::auth::accounts::AccountManager,
+    db: &crate::db::Db,
+    tokens: ytdata::auth::flow::AuthorizedTokens,
+    active: Option<&str>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<crate::ytdata_accounts::YtDataAccount, ytdata::error::Error> {
+    let account = match manager.add_account(tokens).await {
+        Ok(account) => account,
+        Err(e) => {
+            crate::ytdata_status::note_error(db, &e, now);
+            return Err(e);
+        }
+    };
+    crate::ytdata_status::note_success(db);
+    let (channels_list, channel) = (ytdata::quota::endpoint::CHANNELS_LIST, &account.channel_id);
+    if let Err(e) = crate::quota::record(db, channels_list, Some(channel.as_str()), None, now) {
+        tracing::warn!(error = %e, "ytdata: could not record the channels.list unit");
+    }
+    link_if_unpaired(db, &account.channel_id, active).map_err(ytdata_io)?;
+    crate::ytdata_accounts::get(db, &account.channel_id)
+        .map_err(ytdata_io)?
+        .ok_or_else(|| ytdata_io("the connected channel was not saved"))
+}
+
+/// Links `channel_id` to the cookie account `active` when neither is linked to anything yet.
+/// Answers whether it linked.
+fn link_if_unpaired(
+    db: &crate::db::Db,
+    channel_id: &str,
+    active: Option<&str>,
+) -> rusqlite::Result<bool> {
+    let Some(active) = active.filter(|a| !a.is_empty()) else { return Ok(false) };
+    let accounts = crate::ytdata_accounts::list(db)?;
+    let taken = accounts.iter().any(|a| a.linked_account.as_deref() == Some(active));
+    match accounts.iter().find(|a| a.channel_id == channel_id) {
+        Some(a) if a.linked_account.is_none() && !taken => {
+            crate::ytdata_accounts::set_linked_account(db, channel_id, Some(active))
+        }
+        _ => Ok(false),
+    }
+}
+
+/// Pairs `channel_id` with the cookie account `account` (or unpairs it with `None`). A cookie
+/// account has one channel at most: whichever was linked to it before is unlinked. Answers
+/// whether the channel exists.
+fn link_account(
+    db: &crate::db::Db,
+    channel_id: &str,
+    account: Option<&str>,
+) -> rusqlite::Result<bool> {
+    let accounts = crate::ytdata_accounts::list(db)?;
+    if !accounts.iter().any(|a| a.channel_id == channel_id) {
+        return Ok(false);
+    }
+    if let Some(account) = account {
+        let others = accounts.iter().filter(|a| a.channel_id != channel_id);
+        for other in others.filter(|a| a.linked_account.as_deref() == Some(account)) {
+            crate::ytdata_accounts::set_linked_account(db, &other.channel_id, None)?;
+        }
+    }
+    crate::ytdata_accounts::set_linked_account(db, channel_id, account)
+}
+
+/// Gives up on the connection in progress, if any. Its end still arrives as the event.
+#[tauri::command]
+pub fn ytdata_connect_cancel() {
+    if let Some((_, cancel)) = connecting().take() {
+        cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// A connected channel as the settings list it. No token, ever.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct YtDataAccountView {
+    channel_id: String,
+    title: String,
+    thumb: Option<String>,
+    /// `connected` or `reauth_required`.
+    status: ytdata::auth::accounts::AccountStatus,
+    /// The cookie account (`accounts.id`) it is paired with.
+    linked_account: Option<String>,
+    /// Epoch seconds.
+    added_at: i64,
+}
+
+#[tauri::command]
+pub fn ytdata_accounts(state: St<'_>) -> Result<Vec<YtDataAccountView>, String> {
+    let rows = crate::ytdata_accounts::list(&state.db).map_err(db_err)?;
+    Ok(rows
+        .into_iter()
+        .map(|a| YtDataAccountView {
+            channel_id: a.channel_id,
+            title: a.title,
+            thumb: a.thumb,
+            status: a.status,
+            linked_account: a.linked_account,
+            added_at: a.added_at,
+        })
+        .collect())
+}
+
+/// Disconnects a channel: revokes its refresh token with Google (best effort), deletes it from the
+/// token store and removes its row. Its jobs stay, unowned (`ON DELETE SET NULL`); its playlists
+/// and ledger rows are not touched.
+#[tauri::command]
+pub async fn ytdata_disconnect(
+    state: St<'_>,
+    jobs: Jobs<'_>,
+    channel_id: String,
+) -> Result<(), String> {
+    ytdata::auth::store::validate_account_id(&channel_id).map_err(|e| e.to_string())?;
+    let manager = jobs.account_manager();
+    let store = crate::ytdata_secrets::token_store(&state.app);
+    let db = state.db.clone();
+    let id = channel_id.clone();
+    tokio::task::spawn_blocking(move || -> Result<(), String> {
+        match manager {
+            Some(m) if m.account(&id).is_some() => {
+                let removing = m.revoke_and_remove_account(&id);
+                tokio::runtime::Handle::current().block_on(removing).map_err(|e| e.to_string())?;
+            }
+            // The manager never knew it (no manager this session): the token still goes.
+            _ => {
+                if let Err(e) = store.delete(&id) {
+                    tracing::warn!(error = %e, "ytdata: could not delete a stored token");
+                }
+            }
+        }
+        crate::ytdata_accounts::remove(&db, &id).map_err(db_err)?;
+        Ok(())
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    tracing::info!("ytdata: channel disconnected");
+    crate::ytdata_status::announce(&state).await;
+    let _ = state.app.emit("jobs-changed", json!({}));
+    Ok(())
+}
+
+/// Pairs a connected channel with a cookie account (`accounts.id`), or unpairs it with `null`:
+/// the Data API acts as that channel while that account is signed in.
+#[tauri::command]
+pub async fn ytdata_link_account(
+    state: St<'_>,
+    channel_id: String,
+    account: Option<String>,
+) -> Result<(), String> {
+    let account = account.filter(|a| !a.is_empty());
+    if let Some(account) = &account {
+        if !state.db.list_accounts().iter().any(|a| &a.id == account) {
+            return Err("That account is not signed in on this computer.".into());
+        }
+    }
+    if !link_account(&state.db, &channel_id, account.as_deref()).map_err(db_err)? {
+        return Err("That channel is not connected.".into());
+    }
+    crate::ytdata_status::announce(&state).await;
+    Ok(())
+}
+
+/// The budget's settings as they read, and today's partition of the quota. The settings are
+/// written with `set_setting`, which validates them.
+#[tauri::command]
+pub async fn budget_get(state: St<'_>) -> Result<crate::jobs::budget::Snapshot, String> {
+    crate::jobs::budget::snapshot(&state.db, chrono::Utc::now()).map_err(db_err)
+}
+
 /// Alerts neither seen nor dismissed: the badge's number before any `alerts-changed` arrives.
 #[tauri::command]
 pub fn unseen_alert_count(state: St<'_>) -> u32 {
@@ -2511,7 +2945,44 @@ fn queue_target(
     est_units: i64,
     override_: Option<&str>,
 ) -> Option<crate::jobs::engine::QueueTarget> {
-    use crate::jobs::engine::{self, DataApiState, Engine, EngineSetting, QueueMode, QueueTarget};
+    use crate::jobs::engine::{self, Engine, QueueMode, QueueTarget};
+    let r = route(state, jobs, playlists, est_units, override_)?;
+    let db = &state.db;
+    let priority = engine::default_job_priority(db);
+    match r.engine {
+        Engine::Ytdata => Some(QueueTarget {
+            engine: r.engine,
+            channel_id: r.channel_id,
+            account: r.account,
+            priority,
+        }),
+        Engine::Innertube if engine::queue_mode(db) == QueueMode::Unified => {
+            Some(QueueTarget { engine: r.engine, channel_id: None, account: r.account, priority })
+        }
+        Engine::Innertube => None,
+    }
+}
+
+/// Which engine a write to `playlists` would run on now, and what decided it. `None` for a write
+/// that touches a playlist on this computer (those never queue and cost no quota).
+struct Route {
+    engine: crate::jobs::engine::Engine,
+    /// The Data API's state for these playlists: `not_configured` when one of them is not a
+    /// playlist the Data API can address (Liked Music, an album).
+    state: crate::jobs::engine::DataApiState,
+    channel_id: Option<String>,
+    account: Option<String>,
+    available: i64,
+}
+
+fn route(
+    state: &Arc<AppState>,
+    jobs: &crate::jobs::JobsState,
+    playlists: &[&str],
+    est_units: i64,
+    override_: Option<&str>,
+) -> Option<Route> {
+    use crate::jobs::engine::{self, DataApiState, EngineSetting};
     if playlists.iter().any(|id| is_local_playlist(id)) {
         return None;
     }
@@ -2530,16 +3001,53 @@ fn queue_target(
         est_units,
         available,
     );
-    let priority = engine::default_job_priority(db);
-    match chosen {
-        Engine::Ytdata => {
-            Some(QueueTarget { engine: chosen, channel_id: ctx.channel_id, account, priority })
-        }
-        Engine::Innertube if engine::queue_mode(db) == QueueMode::Unified => {
-            Some(QueueTarget { engine: chosen, channel_id: None, account, priority })
-        }
-        Engine::Innertube => None,
-    }
+    Some(Route { engine: chosen, state: status, channel_id: ctx.channel_id, account, available })
+}
+
+/// What a copy, move or removal would cost on the Data API, what jobs may still spend today, and
+/// the engine it would run on with `params.engine` as the operation's choice (`auto`, `ytdata`,
+/// `innertube`; none = the `playlist_engine` setting). `engine` is `None` for a write that touches
+/// a playlist on this computer. For the confirmation's "≈ N u of M available".
+#[derive(serde::Deserialize)]
+pub struct EstimateParams {
+    #[serde(default)]
+    rows: usize,
+    /// Every playlist the write touches: the target, and the source too for a move.
+    #[serde(default)]
+    playlists: Vec<String>,
+    /// How long the playlist a removal reads is, when the caller knows.
+    #[serde(default)]
+    playlist_len: Option<usize>,
+    #[serde(default)]
+    engine: Option<String>,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct OpEstimate {
+    units: i64,
+    available: i64,
+    engine: Option<crate::jobs::engine::Engine>,
+    state: crate::jobs::engine::DataApiState,
+}
+
+#[tauri::command]
+pub async fn estimate_op(
+    state: St<'_>,
+    jobs: Jobs<'_>,
+    kind: String,
+    params: EstimateParams,
+) -> Result<OpEstimate, String> {
+    use crate::jobs::engine::{estimate_units, DataApiState, OpKind};
+    let op = OpKind::parse(&kind).ok_or_else(|| format!("unknown operation: {kind}"))?;
+    let units = estimate_units(op, params.rows, params.playlist_len);
+    let touched: Vec<&str> = params.playlists.iter().map(String::as_str).collect();
+    let Some(r) = route(&state, &jobs, &touched, units, params.engine.as_deref()) else {
+        // A playlist on this computer: nothing to spend.
+        let available = crate::jobs::budget::available_for_jobs_now(&state.db, chrono::Utc::now());
+        let state = DataApiState::NotConfigured;
+        return Ok(OpEstimate { units: 0, available: available.unwrap_or(0), engine: None, state });
+    };
+    Ok(OpEstimate { units, available: r.available, engine: Some(r.engine), state: r.state })
 }
 
 /// Queues `new`, wakes the runner, and waits for the job to settle (or [`QUEUED_WAIT`]).
@@ -3978,6 +4486,245 @@ mod tests {
         for key in crate::download::settings::KEYS {
             assert!(UI_SETTINGS.contains(&key), "{key}");
         }
+    }
+
+    /// `set_setting`'s per-key rules: each refuses what its reader would misread, with the key
+    /// and what it wanted in the message; a key without a rule takes anything, as before.
+    #[test]
+    fn set_setting_validates_values_per_key() {
+        let accepted = [
+            ("playlist_engine", "auto"),
+            ("playlist_engine", "ytdata"),
+            ("playlist_engine", "innertube"),
+            ("job_queue_mode", "unified"),
+            ("job_queue_mode", "ytdata_only"),
+            ("budget.daily_units", "1"),
+            ("budget.daily_units", "1000000"),
+            ("budget.safety_margin_percent", "0"),
+            ("budget.safety_margin_percent", "50"),
+            ("budget.backup_reserve_units", "0"),
+            ("budget.backup_reserve_units", "2500"),
+            ("budget.backup_runs_per_day", "0"),
+            ("budget.backup_runs_per_day", "24"),
+            ("budget.opportunistic_mode", "true"),
+            ("budget.opportunistic_mode", "false"),
+            ("jobs.default_job_priority", "1"),
+            ("jobs.default_job_priority", "3"),
+            ("jobs.local_echo_max_age_s", "0"),
+            ("jobs.local_echo_max_age_s", "900"),
+            ("jobs.local_echo_max_age_s", "3600"),
+            ("jobs.local_echo_max_age_s", "86400"),
+            ("jobs.local_echo_max_age_s", "-1"),
+            ("jobs.advance_jobs_headless", "true"),
+            ("drop_mode", "ask"),
+            ("drop_dupes", "consolidate"),
+            ("tools.extract_new_mode", "create_transfer"),
+            // No rule: anything goes.
+            ("proxy", "socks5://whatever"),
+            ("volume", "not even a number"),
+        ];
+        for (key, value) in accepted {
+            assert_eq!(validate_setting(key, value), Ok(()), "{key} = {value:?}");
+        }
+        let refused = [
+            ("playlist_engine", "Auto"),
+            ("playlist_engine", ""),
+            ("playlist_engine", "data_api"),
+            ("job_queue_mode", "both"),
+            ("budget.daily_units", "0"),
+            ("budget.daily_units", "1000001"),
+            ("budget.daily_units", "10k"),
+            ("budget.daily_units", "1e4"),
+            ("budget.safety_margin_percent", "51"),
+            ("budget.safety_margin_percent", "-1"),
+            ("budget.safety_margin_percent", "3.5"),
+            ("budget.backup_reserve_units", "-500"),
+            ("budget.backup_runs_per_day", "25"),
+            ("budget.opportunistic_mode", "yes"),
+            ("budget.opportunistic_mode", "1"),
+            ("jobs.default_job_priority", "0"),
+            ("jobs.default_job_priority", "4"),
+            ("jobs.local_echo_max_age_s", "60"),
+            ("jobs.local_echo_max_age_s", "-3600"),
+            ("jobs.local_echo_max_age_s", "always"),
+            ("jobs.advance_jobs_headless", "on"),
+            ("drop_mode", "drop"),
+            ("drop_dupes", "keep"),
+            ("tools.extract_new_mode", "create"),
+        ];
+        for (key, value) in refused {
+            let err = validate_setting(key, value).expect_err(&format!("{key} = {value:?}"));
+            assert!(err.contains(key) && err.contains("expected"), "{err}");
+        }
+        let err = validate_setting("budget.daily_units", "0").unwrap_err();
+        assert!(err.contains("a whole number from 1 to 1000000"), "{err}");
+        let err = validate_setting("jobs.local_echo_max_age_s", "60").unwrap_err();
+        assert!(err.contains("0, 900, 1800, 3600, 10800, 43200, 86400, -1"), "{err}");
+    }
+
+    /// A rule for a key the UI cannot write would never run.
+    #[test]
+    fn every_validated_setting_is_one_the_ui_may_write() {
+        let keys = [
+            "playlist_engine",
+            "job_queue_mode",
+            "budget.daily_units",
+            "budget.safety_margin_percent",
+            "budget.backup_reserve_units",
+            "budget.backup_runs_per_day",
+            "budget.opportunistic_mode",
+            "jobs.default_job_priority",
+            "jobs.local_echo_max_age_s",
+            "jobs.advance_jobs_headless",
+            "drop_mode",
+            "drop_dupes",
+            "tools.extract_new_mode",
+        ];
+        for key in keys {
+            assert!(setting_rule(key).is_some(), "{key} has no rule");
+            assert!(UI_SETTINGS.contains(&key), "{key}");
+        }
+    }
+
+    /// A loopback server that answers every request with `body` (HTTP 200, JSON), for as many
+    /// requests as `times`. Answers its base URL.
+    fn fake_api(body: &'static str, times: usize) -> String {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            for stream in listener.incoming().take(times) {
+                let Ok(mut stream) = stream else { continue };
+                let mut request = Vec::new();
+                let mut buf = [0u8; 1024];
+                while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match stream.read(&mut buf) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => request.extend_from_slice(&buf[..n]),
+                    }
+                }
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                     Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes());
+            }
+        });
+        base
+    }
+
+    const CHANNEL_ONE: &str = r#"{"items": [{"id": "UCfakeChannelOne", "snippet": {
+        "title": "Channel One",
+        "thumbnails": {"default": {"url": "https://yt3.example/1.jpg"}}}}]}"#;
+    const CHANNEL_TWO: &str = r#"{"items": [{"id": "UCfakeChannelTwo", "snippet": {
+        "title": "Channel Two", "thumbnails": {}}}]}"#;
+
+    fn fake_tokens(refresh: &str) -> ytdata::auth::flow::AuthorizedTokens {
+        ytdata::auth::flow::AuthorizedTokens {
+            access_token: "FAKE-access-token".into(),
+            refresh_token: refresh.into(),
+            expires_at: std::time::Instant::now() + std::time::Duration::from_secs(3600),
+        }
+    }
+
+    fn manager_for(
+        db: &Arc<crate::db::Db>,
+        store: Arc<ytdata::auth::store::InMemoryTokenStore>,
+        base_url: String,
+    ) -> ytdata::auth::accounts::AccountManager {
+        let repo = Arc::new(crate::ytdata_accounts::DbAccountsRepo::new(db.clone()));
+        let client = ytdata::client::YouTubeClient::new().unwrap().with_base_url(base_url);
+        ytdata::auth::accounts::AccountManager::new(store, repo).unwrap().with_yt_client(client)
+    }
+
+    async fn connect(
+        manager: &ytdata::auth::accounts::AccountManager,
+        db: &crate::db::Db,
+        refresh: &str,
+        active: Option<&str>,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> crate::ytdata_accounts::YtDataAccount {
+        save_connected(manager, db, fake_tokens(refresh), active, now).await.unwrap()
+    }
+
+    /// The part of connecting that is the app's: the refresh token lands in the token store, the
+    /// channel in `ytdata_accounts` (and in the manager's own list), the `channels.list` unit in
+    /// the ledger, and the channel is linked to the signed-in cookie account only while that one
+    /// has none.
+    #[tokio::test]
+    async fn a_connected_channel_is_stored_counted_and_linked_once() {
+        use ytdata::auth::accounts::AccountStatus;
+        use ytdata::auth::store::TokenStore;
+        let db = Arc::new(crate::db::Db::open(std::path::Path::new(":memory:")).unwrap());
+        let store = Arc::new(ytdata::auth::store::InMemoryTokenStore::default());
+        let now = chrono::DateTime::parse_from_rfc3339("2026-07-15T19:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+
+        let one = manager_for(&db, store.clone(), fake_api(CHANNEL_ONE, 1));
+        let saved = connect(&one, &db, "FAKE-refresh-1", Some("ga1"), now).await;
+        assert_eq!(saved.channel_id, "UCfakeChannelOne");
+        assert_eq!(saved.title, "Channel One");
+        assert_eq!(saved.thumb.as_deref(), Some("https://yt3.example/1.jpg"));
+        assert_eq!(saved.status, AccountStatus::Connected);
+        assert_eq!(saved.linked_account.as_deref(), Some("ga1"), "ga1 had no channel");
+        assert_eq!(store.load("UCfakeChannelOne").unwrap().as_deref(), Some("FAKE-refresh-1"));
+        assert!(one.account("UCfakeChannelOne").is_some(), "the manager knows it too");
+        assert_eq!(crate::quota::spent_today(&db, now).unwrap(), 1, "one channels.list");
+
+        // A second channel while ga1 already has one: stored, not linked.
+        let two = manager_for(&db, store.clone(), fake_api(CHANNEL_TWO, 1));
+        let saved = connect(&two, &db, "FAKE-refresh-2", Some("ga1"), now).await;
+        assert_eq!(saved.linked_account, None);
+        assert_eq!(store.load("UCfakeChannelTwo").unwrap().as_deref(), Some("FAKE-refresh-2"));
+        let rows = crate::ytdata_accounts::list(&db).unwrap();
+        assert_eq!(rows.len(), 2, "the second manager's save kept the first row");
+
+        // Reconnecting the first one (a new refresh token) keeps its link and its date.
+        let again = manager_for(&db, store.clone(), fake_api(CHANNEL_ONE, 1));
+        let saved = connect(&again, &db, "FAKE-refresh-3", None, now).await;
+        assert_eq!(saved.linked_account.as_deref(), Some("ga1"));
+        assert_eq!(store.load("UCfakeChannelOne").unwrap().as_deref(), Some("FAKE-refresh-3"));
+        assert_eq!(crate::ytdata_accounts::list(&db).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn linking_keeps_one_channel_per_cookie_account() {
+        use crate::ytdata_accounts as ya;
+        let db = crate::db::Db::open(std::path::Path::new(":memory:")).unwrap();
+        ya::upsert(&db, "UC1", "One", None, 1).unwrap();
+        ya::upsert(&db, "UC2", "Two", None, 2).unwrap();
+        let linked = |id: &str| ya::get(&db, id).unwrap().unwrap().linked_account;
+
+        assert!(!link_if_unpaired(&db, "UC1", None).unwrap(), "nobody signed in");
+        assert!(link_if_unpaired(&db, "UC1", Some("ga1")).unwrap());
+        assert!(!link_if_unpaired(&db, "UC2", Some("ga1")).unwrap(), "ga1 already has UC1");
+        assert!(!link_if_unpaired(&db, "UC1", Some("ga2")).unwrap(), "UC1 is already linked");
+        assert!(!link_if_unpaired(&db, "UC9", Some("ga3")).unwrap(), "not connected");
+
+        assert!(link_account(&db, "UC2", Some("ga1")).unwrap());
+        assert_eq!(linked("UC2").as_deref(), Some("ga1"));
+        assert_eq!(linked("UC1"), None, "the one ga1 had before is unlinked");
+        assert!(link_account(&db, "UC2", None).unwrap());
+        assert_eq!(linked("UC2"), None);
+        assert!(!link_account(&db, "UC9", Some("ga1")).unwrap());
+    }
+
+    #[test]
+    fn a_failed_connection_says_why_without_a_token() {
+        use ytdata::error::AuthError;
+        let cancelled = ConnectFinished::failed(3, &AuthError::Cancelled.into());
+        let json = serde_json::to_value(&cancelled).unwrap();
+        assert_eq!(json, json!({ "attempt": 3, "ok": false, "code": "cancelled" }));
+        let timed_out = ConnectFinished::failed(4, &AuthError::TimedOut.into());
+        assert_eq!(timed_out.code, Some("timed_out"));
+        let failed = ConnectFinished::failed(5, &AuthError::InvalidGrant.into());
+        assert_eq!(failed.code, Some("failed"));
+        assert!(failed.error.unwrap().contains("invalid_grant"));
+        let not_json = serde_json::from_str::<Value>("{ FAKE-file-content").unwrap_err();
+        let msg = import_error(&ytdata::error::Error::Serde(not_json));
+        assert!(!msg.contains("FAKE-file-content"), "{msg}");
     }
 
     #[test]

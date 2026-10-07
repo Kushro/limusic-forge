@@ -82,6 +82,7 @@ export type SettingsTab =
 	| 'hotkeys'
 	| 'discord'
 	| 'data'
+	| 'ytdata'
 	| 'import'
 	| 'about';
 /** Open settings on a tab, scrolled to `settings-<section>` when given. */

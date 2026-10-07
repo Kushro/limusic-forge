@@ -14,6 +14,9 @@
 	import MergeTab from './tools/MergeTab.svelte';
 	import ExtractTab from './tools/ExtractTab.svelte';
 	import ReorderTab from './tools/ReorderTab.svelte';
+	import EngineChoice from './ytdata/EngineChoice.svelte';
+	import { isLocalPlaylist, setEngineChoice } from '$lib/api';
+	import type { PlaylistEngine } from '$lib/ytdata.svelte';
 	import { t } from '$lib/i18n.svelte';
 
 	let {
@@ -29,6 +32,25 @@
 		title: string;
 		editable: boolean;
 	} = $props();
+
+	// The engine for the tabs whose writes take one (removing duplicates; extracting by copy or
+	// move): picked here, priced per track since the rows are chosen inside the tab, and handed to
+	// those writes for as long as the dialog is open on them (`api.setEngineChoice`). Splits, merges
+	// and builds into a new playlist go their own way. A playlist on this computer has no engine.
+	const ENGINE_TABS: ToolTab[] = ['duplicates', 'extract'];
+	let engine = $state<PlaylistEngine | undefined>();
+	const engineTab = $derived(editable && ENGINE_TABS.includes(tab) && !isLocalPlaylist(playlistId));
+	const priced = $derived([
+		{ kind: tab === 'duplicates' ? ('remove' as const) : ('copy' as const), rows: 1, playlists: [playlistId] }
+	]);
+	$effect(() => {
+		if (!open) engine = undefined;
+	});
+	$effect(() => {
+		if (!open || !engineTab || engine === undefined) return;
+		setEngineChoice(engine);
+		return () => setEngineChoice(null);
+	});
 </script>
 
 <Dialog.Root bind:open>
@@ -48,6 +70,12 @@
 				<Tabs.Trigger value="extract">{t('tools.tab_extract')}</Tabs.Trigger>
 				<Tabs.Trigger value="reorder">{t('tools.tab_reorder')}</Tabs.Trigger>
 				</Tabs.List>
+				{#if engineTab}
+					<div class="-mt-1 mb-3">
+						<EngineChoice bind:choice={engine} ops={priced} perTrack />
+						<p class="mt-1 text-[11px] text-muted-foreground">{t('ytdata.estimate.tools_applies')}</p>
+					</div>
+				{/if}
 				<Tabs.Content value="duplicates">
 					<!-- Keyed: reopening on another playlist starts the tool over. -->
 					{#key playlistId}

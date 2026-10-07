@@ -743,6 +743,101 @@ export type YtDataStatus = {
 export const ytdataStatus = () => invoke<YtDataStatus>('ytdata_status');
 export const onYtDataStatus = (cb: (s: YtDataStatus) => void): Promise<UnlistenFn> =>
 	listen<YtDataStatus>('ytdata-status-changed', (e) => cb(e.payload));
+
+// --- Settings ▸ YouTube Data API ------------------------------------------------------------
+// Only the masked client id, channel metadata and states come back: never a token, never the
+// client secret (commands.rs).
+/** The imported `client_secret.json`, as much of it as the UI may see. */
+export type ClientSecretInfo = { masked_client_id: string };
+/** Validate the picked `client_secret.json` and copy it into the data folder. */
+export const ytdataImportClientSecret = (path: string) =>
+	invoke<ClientSecretInfo>('ytdata_import_client_secret', { path });
+/** The imported client secret, or null before one is. */
+export const ytdataClientSecretInfo = () =>
+	invoke<ClientSecretInfo | null>('ytdata_client_secret_info');
+/** Start connecting a channel: Google's consent page opens in the system browser. The end arrives
+ *  as `onYtDataConnectFinished` with the same `attempt`. */
+export const ytdataConnectStart = () =>
+	invoke<{ authorize_url: string; attempt: number }>('ytdata_connect_start');
+export const ytdataConnectCancel = () => invoke<void>('ytdata_connect_cancel');
+export type YtDataConnectFinished = {
+	attempt: number;
+	ok: boolean;
+	code?: 'cancelled' | 'timed_out' | 'failed';
+	error?: string;
+	channel_id?: string;
+	title?: string;
+};
+export const onYtDataConnectFinished = (cb: (r: YtDataConnectFinished) => void): Promise<UnlistenFn> =>
+	listen<YtDataConnectFinished>('ytdata-connect-finished', (e) => cb(e.payload));
+/** A channel connected through the Data API. `linked_account` is the cookie account (the `id` of
+ *  `getGoogleAccounts`) it acts for. */
+export type YtDataAccount = {
+	channel_id: string;
+	title: string;
+	thumb: string | null;
+	status: 'connected' | 'reauth_required';
+	linked_account: string | null;
+	added_at: number;
+};
+export const ytdataAccounts = () => invoke<YtDataAccount[]>('ytdata_accounts');
+/** Revoke and forget a channel's sign-in. Its jobs stay, without an account. */
+export const ytdataDisconnect = (channelId: string) =>
+	invoke<void>('ytdata_disconnect', { channelId });
+/** Pair a channel with a cookie account, or unpair it with null. */
+export const ytdataLinkAccount = (channelId: string, account: string | null) =>
+	invoke<void>('ytdata_link_account', { channelId, account });
+/** The budget settings as they read (defaults filled in) and today's partition of the quota. The
+ *  settings themselves are written with `setSetting` (`budget.*`), which validates them. */
+export type BudgetInfo = {
+	daily_units: number;
+	safety_margin_percent: number;
+	safety_margin_units: number;
+	backup_reserve_units: number;
+	backup_reserve_remaining_today: number;
+	opportunistic_mode: boolean;
+	backup_runs_per_day: number;
+	spent_today: number;
+	jobs_spent_today: number;
+	backup_spent_today: number;
+	available_for_jobs_now: number;
+	next_reset: string;
+};
+export const budgetGet = () => invoke<BudgetInfo>('budget_get');
+
+/** `playlist_engine`, or one operation's choice of engine. */
+export type PlaylistEngine = 'auto' | 'ytdata' | 'innertube';
+/** What a copy, move or removal would cost on the Data API, what jobs may still spend today, and
+ *  the engine it would run on (null: it touches a playlist on this computer, nothing to spend). */
+export type OpEstimate = {
+	units: number;
+	available: number;
+	engine: 'ytdata' | 'innertube' | null;
+	state: YtDataState;
+};
+export const estimateOp = (
+	kind: 'copy' | 'move' | 'remove',
+	params: { rows: number; playlists: string[]; playlist_len?: number; engine?: PlaylistEngine | null }
+) => invoke<OpEstimate>('estimate_op', { kind, params });
+
+/** The engine the next playlist writes (`transferTracks`, `removeTracks`) ask for when their caller
+ *  names none: set by a confirmation that offers the choice (the drop popover, the tools dialog)
+ *  around the writes it starts. Null leaves it to `playlist_engine`. */
+let engineChoice: PlaylistEngine | null = null;
+export function setEngineChoice(engine: PlaylistEngine | null) {
+	engineChoice = engine;
+}
+/** Run `start` with `engine` as the choice for the writes it makes before its first `await` (where
+ *  `transfer` calls `transferTracks`), then put the previous choice back. */
+export function withEngineChoice<T>(engine: PlaylistEngine | null, start: () => Promise<T>): Promise<T> {
+	const before = engineChoice;
+	engineChoice = engine;
+	try {
+		return start();
+	} finally {
+		engineChoice = before;
+	}
+}
 /** Alerts neither seen nor dismissed (the badge). */
 export const unseenAlertCount = () => invoke<number>('unseen_alert_count');
 /** The monitor page's cards. `items` is index rows (a track once per playlist); `duplicates_estimate`
@@ -1010,13 +1105,15 @@ export const removeTracks = async (
 	playlistId: string,
 	title: string,
 	rows: RowRef[],
-	kind: 'remove' | 'dedupe' = 'remove'
+	kind: 'remove' | 'dedupe' = 'remove',
+	engine?: PlaylistEngine
 ) => {
 	const r = await invoke<RawPlaylistOp | null>('remove_tracks', {
 		playlistId,
 		title,
 		rows: rows.map((r) => ({ song: r.song, before: r.before })),
-		kind
+		kind,
+		engine: engine ?? engineChoice
 	});
 	return r && op(r);
 };
@@ -1049,6 +1146,8 @@ export const transferTracks = async (args: {
 	rows: RowRef[];
 	mode: 'copy' | 'move';
 	duplicates: 'skip' | 'allow' | 'consolidate';
+	/** This write's engine; by default the confirmation's choice, else `playlist_engine`. */
+	engine?: PlaylistEngine;
 }) => {
 	const r = await invoke<Omit<Transferred, 'op'> & { op: RawPlaylistOp | null }>('transfer_tracks', {
 		source: args.source?.id ?? null,
@@ -1057,7 +1156,8 @@ export const transferTracks = async (args: {
 		targetTitle: args.target.title,
 		rows: args.rows.map((r) => ({ song: r.song, before: r.before })),
 		mode: args.mode,
-		duplicates: args.duplicates
+		duplicates: args.duplicates,
+		engine: args.engine ?? engineChoice
 	});
 	return { ...r, op: r.op && op(r.op) };
 };

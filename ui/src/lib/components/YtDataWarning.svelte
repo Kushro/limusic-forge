@@ -1,10 +1,10 @@
 <script lang="ts">
 	// Why the YouTube Data API can't be used right now (src-tauri/src/ytdata_status.rs), shown where
 	// its functions are: one line with the reason, the quota counts when it ran out, and "Configure",
-	// which opens Settings on the Data API tab (`YTDATA_TAB`; until the settings commit adds that tab
-	// the dialog opens on its default one). Shows nothing when the API works, and nothing for an API
-	// nobody set up unless the engine asks for it (`shouldWarn`): with `auto` or `innertube` the
-	// work simply goes through InnerTube.
+	// which opens Settings ▸ YouTube Data API (`YTDATA_TAB`). Shows nothing when the API works, and
+	// nothing for an API nobody set up unless the engine asks for it (`shouldWarn`): with `auto` or
+	// `innertube` the work simply goes through InnerTube. `hideConfigure` drops the button where the
+	// warning already sits in that tab.
 	import { onMount } from 'svelte';
 	import { HugeiconsIcon } from '@hugeicons/svelte';
 	import { Alert02Icon } from '@hugeicons/core-free-icons';
@@ -13,7 +13,8 @@
 	import { shouldWarn, trackYtData, ytdata, YTDATA_TAB } from '$lib/ytdata.svelte';
 	import { Button } from './ui/button';
 
-	let { compact = false }: { compact?: boolean } = $props();
+	let { compact = false, hideConfigure = false }: { compact?: boolean; hideConfigure?: boolean } =
+		$props();
 
 	onMount(trackYtData);
 
@@ -49,8 +50,10 @@
 				<p class="mt-0.5 text-xs text-muted-foreground">{detail}</p>
 			{/if}
 		</div>
-		<Button variant="outline" size="sm" class="shrink-0" onclick={configure} title={compact ? detail : undefined}>
-			{t('ytdata.configure')}
-		</Button>
+		{#if !hideConfigure}
+			<Button variant="outline" size="sm" class="shrink-0" onclick={configure} title={compact ? detail : undefined}>
+				{t('ytdata.configure')}
+			</Button>
+		{/if}
 	</div>
 {/if}

@@ -80,14 +80,61 @@ pub fn set_opportunistic_mode(db: &Db, enabled: bool) {
     db.set_setting(OPPORTUNISTIC_MODE_KEY, if enabled { "true" } else { "false" });
 }
 
+/// The day's scheduled backup runs. `0` means none is scheduled: with opportunistic mode on, the
+/// reserve is then released from the start of the day.
 pub fn backup_runs_per_day(db: &Db) -> i64 {
     setting_i64(db, BACKUP_RUNS_PER_DAY_KEY)
-        .filter(|n| *n > 0)
+        .filter(|n| BACKUP_RUNS_PER_DAY_RANGE.contains(n))
         .unwrap_or(DEFAULT_BACKUP_RUNS_PER_DAY)
 }
 
 pub fn set_backup_runs_per_day(db: &Db, runs: i64) {
-    db.set_setting(BACKUP_RUNS_PER_DAY_KEY, &runs.max(1).to_string());
+    let runs = runs.clamp(*BACKUP_RUNS_PER_DAY_RANGE.start(), *BACKUP_RUNS_PER_DAY_RANGE.end());
+    db.set_setting(BACKUP_RUNS_PER_DAY_KEY, &runs.to_string());
+}
+
+/// What the settings accept for each budget key (`set_setting` validates with these). The readers
+/// above stay lenient with what is already stored.
+pub const DAILY_UNITS_RANGE: std::ops::RangeInclusive<i64> = 1..=1_000_000;
+pub const SAFETY_MARGIN_PERCENT_RANGE: std::ops::RangeInclusive<i64> = 0..=50;
+pub const BACKUP_RESERVE_UNITS_RANGE: std::ops::RangeInclusive<i64> = 0..=1_000_000;
+pub const BACKUP_RUNS_PER_DAY_RANGE: std::ops::RangeInclusive<i64> = 0..=24;
+
+/// The budget as the settings tab shows it: the stored choices as they read (defaults filled in)
+/// and today's partition of the quota.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct Snapshot {
+    pub daily_units: i64,
+    pub safety_margin_percent: i64,
+    pub safety_margin_units: i64,
+    /// The reserve in force (never below [`DEFAULT_MIN_BACKUP_RESERVE`]).
+    pub backup_reserve_units: i64,
+    pub backup_reserve_remaining_today: i64,
+    pub opportunistic_mode: bool,
+    pub backup_runs_per_day: i64,
+    pub spent_today: i64,
+    pub jobs_spent_today: i64,
+    pub backup_spent_today: i64,
+    pub available_for_jobs_now: i64,
+    /// The next quota reset (midnight Pacific), RFC 3339 UTC.
+    pub next_reset: String,
+}
+
+pub fn snapshot(db: &Db, now: DateTime<Utc>) -> rusqlite::Result<Snapshot> {
+    Ok(Snapshot {
+        daily_units: daily_units(db),
+        safety_margin_percent: safety_margin_percent(db),
+        safety_margin_units: safety_margin_units(db),
+        backup_reserve_units: backup_reserve_units(db),
+        backup_reserve_remaining_today: backup_reserve_remaining_today(db, now)?,
+        opportunistic_mode: opportunistic_mode(db),
+        backup_runs_per_day: backup_runs_per_day(db),
+        spent_today: spent_today(db, now)?,
+        jobs_spent_today: jobs_spent_today(db, now)?,
+        backup_spent_today: backup_spent_today(db, now)?,
+        available_for_jobs_now: available_for_jobs_now(db, now)?,
+        next_reset: rfc3339_text(crate::quota::next_reset_utc(now)),
+    })
 }
 
 /// `(units the monitor spent today, scheduled runs today)`. `monitor_runs` dates are epoch
@@ -187,9 +234,42 @@ mod tests {
         assert!(opportunistic_mode(&db));
         assert_eq!(backup_runs_per_day(&db), 1);
         db.set_setting(SAFETY_MARGIN_PERCENT_KEY, "banana");
-        db.set_setting(BACKUP_RUNS_PER_DAY_KEY, "0");
+        db.set_setting(BACKUP_RUNS_PER_DAY_KEY, "99");
         assert_eq!(safety_margin_percent(&db), 3, "unparseable reads as the default");
-        assert_eq!(backup_runs_per_day(&db), 1);
+        assert_eq!(backup_runs_per_day(&db), 1, "out of range reads as the default");
+        set_backup_runs_per_day(&db, 0);
+        assert_eq!(backup_runs_per_day(&db), 0, "no scheduled backup is a choice");
+        set_backup_runs_per_day(&db, 30);
+        assert_eq!(backup_runs_per_day(&db), 24);
+    }
+
+    #[test]
+    fn no_scheduled_backup_releases_the_reserve_at_once_when_opportunistic() {
+        let db = db();
+        set_backup_reserve_units(&db, 1000);
+        set_backup_runs_per_day(&db, 0);
+        assert_eq!(backup_reserve_remaining_today(&db, noon()).unwrap(), 0);
+        set_opportunistic_mode(&db, false);
+        assert_eq!(backup_reserve_remaining_today(&db, noon()).unwrap(), 1000);
+    }
+
+    #[test]
+    fn the_snapshot_reads_the_choices_and_the_partition() {
+        let db = db();
+        set_opportunistic_mode(&db, false);
+        crate::quota::record_units(&db, "playlistItems.insert", 50, None, None, noon()).unwrap();
+        let s = snapshot(&db, noon()).unwrap();
+        assert_eq!(
+            (s.daily_units, s.safety_margin_percent, s.safety_margin_units),
+            (10_000, 3, 300)
+        );
+        assert_eq!((s.backup_reserve_units, s.backup_reserve_remaining_today), (500, 500));
+        assert_eq!((s.spent_today, s.jobs_spent_today, s.backup_spent_today), (50, 0, 0));
+        // 10 000 - 300 - 500 - 50.
+        assert_eq!(s.available_for_jobs_now, 9150);
+        assert_eq!(s.next_reset, "2026-07-16T07:00:00Z");
+        assert!(!s.opportunistic_mode);
+        assert_eq!(s.backup_runs_per_day, 1);
     }
 
     #[test]

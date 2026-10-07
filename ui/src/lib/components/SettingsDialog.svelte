@@ -18,7 +18,8 @@
 		Alert02Icon,
 		LinkSquare02Icon,
 		DatabaseImportIcon,
-		Download04Icon
+		Download04Icon,
+		YoutubeIcon
 	} from '@hugeicons/core-free-icons';
 	import { Button } from '$lib/components/ui/button';
 	import { Input } from '$lib/components/ui/input';
@@ -89,6 +90,12 @@
 	import LyricsSourcesSettings from '$lib/components/LyricsSourcesSettings.svelte';
 	import LanguagePicker from '$lib/components/LanguagePicker.svelte';
 	import { APP_NAME, REPO_URL, UPSTREAM_VERSION } from '$lib/brand';
+	import YtDataStatusLine from '$lib/components/ytdata/StatusLine.svelte';
+	import ConnectGuide from '$lib/components/ytdata/ConnectGuide.svelte';
+	import YtDataAccounts from '$lib/components/ytdata/Accounts.svelte';
+	import EngineSettings from '$lib/components/ytdata/EngineSettings.svelte';
+	import LocalEchoSlider from '$lib/components/ytdata/LocalEchoSlider.svelte';
+	import BudgetSettings from '$lib/components/ytdata/BudgetSettings.svelte';
 
 	// `downloads` is only reached from the rail, so it is not one of the tabs others open onto.
 	type TabId = SettingsTab | 'downloads';
@@ -99,6 +106,8 @@
 		{ id: 'hotkeys', label: t('settings.tabs.hotkeys'), hint: t('settings.tabs.hotkeys_hint'), icon: KeyboardIcon },
 		{ id: 'discord', label: t('settings.tabs.discord'), hint: t('settings.tabs.discord_hint'), icon: DiscordIcon },
 		{ id: 'data', label: t('settings.tabs.data'), hint: t('settings.tabs.data_hint'), icon: Database02Icon },
+		// D31: the Data API's own tab (channels, guide, budget, engine, queue, local echo).
+		{ id: 'ytdata', label: t('settings.tabs.ytdata'), hint: t('settings.tabs.ytdata_hint'), icon: YoutubeIcon },
 		{
 			id: 'downloads',
 			label: t('settings.tabs.downloads'),
@@ -334,6 +343,25 @@
 	}
 	$effect(() => {
 		if (ui.settingsOpen && tab === 'import') untrack(loadImport);
+	});
+
+	// --- YouTube Data API tab ---
+	// The imported client is read here, once per visit, and shared: the guide replaces it, the
+	// channels list needs it to connect. The guide mounts only once it is known, so it opens itself
+	// when there is none.
+	let ytSecret = $state<api.ClientSecretInfo | null>(null);
+	let ytSecretLoaded = $state(false);
+	async function loadYtSecret() {
+		ytSecretLoaded = false;
+		try {
+			ytSecret = await api.ytdataClientSecretInfo();
+		} catch {
+			ytSecret = null;
+		}
+		ytSecretLoaded = true;
+	}
+	$effect(() => {
+		if (ui.settingsOpen && tab === 'ytdata') untrack(loadYtSecret);
 	});
 	async function migrateUpstream() {
 		migrateError = '';
@@ -1330,6 +1358,34 @@
 									tall: true
 								})}
 							</div>
+						</section>
+					{:else if tab === 'ytdata'}
+						<section class={GROUP}>
+							<YtDataStatusLine />
+						</section>
+						<section class={GROUP} id="settings-ytdata-connect">
+							<h3 class={LABEL}>{t('ytdata.settings.section_connect')}</h3>
+							{#if ytSecretLoaded}
+								<ConnectGuide bind:secret={ytSecret} />
+							{:else}
+								<p class="px-1 text-sm text-muted-foreground">{t('common.loading')}</p>
+							{/if}
+						</section>
+						<section class={GROUP} id="settings-ytdata-channels">
+							<h3 class={LABEL}>{t('ytdata.settings.section_channels')}</h3>
+							<YtDataAccounts secret={ytSecret} />
+						</section>
+						<section class={GROUP} id="settings-ytdata-engine">
+							<h3 class={LABEL}>{t('ytdata.settings.section_engine')}</h3>
+							<EngineSettings {settings} />
+						</section>
+						<section class={GROUP} id="settings-ytdata-echo">
+							<h3 class={LABEL}>{t('ytdata.settings.section_echo')}</h3>
+							<LocalEchoSlider {settings} />
+						</section>
+						<section class={GROUP} id="settings-ytdata-budget">
+							<h3 class={LABEL}>{t('ytdata.settings.section_budget')}</h3>
+							<BudgetSettings {settings} />
 						</section>
 					{:else if tab === 'downloads'}
 						<section class={GROUP}>

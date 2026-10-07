@@ -1,12 +1,13 @@
 // The YouTube Data API's status (src-tauri/src/ytdata_status.rs), kept current for every component
 // that shows a warning about it: read once on first use, then from `ytdata-status-changed`, which
-// the backend sends after each sync that went through the API and whenever its marks change.
+// the backend sends after each sync that went through the API, whenever its marks change, and after
+// the settings tab connects, disconnects or links a channel or imports a client secret.
 import * as api from './api';
-import type { YtDataStatus } from './api';
+import type { PlaylistEngine, YtDataStatus } from './api';
 import type { SettingsTab } from './player.svelte';
 
 /** The playlist engine setting, as `playlist_engine` stores it. */
-export type PlaylistEngine = 'auto' | 'ytdata' | 'innertube';
+export type { PlaylistEngine };
 
 export const ytdata = $state({
 	/** Null until the first answer arrives. */
@@ -29,11 +30,15 @@ export async function refreshYtData() {
 	try {
 		const [status, settings] = await Promise.all([api.ytdataStatus(), api.getSettings()]);
 		ytdata.status = status;
-		const engine = settings.playlist_engine;
-		ytdata.engine = engine === 'ytdata' || engine === 'innertube' ? engine : 'auto';
+		ytdata.engine = parseEngine(settings.playlist_engine);
 	} catch {
 		// Outside Tauri, or before the backend is up: no status, no warning.
 	}
+}
+
+/** `playlist_engine` as stored, anything unknown reading as `auto` (what the backend does too). */
+export function parseEngine(raw: string | undefined): PlaylistEngine {
+	return raw === 'ytdata' || raw === 'innertube' ? raw : 'auto';
 }
 
 /** Whether to warn about the Data API where its functions are used. Not when it works, and not
@@ -47,6 +52,11 @@ export function shouldWarn(status: YtDataStatus | null, engine: PlaylistEngine):
 	return true;
 }
 
-// Settings ▸ YouTube Data API arrives with the settings commit (27). Until `SettingsTab` names it,
-// the widening cast keeps this compiling, and the dialog opens on its default tab.
-export const YTDATA_TAB = 'ytdata' as string as SettingsTab;
+/** Whether a confirmation should show what a write costs on the Data API: when the API works, or
+ *  when this write asks for it explicitly (it would wait for quota or a reconnection then). */
+export function showsCost(status: YtDataStatus | null, choice: PlaylistEngine): boolean {
+	return choice === 'ytdata' || (choice === 'auto' && status?.state === 'ok');
+}
+
+/** Settings ▸ YouTube Data API, where "Configure" leads. */
+export const YTDATA_TAB: SettingsTab = 'ytdata';

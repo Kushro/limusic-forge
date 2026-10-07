@@ -132,6 +132,43 @@ pub fn resolve_engine(
     }
 }
 
+/// The values each setting of this module accepts, for `set_setting`'s validation.
+pub const PLAYLIST_ENGINE_VALUES: [&str; 3] = ["auto", "ytdata", "innertube"];
+pub const JOB_QUEUE_MODE_VALUES: [&str; 2] = ["unified", "ytdata_only"];
+
+/// A playlist write the confirmation dialogs price before it is made (`estimate_op`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OpKind {
+    Copy,
+    Move,
+    /// Taking rows out of a playlist (a plain removal or the duplicate finder's).
+    Remove,
+}
+
+impl OpKind {
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw.trim() {
+            "copy" => Some(OpKind::Copy),
+            "move" => Some(OpKind::Move),
+            "remove" | "dedupe" => Some(OpKind::Remove),
+            _ => None,
+        }
+    }
+}
+
+/// What `kind` on `rows` rows is expected to cost on the Data API, with the same estimates the
+/// dispatch uses to pick the engine (`planner`). `playlist_len` is the length of the playlist a
+/// removal reads to resolve its rows; unknown, it is taken as `rows`.
+pub fn estimate_units(kind: OpKind, rows: usize, playlist_len: Option<usize>) -> i64 {
+    use super::planner::{estimate_remove_units, estimate_transfer_units};
+    match kind {
+        OpKind::Copy => estimate_transfer_units(rows, false),
+        OpKind::Move => estimate_transfer_units(rows, true),
+        OpKind::Remove => estimate_remove_units(rows, playlist_len.unwrap_or(rows).max(rows)),
+    }
+}
+
 /// The engine a stored job runs on: its `params_json.engine`, or for a job written without one
 /// (PlaylistForge's, imported) the Data API when it names a channel.
 pub fn engine_of(job: &Job) -> Engine {
@@ -239,6 +276,27 @@ mod tests {
         db.set_setting(PLAYLIST_ENGINE_KEY, "bogus");
         assert_eq!(playlist_engine(&db), S::Auto);
         assert_eq!(Engine::parse(Engine::Ytdata.as_str()), Some(Engine::Ytdata));
+    }
+
+    #[test]
+    fn estimates_match_the_dispatch_and_kinds_parse() {
+        use crate::jobs::planner::{estimate_remove_units, estimate_transfer_units};
+        assert_eq!(estimate_units(OpKind::Copy, 3, None), 150);
+        assert_eq!(estimate_units(OpKind::Copy, 3, None), estimate_transfer_units(3, false));
+        assert_eq!(estimate_units(OpKind::Move, 3, None), estimate_transfer_units(3, true));
+        assert_eq!(estimate_units(OpKind::Remove, 2, None), estimate_remove_units(2, 2));
+        assert_eq!(estimate_units(OpKind::Remove, 2, Some(120)), estimate_remove_units(2, 120));
+        assert_eq!(
+            estimate_units(OpKind::Remove, 5, Some(1)),
+            estimate_remove_units(5, 5),
+            "a playlist is never shorter than what is taken out of it"
+        );
+        assert_eq!(OpKind::parse("move"), Some(OpKind::Move));
+        assert_eq!(OpKind::parse("dedupe"), Some(OpKind::Remove));
+        assert_eq!(OpKind::parse("split"), None);
+        for v in PLAYLIST_ENGINE_VALUES {
+            assert!(EngineSetting::parse(v).is_some(), "{v}");
+        }
     }
 
     #[test]

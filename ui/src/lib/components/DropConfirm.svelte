@@ -2,9 +2,12 @@
 	// What a drop on a sidebar playlist should do, asked next to the row it landed on: copy or move,
 	// and what to do with tracks the playlist already has. PlaylistForge's drop confirmation, as a
 	// popover instead of a bottom sheet, since the target is right there under the pointer.
+	// Below, the engine for this drop and what it costs on the Data API (`EngineChoice`).
 	import { HugeiconsIcon } from '@hugeicons/svelte';
 	import { Copy01Icon, SquareArrowRightDoubleIcon } from '@hugeicons/core-free-icons';
-	import type { BrowseItem } from '$lib/api';
+	import { isLocalPlaylist, withEngineChoice, type BrowseItem } from '$lib/api';
+	import type { PlaylistEngine } from '$lib/ytdata.svelte';
+	import EngineChoice from './ytdata/EngineChoice.svelte';
 	import type { TrackRowsDrag } from '$lib/dnd';
 	import { fitMenu, type Anchor } from '$lib/menu';
 	import { prefs, type DropDupes } from '$lib/player.svelte';
@@ -33,13 +36,22 @@
 		count === 1 ? t('drop.title_one', { playlist: target.title }) : t('drop.title', { count, playlist: target.title })
 	);
 	const choices = $derived<DropDupes[]>(canMove ? ['skip', 'allow', 'consolidate'] : ['skip', 'allow']);
+	/** This drop's engine, once the user picks one; unset follows `playlist_engine`. */
+	let engine = $state<PlaylistEngine | undefined>();
+	const priced = $derived([
+		{ label: t('drop.copy'), kind: 'copy' as const, rows: count, playlists: [target.id] },
+		...(drag.from
+			? [{ label: t('drop.move'), kind: 'move' as const, rows: count, playlists: [target.id, drag.from] }]
+			: [])
+	]);
 
 	async function go(mode: 'copy' | 'move') {
 		if (remember) rememberDrop(mode, dupes);
 		// Read before closing: closing unmounts this, and an unmounted component's props are gone.
-		const [d, to, policy] = [drag, target, dupes];
+		const [d, to, policy, choice] = [drag, target, dupes, engine];
 		onclose();
-		await transfer(d, to, mode, policy);
+		// `transfer` sends its write before its first await, which is all the choice has to cover.
+		await withEngineChoice(choice ?? null, () => transfer(d, to, mode, policy));
 	}
 
 	function onKey(e: KeyboardEvent) {
@@ -101,4 +113,7 @@
 		<Checkbox bind:checked={remember} />
 		{t('drop.remember')}
 	</label>
+	{#if !isLocalPlaylist(target.id)}
+		<EngineChoice bind:choice={engine} ops={priced} />
+	{/if}
 </div>
