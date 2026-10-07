@@ -11,6 +11,7 @@ mod db;
 mod diagnostics;
 mod discord;
 mod download;
+mod headless;
 mod hotkeys;
 mod http;
 mod import;
@@ -45,6 +46,7 @@ mod tray;
 mod videoproxy;
 mod webview;
 mod winstate;
+mod wintask;
 mod ytdata_accounts;
 mod ytdata_secrets;
 mod ytdata_status;
@@ -335,10 +337,24 @@ fn should_start_minimized(db: &Db) -> bool {
         && tray::available()
 }
 
+/// The app's Tauri context, built once: the headless check (headless.rs) and the app share it, so
+/// the frontend's assets are embedded a single time.
+fn context() -> tauri::Context<tauri::Wry> {
+    tauri::generate_context!()
+}
+
 /// Tauri entry point. Applies the platform boot fixes (open-fd limit, NVIDIA/WebKit env), restores
 /// the persisted session, wires every command and plugin, and runs the event loop. context/01
 /// §startup.
 pub fn run() {
+    // `--monitor` (the Windows scheduled task, wintask.rs) checks the playlists with no window
+    // and exits; with the app already open, the single-instance plugin hands it over instead (D26).
+    // Not on macOS, whose config would create a window for it.
+    #[cfg(not(target_os = "macos"))]
+    if let Some(args) = headless::parse_args(std::env::args_os()) {
+        headless::run(args, context());
+    }
+
     // Must happen before any webview exists: the limit is inherited by the web processes WebKit
     // forks, and cannot be raised for them afterwards.
     #[cfg(target_os = "linux")]
@@ -435,6 +451,11 @@ pub fn run() {
     //     LIMUSIC_MULTI=1 XDG_DATA_HOME=/tmp/limusic-b ./target/debug/limusic-forge
     if std::env::var_os("LIMUSIC_MULTI").is_none() {
         builder = builder.plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+            // The scheduled task's `--monitor` runs the check here, window left as it is (D26).
+            if headless::forwarded(&args) == headless::Forwarded::Monitor {
+                headless::delegated_monitor(app);
+                return;
+            }
             tray::show_main(app);
             // `limusic-forge <link>` against this instance (#348). argv[0] leads on every platform.
             if args.len() > 1 {
@@ -1182,6 +1203,9 @@ pub fn run() {
             commands::quota_today,
             commands::quota_history,
             commands::budget_partition,
+            commands::wintask_status,
+            commands::wintask_register,
+            commands::wintask_unregister,
         ])
         .on_window_event(|window, event| {
             // Close-to-tray: ✕ hides the main window and playback keeps running; real quit is
@@ -1218,7 +1242,7 @@ pub fn run() {
                 }
             }
         })
-        .build(tauri::generate_context!())
+        .build(context())
         .expect("error while building tauri application")
         .run(|handle, event| {
             // The hidden cipher/PoToken webviews are windows too, so closing the main window no

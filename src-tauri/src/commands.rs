@@ -4384,6 +4384,52 @@ pub async fn budget_partition(
     crate::jobs::control::budget_partition(&state.db, chrono::Utc::now()).map_err(db_err)
 }
 
+// --- headless monitor and Windows task ---
+
+/// The Windows scheduled task that runs `--monitor --all` once a day (wintask.rs): whether it is
+/// registered, when it runs next, the time in `monitor.schedule_time`, and whether it still runs
+/// this exe (a portable copy that moved). `supported: false` off Windows.
+#[tauri::command]
+pub async fn wintask_status(state: St<'_>) -> Result<crate::wintask::WinTaskStatus, String> {
+    let time = crate::wintask::schedule_time(&state.db);
+    tauri::async_runtime::spawn_blocking(move || crate::wintask::status(time))
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Register (or re-register) the task to run this exe daily at `time` (`HH:MM`, local), and keep
+/// the time in `monitor.schedule_time`. `Err("bad_time")` for anything but `H:MM`/`HH:MM`,
+/// `Err("unsupported")` off Windows; otherwise `schtasks`' own message.
+#[tauri::command]
+pub async fn wintask_register(
+    state: St<'_>,
+    time: String,
+) -> Result<crate::wintask::WinTaskStatus, String> {
+    let time = crate::wintask::normalize_time(&time).ok_or("bad_time")?;
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let at = time.clone();
+    tauri::async_runtime::spawn_blocking(move || crate::wintask::register(&exe, &at))
+        .await
+        .map_err(|e| e.to_string())??;
+    state.db.set_setting(crate::wintask::SCHEDULE_TIME_KEY, &time);
+    tauri::async_runtime::spawn_blocking(move || crate::wintask::status(time))
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Remove the task; not being registered is no error. Only "LiMusic Forge Monitor", never
+/// PlaylistForge's. The time setting stays, for registering again.
+#[tauri::command]
+pub async fn wintask_unregister(state: St<'_>) -> Result<crate::wintask::WinTaskStatus, String> {
+    tauri::async_runtime::spawn_blocking(crate::wintask::unregister)
+        .await
+        .map_err(|e| e.to_string())??;
+    let time = crate::wintask::schedule_time(&state.db);
+    tauri::async_runtime::spawn_blocking(move || crate::wintask::status(time))
+        .await
+        .map_err(|e| e.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

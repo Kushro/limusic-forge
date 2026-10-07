@@ -1785,3 +1785,29 @@ export const onJobsChanged = (cb: (jobId: number) => void): Promise<UnlistenFn> 
 /** Data API units were spent. */
 export const onQuotaChanged = (cb: () => void): Promise<UnlistenFn> =>
 	listen('quota-changed', () => cb());
+
+// --- headless monitor and Windows task ---
+// The Windows scheduled task that runs `limusic-forge --monitor --all` daily (src-tauri/src/
+// wintask.rs). Dates are as Windows printed them, in its own language and format.
+export type WinTaskStatus = {
+	/** `false` off Windows: there is no task to register. */
+	supported: boolean;
+	registered: boolean;
+	/** `HH:MM`, local: the time registering uses (`monitor.schedule_time`). */
+	schedule_time: string;
+	next_run: string | null;
+	status: string | null;
+	last_run: string | null;
+	last_result: string | null;
+	/** The exe the task runs, and this one's. */
+	registered_exe: string | null;
+	current_exe: string | null;
+	/** The task runs another copy (a portable folder that moved): register again to fix it. */
+	exe_moved: boolean;
+	/** Why the Task Scheduler could not be asked. */
+	error: string | null;
+};
+export const wintaskStatus = () => invoke<WinTaskStatus>('wintask_status');
+/** Register (or move) the task to run this copy daily at `time` (`HH:MM`). */
+export const wintaskRegister = (time: string) => invoke<WinTaskStatus>('wintask_register', { time });
+export const wintaskUnregister = () => invoke<WinTaskStatus>('wintask_unregister');

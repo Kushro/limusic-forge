@@ -1,4 +1,24 @@
 {
+	"schedule": {
+		"section": "Daily check (Windows)",
+		"hint": "Windows starts LiMusic Forge once a day to check your playlists and back them up, even with the app closed. If the app is open then, it runs the check itself.",
+		"time": "Time",
+		"time_hint": "Every day at this time, in this computer's time zone.",
+		"bad_time": "Enter the time as HH:MM.",
+		"register": "Register",
+		"update": "Update",
+		"unregister": "Remove",
+		"registered": "Registered",
+		"not_registered": "Not registered",
+		"next_run": "Next run: {time}",
+		"last_run": "Last run: {time} (result {result})",
+		"moved": "The task starts {registered}, not this copy ({current}).",
+		"repoint": "Point it here",
+		"unsupported": "The daily check is only available on Windows.",
+		"query_failed": "Could not ask Windows about the task: {error}",
+		"advance_jobs": "Advance the job queue too",
+		"advance_jobs_hint": "After the check, the daily run also works through queued playlist jobs as far as today's quota allows. InnerTube jobs stop if YouTube asks to slow down, and wait for the next run."
+	},
 	"selection": {
 		"actions": "Selected track actions",
 		"count": "{count} selected",

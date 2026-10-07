@@ -96,6 +96,7 @@
 	import EngineSettings from '$lib/components/ytdata/EngineSettings.svelte';
 	import LocalEchoSlider from '$lib/components/ytdata/LocalEchoSlider.svelte';
 	import BudgetSettings from '$lib/components/ytdata/BudgetSettings.svelte';
+	import ScheduleSettings from '$lib/components/ytdata/ScheduleSettings.svelte';
 
 	// `downloads` is only reached from the rail, so it is not one of the tabs others open onto.
 	type TabId = SettingsTab | 'downloads';
@@ -1386,6 +1387,10 @@
 						<section class={GROUP} id="settings-ytdata-budget">
 							<h3 class={LABEL}>{t('ytdata.settings.section_budget')}</h3>
 							<BudgetSettings {settings} />
+						</section>
+						<section class={GROUP} id="settings-ytdata-schedule">
+							<h3 class={LABEL}>{t('schedule.section')}</h3>
+							<ScheduleSettings {settings} />
 						</section>
 					{:else if tab === 'downloads'}
 						<section class={GROUP}>

@@ -60,3 +60,41 @@ pub fn track_changed(app: &AppHandle, title: &str, artists: &str) {
         }
     });
 }
+
+/// A playlist check (headless.rs) found something: one toast, its text already in the user's
+/// language (D33). Unlike [`track_changed`] it is not a preference: alerts are what the check is
+/// for. Skipped while a LiMusic Forge window has focus, where the alerts badge already says it.
+/// `wait`: show it before returning, for a headless run that exits right after; otherwise off the
+/// calling thread.
+pub fn monitor_toast(app: &AppHandle, title: &str, body: &str, wait: bool) {
+    if app.webview_windows().values().any(|w| w.is_focused().unwrap_or(false)) {
+        return;
+    }
+    let mut n = notify_rust::Notification::new();
+    n.summary(title).body(body).appname(crate::brand::APP_NAME);
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        n.auto_icon();
+    }
+    // As in `track_changed`: only the installer registers the AppUserModelID a toast needs.
+    #[cfg(target_os = "windows")]
+    if !tauri::is_dev() && !crate::paths::is_portable() {
+        n.app_id(&app.config().identifier);
+    }
+    #[cfg(target_os = "macos")]
+    let _ = notify_rust::set_application(if tauri::is_dev() {
+        "com.apple.Terminal"
+    } else {
+        &app.config().identifier
+    });
+    let show = move || {
+        if let Err(e) = n.show() {
+            tracing::warn!("monitor notification: {e}");
+        }
+    };
+    if wait {
+        show();
+    } else {
+        std::thread::spawn(show);
+    }
+}
