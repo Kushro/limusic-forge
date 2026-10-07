@@ -1,6 +1,7 @@
 // node --experimental-strip-types ui/src/lib/facets.check.ts
 import type { SongItem } from './api.ts';
 import {
+	addedDate,
 	applyFacets,
 	artistCounts,
 	dayToSecs,
@@ -74,6 +75,18 @@ ok(ids(applyFacets(g, { ...NO_FACETS, spread: 'one', status: 'available', seenTo
 ok(facetsActive({ ...NO_FACETS, seenTo: 0 }) && facetsActive({ ...NO_FACETS, spread: 'one' }), 'New facets count as active');
 // On a playlist page there is no global context: those facets have nothing to go on.
 ok(ids(applyFacets(g, { ...NO_FACETS, playlists: ['VL9'], spread: 'several', seenFrom: 999 }, ctx)) === 'pqru', 'No context: skipped');
+// Date added: the Data API's date where it has one, else first seen; songs with neither left out.
+const added: Record<string, number | null> = { p: 400, q: null, r: 50, u: null };
+const actx = { ...gctx, addedAt: (v: string) => added[v] ?? null };
+ok(addedDate('p', actx) === 400 && addedDate('q', actx) === 200 && addedDate('r', actx) === 50, 'Added date, else first seen');
+ok(addedDate('r', gctx) === null && addedDate('u', {}) === null, 'Neither date: null');
+ok(ids(applyFacets(g, { ...NO_FACETS, addedFrom: 250 }, actx)) === 'pu', 'Added since: the real date wins over first seen');
+ok(ids(applyFacets(g, { ...NO_FACETS, addedTo: 200 }, actx)) === 'qr', 'Added until, inclusive, falling back to first seen');
+ok(ids(applyFacets(g, { ...NO_FACETS, addedFrom: 300, addedTo: 400 }, actx)) === 'pu', 'Added between');
+ok(ids(applyFacets(g, { ...NO_FACETS, addedTo: 250 }, gctx)) === 'pq', 'No Data API dates: first seen alone');
+ok(ids(applyFacets(g, { ...NO_FACETS, addedFrom: 1, seenTo: 150 }, actx)) === 'p', 'Added and first seen combine');
+ok(facetsActive({ ...NO_FACETS, addedFrom: 0 }) && facetsActive({ ...NO_FACETS, addedTo: 0 }), 'Date added counts as active');
+ok(ids(applyFacets(g, { ...NO_FACETS, addedFrom: 999 }, ctx)) === 'pqru', 'No dates in the context: skipped');
 // Downloaded: by the host's callback, which a page without download state does not pass.
 const dctx = { ...gctx, downloaded: (v: string) => v === 'q' || v === 'u' };
 ok(ids(applyFacets(g, { ...NO_FACETS, downloaded: 'yes' }, dctx)) === 'qu', 'Downloaded only');

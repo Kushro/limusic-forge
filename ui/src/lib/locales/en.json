@@ -242,7 +242,12 @@
 		"downloaded_all": "Downloaded or not",
 		"downloaded_yes": "Downloaded only",
 		"downloaded_no": "Not downloaded",
-		"downloaded_hint": "Click to switch: every song, those with a downloaded file, those without one."
+		"downloaded_hint": "Click to switch: every song, those with a downloaded file, those without one.",
+		"added": "Date added",
+		"added_from": "Added since {from}",
+		"added_to": "Added until {to}",
+		"added_range": "Added {from} – {to}",
+		"added_hint": "When the song was added to a playlist of yours, as the YouTube Data API reports it. Songs it has not read yet go by the date they were first seen instead. Leave a side empty for no limit; songs with neither date are left out."
 	},
 	"downloads": {
 		"download": "Download",
@@ -1177,7 +1182,12 @@
 			"artwork_note": "Artwork applies here at once and uploads to YouTube Music in the background. Square JPEG or PNG works best.",
 			"pick_artwork": "Choose playlist artwork",
 			"image_filter": "Images",
-			"local_artwork_note": "Artwork stays on this computer. Square JPEG or PNG works best."
+			"local_artwork_note": "Artwork stays on this computer. Square JPEG or PNG works best.",
+			"synced_privacy": "On YouTube: {privacy}",
+			"synced_privacy_hint": "As of the last sync through the YouTube Data API. Unlisted playlists show as private in the switch above.",
+			"privacy_public": "Public",
+			"privacy_unlisted": "Unlisted",
+			"privacy_private": "Private"
 		},
 		"share": {
 			"title": "Share",
@@ -1591,5 +1601,25 @@
 			"later": "Later (Settings)",
 			"no": "No"
 		}
+	},
+	"ytdata": {
+		"title": "YouTube Data API",
+		"configure": "Configure",
+		"state": {
+			"not_configured": "The YouTube Data API is not set up.",
+			"api_disabled": "The YouTube Data API is turned off in your Google Cloud project. Enable \"YouTube Data API v3\" for the project, then sync again.",
+			"needs_auth": "The YouTube Data API needs you to connect your channel again.",
+			"quota_exhausted": "Today's YouTube Data API quota is used up. Syncs read through YouTube Music until it resets."
+		},
+		"reason": {
+			"no_client_secret": "Import the client_secret.json of your Google Cloud project to use it.",
+			"no_account_for_active": "No YouTube channel is connected to it for the account you are signed in with.",
+			"keyring_unavailable": "There is no system keyring to keep its sign-in in, so it stays off. On Linux, install and unlock a Secret Service, such as GNOME Keyring (gnome-keyring) or KWallet (with kwallet-pam), log out and back in, then restart the app. Nothing is ever saved in clear text instead.",
+			"invalid_grant": "Google no longer accepts the sign-in of {account}. Connect it again.",
+			"no_refresh_token": "No sign-in is saved for {account}. Connect it again.",
+			"secret_undecryptable": "The saved sign-in of {account} cannot be read on this computer (another Windows user or machine saved it). Connect it again."
+		},
+		"quota_detail": "{spent} of {daily} units used today. Resets at {reset}.",
+		"your_channel": "your channel"
 	}
 }

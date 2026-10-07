@@ -1,7 +1,8 @@
 // Narrowing a track list by more than a search box: artist, length, duplicates, songs vs music
 // videos, and a regex mode for the search itself. PlaylistForge's playlist filters, as chips under
-// the playlist header; Library ▸ In your playlists adds which playlists, availability, first seen
-// and spread, and downloaded where the host knows. Every facet combines with the others (AND).
+// the playlist header; Library ▸ In your playlists adds which playlists, availability, first seen,
+// date added (the Data API's real date, else first seen), spread, and downloaded where the host
+// knows. Every facet combines with the others (AND).
 // Pure, so `facets.check.ts`
 // runs it under plain Node.
 import type { SongItem } from './api';
@@ -25,6 +26,11 @@ export type Facets = {
 	 *  no known first-seen date are left out. */
 	seenFrom: number | null;
 	seenTo: number | null;
+	/** Date-added bounds in epoch seconds, inclusive; null for no bound. The real date a song was added
+	 *  to a playlist (`FacetContext.addedAt`, from the Data API), or its first-seen date where that is
+	 *  not known. With either bound set, songs with neither date are left out. */
+	addedFrom: number | null;
+	addedTo: number | null;
 	/** `several`: in two or more of your playlists. `one`: in exactly one. */
 	spread: 'all' | 'several' | 'one';
 	/** Whether the video has a downloaded file, by `FacetContext.downloaded`; skipped without it. */
@@ -41,6 +47,8 @@ export const NO_FACETS: Facets = {
 	status: 'all',
 	seenFrom: null,
 	seenTo: null,
+	addedFrom: null,
+	addedTo: null,
 	spread: 'all',
 	downloaded: 'all'
 };
@@ -56,6 +64,8 @@ export function facetsActive(f: Facets): boolean {
 		f.status !== 'all' ||
 		f.seenFrom !== null ||
 		f.seenTo !== null ||
+		f.addedFrom !== null ||
+		f.addedTo !== null ||
 		f.spread !== 'all' ||
 		f.downloaded !== 'all'
 	);
@@ -107,6 +117,10 @@ export type FacetContext = {
 	/** When a video was first seen in any playlist, epoch seconds or null. Without it the first-seen
 	 *  range is skipped. */
 	firstSeen?: (videoId: string) => number | null;
+	/** When a video was added to one of your playlists, epoch seconds, as the Data API reported it;
+	 *  null where it has not said. The date-added range falls back to `firstSeen` there, and is
+	 *  skipped when neither is given. */
+	addedAt?: (videoId: string) => number | null;
 	/** Whether a video has a downloaded file. Without it the `downloaded` facet is skipped. */
 	downloaded?: (videoId: string) => boolean;
 };
@@ -163,14 +177,25 @@ export function sortEverywhere<T extends { song: SongItem; first_seen: number | 
 	return [...rows].sort(cmp);
 }
 
+/** The date a song was added to your playlists: the Data API's (`addedAt`) when it has one, else the
+ *  first time a sync saw it there (`firstSeen`), else null. */
+export function addedDate(
+	videoId: string,
+	ctx: Pick<FacetContext, 'addedAt' | 'firstSeen'>
+): number | null {
+	return ctx.addedAt?.(videoId) ?? ctx.firstSeen?.(videoId) ?? null;
+}
+
 export function applyFacets<T extends SongItem>(items: T[], f: Facets, ctx: FacetContext): T[] {
 	if (!facetsActive(f)) return items;
 	const artists = new Set(f.artists);
 	const lo = f.minMin === null ? null : f.minMin * 60;
 	const hi = f.maxMin === null ? null : f.maxMin * 60;
 	const lists = new Set(f.playlists);
-	const { playlistsOf, firstSeen, downloaded } = ctx;
+	const { playlistsOf, firstSeen, addedAt, downloaded } = ctx;
 	const ranged = f.seenFrom !== null || f.seenTo !== null;
+	const addedRanged = f.addedFrom !== null || f.addedTo !== null;
+	const dated = addedAt || firstSeen;
 	return items.filter((s) => {
 		if (downloaded && f.downloaded !== 'all' && downloaded(s.video_id) !== (f.downloaded === 'yes'))
 			return false;
@@ -185,6 +210,11 @@ export function applyFacets<T extends SongItem>(items: T[], f: Facets, ctx: Face
 		if (ranged && firstSeen) {
 			const at = firstSeen(s.video_id);
 			if (at === null || (f.seenFrom !== null && at < f.seenFrom) || (f.seenTo !== null && at > f.seenTo))
+				return false;
+		}
+		if (addedRanged && dated) {
+			const at = addedDate(s.video_id, ctx);
+			if (at === null || (f.addedFrom !== null && at < f.addedFrom) || (f.addedTo !== null && at > f.addedTo))
 				return false;
 		}
 		if (artists.size && !artists.has(fold(primaryArtist(s.artists)))) return false;

@@ -1107,6 +1107,49 @@ impl Db {
         }
     }
 
+    /// The dates the Data API gave for when each track was added to the playlist (`videoId` →
+    /// epoch seconds), written on the playlist's index rows. A track the map leaves out keeps the
+    /// date it had (an InnerTube rewrite keeps them too, see [`replace_playlist_rows`]); a row the
+    /// index does not hold is not created. Write the index first.
+    pub fn set_playlist_added_at(
+        &self,
+        playlist_id: &str,
+        dates: &std::collections::HashMap<String, i64>,
+    ) {
+        let mut conn = self.0.lock().unwrap();
+        let Ok(tx) = conn.transaction() else { return };
+        let written = (|| -> rusqlite::Result<()> {
+            let mut stmt = tx.prepare(
+                "UPDATE playlist_track SET added_at = ?3 WHERE playlist_id = ?1 AND video_id = ?2",
+            )?;
+            for (video_id, at) in dates {
+                stmt.execute(rusqlite::params![playlist_id, video_id, at])?;
+            }
+            Ok(())
+        })();
+        if written.is_ok() {
+            let _ = tx.commit();
+        }
+    }
+
+    /// `videoId` → the earliest known date it was added to one of your playlists (epoch seconds,
+    /// from the Data API's `snippet.publishedAt`). Liked Music is left out, as in the "In your
+    /// playlists" view; tracks with no known date are absent.
+    pub fn playlist_added_dates(&self) -> std::collections::HashMap<String, i64> {
+        let conn = self.0.lock().unwrap();
+        let mut out = std::collections::HashMap::new();
+        let liked = crate::commands::LIKED_MUSIC_ID;
+        if let Ok(mut stmt) = conn.prepare(
+            "SELECT video_id, MIN(added_at) FROM playlist_track \
+             WHERE added_at IS NOT NULL AND playlist_id <> ?1 GROUP BY video_id",
+        ) {
+            if let Ok(rows) = stmt.query_map([liked], |r| Ok((r.get::<_, String>(0)?, r.get(1)?))) {
+                out.extend(rows.flatten());
+            }
+        }
+        out
+    }
+
     /// One track now in a playlist, with its metadata (an add made in this app), first seen now
     /// unless the index already had it.
     pub fn put_playlist_song(&self, playlist_id: &str, video_id: &str, json: &str) {
@@ -2154,6 +2197,38 @@ pub struct PlaylistSync {
     pub added: i64,
     pub removed: i64,
     pub moved: i64,
+    /// The privacy the last Data API sync read (InnerTube does not say). `None` writes nothing:
+    /// a later InnerTube sync keeps what the Data API stored.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub privacy: Option<Privacy>,
+}
+
+/// A playlist's `status.privacyStatus`, as `playlist_sync.privacy` stores it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Privacy {
+    Public,
+    Unlisted,
+    Private,
+}
+
+impl Privacy {
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "public" => Some(Privacy::Public),
+            "unlisted" => Some(Privacy::Unlisted),
+            "private" => Some(Privacy::Private),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Privacy::Public => "public",
+            Privacy::Unlisted => "unlisted",
+            Privacy::Private => "private",
+        }
+    }
 }
 
 /// What the `videos` table knows about a video. `None` leaves a known value as it is.
@@ -2629,17 +2704,19 @@ impl Db {
     ) -> rusqlite::Result<()> {
         let conn = self.0.lock().unwrap();
         conn.execute(
-            "INSERT INTO playlist_sync(playlist_id, synced_at, item_count, added, removed, moved) \
-             VALUES(?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT(playlist_id) DO UPDATE SET \
+            "INSERT INTO playlist_sync(playlist_id, synced_at, item_count, added, removed, moved, \
+             privacy) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7) ON CONFLICT(playlist_id) DO UPDATE SET \
              synced_at = excluded.synced_at, item_count = excluded.item_count, \
-             added = excluded.added, removed = excluded.removed, moved = excluded.moved",
+             added = excluded.added, removed = excluded.removed, moved = excluded.moved, \
+             privacy = COALESCE(excluded.privacy, playlist_sync.privacy)",
             rusqlite::params![
                 playlist_id,
                 sync.synced_at,
                 sync.item_count,
                 sync.added,
                 sync.removed,
-                sync.moved
+                sync.moved,
+                sync.privacy.map(Privacy::as_str)
             ],
         )?;
         Ok(())
@@ -2650,15 +2727,18 @@ impl Db {
         let conn = self.0.lock().unwrap();
         let mut out = std::collections::HashMap::new();
         if let Ok(mut stmt) = conn.prepare(
-            "SELECT playlist_id, synced_at, item_count, added, removed, moved FROM playlist_sync",
+            "SELECT playlist_id, synced_at, item_count, added, removed, moved, privacy \
+             FROM playlist_sync",
         ) {
             if let Ok(rows) = stmt.query_map([], |r| {
+                let privacy: Option<String> = r.get(6)?;
                 let sync = PlaylistSync {
                     synced_at: r.get(1)?,
                     item_count: r.get(2)?,
                     added: r.get(3)?,
                     removed: r.get(4)?,
                     moved: r.get(5)?,
+                    privacy: privacy.as_deref().and_then(Privacy::parse),
                 };
                 Ok((r.get::<_, String>(0)?, sync))
             }) {
@@ -4279,7 +4359,14 @@ mod tests {
         };
         d.set_playlist_songs_at("VL1", &songs(&["a", "b"]), 100);
         assert_eq!(first_seen(&d, "VL1", "a"), None, "a first read cannot date anything");
-        let sync = PlaylistSync { synced_at: 1, item_count: 2, added: 0, removed: 0, moved: 0 };
+        let sync = PlaylistSync {
+            synced_at: 1,
+            item_count: 2,
+            added: 0,
+            removed: 0,
+            moved: 0,
+            privacy: None,
+        };
         d.set_playlist_sync("VL1", &sync).unwrap();
 
         d.set_playlist_songs_at("VL1", &songs(&["b", "c"]), 200);
@@ -4306,7 +4393,14 @@ mod tests {
             ids.iter().map(|v| (v.to_string(), json.to_string())).collect()
         };
         d.set_playlist_songs_at("VL1", &songs(&["a", "b", "c"], "{}"), 100);
-        let sync = PlaylistSync { synced_at: 100, item_count: 3, added: 0, removed: 0, moved: 0 };
+        let sync = PlaylistSync {
+            synced_at: 100,
+            item_count: 3,
+            added: 0,
+            removed: 0,
+            moved: 0,
+            privacy: None,
+        };
         d.set_playlist_sync("VL1", &sync).unwrap();
         d.set_playlist_songs_at("VL1", &songs(&["a", "b", "c"], "{}"), 150);
         // Cut short after the first page: a re-read and a newcomer, nothing taken away.
@@ -4392,7 +4486,14 @@ mod tests {
     #[test]
     fn snapshots_outlive_forget_retain_and_sign_out_but_sync_records_do_not() {
         let d = db();
-        let sync = PlaylistSync { synced_at: 1, item_count: 1, added: 1, removed: 0, moved: 0 };
+        let sync = PlaylistSync {
+            synced_at: 1,
+            item_count: 1,
+            added: 1,
+            removed: 0,
+            moved: 0,
+            privacy: None,
+        };
         for pl in ["VL1", "VL2", "VL3"] {
             d.put_snapshot_if_changed(pl, Some("acc"), None, 1, &[snap("a")]).unwrap();
             d.set_playlist_sync(pl, &sync).unwrap();
@@ -4420,7 +4521,14 @@ mod tests {
         d.put_snapshot_if_changed("VL2", None, None, 1, &[snap("a")]).unwrap();
         d.put_snapshot_if_changed("VL2", None, None, 2, &[snap("b")]).unwrap();
         d.put_snapshot_if_changed("VL1", None, None, 1, &[snap("a")]).unwrap();
-        let sync = PlaylistSync { synced_at: 1, item_count: 1, added: 0, removed: 0, moved: 0 };
+        let sync = PlaylistSync {
+            synced_at: 1,
+            item_count: 1,
+            added: 0,
+            removed: 0,
+            moved: 0,
+            privacy: None,
+        };
         d.set_playlist_sync("VL1", &sync).unwrap();
         d.set_playlist_sync("VL3", &sync).unwrap();
         d.forget_playlist("VL1");
@@ -4446,7 +4554,14 @@ mod tests {
         let grey = r#"{"video_id":"a","title":"A","artists":"","unavailable":true}"#;
         d.set_playlist_songs("VL1", &[("a".into(), grey.into()), ("b".into(), "{}".into())]);
         d.set_playlist_songs("VL2", &[("a".into(), "{}".into())]);
-        let sync = PlaylistSync { synced_at: 1, item_count: 0, added: 0, removed: 0, moved: 0 };
+        let sync = PlaylistSync {
+            synced_at: 1,
+            item_count: 0,
+            added: 0,
+            removed: 0,
+            moved: 0,
+            privacy: None,
+        };
         d.set_playlist_sync("VL1", &sync).unwrap();
         // Synced, but empty: no index rows, still a playlist.
         d.set_playlist_sync("VL3", &sync).unwrap();
@@ -4763,6 +4878,46 @@ mod tests {
         };
         assert_eq!(added("a"), Some(1234), "kept across the rewrite");
         assert_eq!(added("b"), None, "a new track's date is unknown until the Data API says");
+        // The Data API's dates land on the rows it names; the others keep theirs.
+        let dates: std::collections::HashMap<String, i64> =
+            [("b".to_owned(), 500), ("zz".to_owned(), 9)].into();
+        d.set_playlist_added_at("VL1", &dates);
+        assert_eq!((added("a"), added("b")), (Some(1234), Some(500)));
+        assert_eq!(d.playlist_songs("VL1").len(), 2, "no row made up for a track not indexed");
+        // An InnerTube rewrite (no dates) keeps both.
+        d.set_playlist_songs_at("VL1", &[song("a"), song("b")], 30);
+        assert_eq!((added("a"), added("b")), (Some(1234), Some(500)));
+        // The earliest date per song across playlists, Liked Music aside.
+        d.set_playlist_songs_at("VL2", &[song("a")], 30);
+        d.set_playlist_added_at("VL2", &[("a".to_owned(), 100)].into());
+        d.set_playlist_songs_at("VLLM", &[song("b")], 30);
+        d.set_playlist_added_at("VLLM", &[("b".to_owned(), 1)].into());
+        let earliest = d.playlist_added_dates();
+        assert_eq!((earliest.get("a"), earliest.get("b")), (Some(&100), Some(&500)));
+    }
+
+    #[test]
+    fn privacy_is_kept_until_the_data_api_says_otherwise() {
+        let d = db();
+        let sync = |privacy| PlaylistSync {
+            synced_at: 1,
+            item_count: 0,
+            added: 0,
+            removed: 0,
+            moved: 0,
+            privacy,
+        };
+        d.set_playlist_sync("VL1", &sync(None)).unwrap();
+        assert_eq!(d.playlist_syncs()["VL1"].privacy, None, "unknown until read");
+        d.set_playlist_sync("VL1", &sync(Some(Privacy::Unlisted))).unwrap();
+        d.set_playlist_sync("VL1", &sync(None)).unwrap();
+        assert_eq!(d.playlist_syncs()["VL1"].privacy, Some(Privacy::Unlisted), "kept");
+        d.set_playlist_sync("VL1", &sync(Some(Privacy::Public))).unwrap();
+        assert_eq!(d.playlist_syncs()["VL1"].privacy, Some(Privacy::Public));
+        assert_eq!(Privacy::parse("PRIVATE"), Some(Privacy::Private));
+        assert_eq!(Privacy::parse("secret"), None);
+        let json = serde_json::to_value(d.playlist_syncs()["VL1"]).unwrap();
+        assert_eq!(json["privacy"], "public");
     }
 }
 

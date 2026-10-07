@@ -47,6 +47,8 @@ mod webview;
 mod winstate;
 mod ytdata_accounts;
 mod ytdata_secrets;
+mod ytdata_status;
+mod ytdata_sync;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -1046,6 +1048,8 @@ pub fn run() {
             commands::sync_playlist,
             commands::last_sync_summary,
             commands::playlist_sync_info,
+            commands::playlist_added_dates,
+            commands::ytdata_status,
             commands::unseen_alert_count,
             commands::monitor_stats,
             commands::monitor_runs,

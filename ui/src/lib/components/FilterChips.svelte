@@ -13,7 +13,8 @@
 
 	// `global`: Library ▸ In your playlists, where each song is listed once with the playlists
 	// holding it. Swaps "in here twice / also elsewhere" (one copy per song there) for which
-	// playlists, availability, first seen and spread; `playlists` lists the ones to choose from.
+	// playlists, availability, first seen, date added and spread; `playlists` lists the ones to
+	// choose from.
 	let {
 		facets = $bindable(),
 		regex = $bindable(false),
@@ -102,6 +103,15 @@
 				: facets.seenFrom === null
 					? t('facets.seen_to', { to: day(facets.seenTo) })
 					: t('facets.seen_range', { from: day(facets.seenFrom), to: day(facets.seenTo) })
+	);
+	const addedLabel = $derived(
+		facets.addedFrom === null && facets.addedTo === null
+			? t('facets.added')
+			: facets.addedTo === null
+				? t('facets.added_from', { from: day(facets.addedFrom ?? 0) })
+				: facets.addedFrom === null
+					? t('facets.added_to', { to: day(facets.addedTo) })
+					: t('facets.added_range', { from: day(facets.addedFrom), to: day(facets.addedTo) })
 	);
 </script>
 
@@ -202,6 +212,34 @@
 						class="h-8 flex-1"
 						value={secsToDay(facets.seenTo)}
 						onchange={(e) => (facets = { ...facets, seenTo: dayToSecs(e.currentTarget.value, true) })}
+						aria-label={t('facets.to')}
+					/>
+				</div>
+			</Popover.Content>
+		</Popover.Root>
+
+		<!-- The real date added (Data API), falling back to first seen (`facets.addedDate`). -->
+		<Popover.Root>
+			<Popover.Trigger class={chip(facets.addedFrom !== null || facets.addedTo !== null)}>
+				{addedLabel}
+				<HugeiconsIcon icon={ArrowDown01Icon} class="h-3 w-3" />
+			</Popover.Trigger>
+			<Popover.Content align="start" class="w-80 gap-2 p-3">
+				<p class="text-xs text-muted-foreground">{t('facets.added_hint')}</p>
+				<div class="flex items-center gap-2 text-sm">
+					<Input
+						type="date"
+						class="h-8 flex-1"
+						value={secsToDay(facets.addedFrom)}
+						onchange={(e) => (facets = { ...facets, addedFrom: dayToSecs(e.currentTarget.value) })}
+						aria-label={t('facets.from')}
+					/>
+					–
+					<Input
+						type="date"
+						class="h-8 flex-1"
+						value={secsToDay(facets.addedTo)}
+						onchange={(e) => (facets = { ...facets, addedTo: dayToSecs(e.currentTarget.value, true) })}
 						aria-label={t('facets.to')}
 					/>
 				</div>

@@ -160,43 +160,27 @@ pub struct DataApiContext {
     pub channel_id: Option<String>,
 }
 
-/// Works out [`DataApiContext`]. The channel is the one linked to `active_account` (the cookie
-/// account signed in now), or the only channel connected when none is linked to anything.
-/// `client_secret_present` comes from the account manager. This is the dispatch layer's reading;
-/// the settings warnings get their fuller one (with the keyring probe) in commit 26.
+/// Works out [`DataApiContext`] with `ytdata_status`'s rules (one precedence for the warnings,
+/// the monitor and this). The channel is the one linked to `active_account` (the cookie account
+/// signed in now), or the only channel connected when none is linked to anything.
+/// `client_secret_present` comes from the account manager. The budget is the jobs' share
+/// ([`super::budget::available_for_jobs_now`]); the token store is not probed here, since this
+/// runs on every write and blocks no thread: a missing or unreadable token surfaces when the job
+/// runs (`waiting_auth`).
 pub fn data_api_state(
     db: &Db,
     client_secret_present: bool,
     active_account: Option<&str>,
     now: DateTime<Utc>,
 ) -> DataApiContext {
-    let not_configured = DataApiContext { state: DataApiState::NotConfigured, channel_id: None };
-    if !client_secret_present {
-        return not_configured;
+    use crate::ytdata_status::{resolve, Credential};
+    let quota_left = super::budget::available_for_jobs_now(db, now).map(|n| n > 0).unwrap_or(true);
+    let unprobed = |_: Option<&str>| Credential::Unknown;
+    let resolved = resolve(db, client_secret_present, active_account, quota_left, &unprobed, now);
+    DataApiContext {
+        state: resolved.verdict.state,
+        channel_id: resolved.account.map(|a| a.channel_id),
     }
-    let accounts = crate::ytdata_accounts::list(db).unwrap_or_default();
-    let linked = accounts
-        .iter()
-        .find(|a| active_account.is_some() && a.linked_account.as_deref() == active_account);
-    let only = (accounts.len() == 1 && accounts[0].linked_account.is_none()).then(|| &accounts[0]);
-    let Some(account) = linked.or(only) else { return not_configured };
-    let channel_id = Some(account.channel_id.clone());
-    let state = if db.get_setting(API_DISABLED_KEY).is_some_and(|v| !v.is_empty()) {
-        DataApiState::ApiDisabled
-    } else if account.status == ytdata::auth::accounts::AccountStatus::ReauthRequired {
-        DataApiState::NeedsAuth
-    } else if quota_exhausted(db, now) {
-        DataApiState::QuotaExhausted
-    } else {
-        DataApiState::Ok
-    };
-    DataApiContext { state, channel_id }
-}
-
-fn quota_exhausted(db: &Db, now: DateTime<Utc>) -> bool {
-    let today = now.with_timezone(&chrono_tz::America::Los_Angeles).date_naive().to_string();
-    db.get_setting(QUOTA_EXCEEDED_DAY_KEY).is_some_and(|day| day.trim() == today)
-        || super::budget::available_for_jobs_now(db, now).map(|n| n <= 0).unwrap_or(false)
 }
 
 #[cfg(test)]

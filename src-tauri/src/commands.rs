@@ -1298,14 +1298,21 @@ enum PlaylistRead {
 }
 
 /// Read one playlist to the end (or the page cap) and write it down: index rows, snapshot,
-/// alerts, sync record ([`monitor::record`]).
+/// alerts, sync record ([`monitor::record`]). The reader is the Data API when the run has one
+/// (`data`, [`crate::ytdata_sync::prepare`]) and it covers this playlist, which also gives each
+/// track's date added and the playlist's privacy; InnerTube otherwise, and whenever the Data API
+/// read fails.
 async fn sync_one(
     state: &Arc<AppState>,
     client: &innertube::YouTubeClient,
     playlist_id: &str,
     title: Option<&str>,
     account_id: Option<&str>,
+    data: Option<&crate::ytdata_sync::DataApiRun>,
 ) -> PlaylistRead {
+    if let Some(read) = sync_one_data_api(state, data, playlist_id, account_id).await {
+        return read;
+    }
     let Ok(page) = state.it.playlist(client, playlist_id, None).await else {
         return PlaylistRead::Failed;
     };
@@ -1343,11 +1350,82 @@ async fn sync_one(
         watch: playlist_id != LIKED_MUSIC_ID,
         at: now_secs(),
         listed,
+        added_at: None,
+        privacy: None,
+        reasons: None,
     };
     // An empty read after one that held rows is doubted, and counts as cut short.
     let complete = monitor::read_complete(&state.db, &read);
     let counts = monitor::record(&state.db, &read);
     PlaylistRead::Read { complete, counts }
+}
+
+/// [`sync_one`] through the Data API. `None` when the run has no Data API, it does not cover this
+/// playlist (not one of the channel's: Liked Music, someone else's collaborative one), or the read
+/// failed; the caller then reads it through InnerTube.
+async fn sync_one_data_api(
+    state: &Arc<AppState>,
+    data: Option<&crate::ytdata_sync::DataApiRun>,
+    playlist_id: &str,
+    account_id: Option<&str>,
+) -> Option<PlaylistRead> {
+    let run = data?;
+    let playlist = run.covers(playlist_id)?;
+    let known = state.db.playlist_songs(playlist_id);
+    let got = match run.read(playlist, &known).await {
+        Ok(got) => got,
+        Err(e) => {
+            run.failed(&e);
+            tracing::info!(error = %e, playlist_id, "Data API read failed, reading via InnerTube");
+            return None;
+        }
+    };
+    let read = monitor::Read {
+        playlist_id,
+        title: Some(got.title.as_str()),
+        account_id,
+        songs: &got.songs,
+        complete: got.complete,
+        watch: true,
+        at: now_secs(),
+        listed: Some(got.listed),
+        added_at: Some(&got.added_at),
+        privacy: Some(got.privacy.as_str()),
+        reasons: Some(&got.reasons),
+    };
+    let complete = monitor::read_complete(&state.db, &read);
+    let counts = monitor::record(&state.db, &read);
+    Some(PlaylistRead::Read { complete, counts })
+}
+
+/// The run's Data API, when it reads through it: the reader choice for a run of `scope`, and
+/// what goes in its `detail_json` under `reader`. Scheduled and headless runs are the day's backup
+/// and may spend its reserve.
+async fn data_api_run(
+    state: &Arc<AppState>,
+    scope: crate::ytdata_sync::Scope<'_>,
+    trigger: &str,
+) -> (Option<crate::ytdata_sync::DataApiRun>, Value) {
+    let backup_run = matches!(trigger, "scheduler" | "headless");
+    crate::ytdata_sync::prepare(state, scope, backup_run).await
+}
+
+/// After a run: what it spent goes on the summary (and so on `monitor_runs.units_spent`), the
+/// quota widget hears of it, and the status is sent again, since the run may have marked the API
+/// disabled or out of quota, or cleared that.
+async fn finish_data_api_run(
+    state: &Arc<AppState>,
+    data: Option<&crate::ytdata_sync::DataApiRun>,
+    summary: &mut SyncSummary,
+    reader: &mut Value,
+) {
+    let Some(run) = data else { return };
+    summary.units_spent = run.units();
+    *reader = run.detail();
+    if summary.units_spent > 0 {
+        let _ = state.app.emit("quota-changed", ());
+    }
+    crate::ytdata_status::announce(state).await;
 }
 
 /// Log a finished run in `monitor_runs`. `playlists_failed` is every playlist not read to the
@@ -1364,7 +1442,7 @@ fn record_run(state: &AppState, summary: &SyncSummary, started: i64, outcome: &s
         playlists_ok: i64::from(summary.complete),
         playlists_failed: i64::from(summary.playlists.saturating_sub(summary.complete)),
         alerts_new: i64::from(summary.alerts_new),
-        units_spent: 0,
+        units_spent: summary.units_spent,
         detail_json: detail.to_string(),
     };
     let prev = state.db.monitor_runs(1).into_iter().next();
@@ -1705,10 +1783,13 @@ pub(crate) async fn sync_all(state: &Arc<AppState>, trigger: &str) -> Result<Syn
     let total = playlists.len();
     let mut indexed: Vec<String> = Vec::new();
     let mut failed_ids: Vec<String> = Vec::new();
+    let (data, mut reader) = data_api_run(state, crate::ytdata_sync::Scope::All, trigger).await;
+    let run = data.as_ref();
     for (done, item) in playlists.into_iter().enumerate() {
         let progress = json!({ "done": done, "total": total, "current": item.title });
         let _ = state.app.emit("playlist-sync-progress", progress);
-        let read = sync_one(state, client, &item.id, Some(&item.title), account.as_deref()).await;
+        let title = Some(item.title.as_str());
+        let read = sync_one(state, client, &item.id, title, account.as_deref(), run).await;
         match read {
             PlaylistRead::NotYours => continue,
             // One playlist failing (a deleted id, a hiccup) must not abandon the rest of the
@@ -1731,12 +1812,14 @@ pub(crate) async fn sync_all(state: &Arc<AppState>, trigger: &str) -> Result<Syn
         json!({ "done": total, "total": total, "current": Value::Null }),
     );
     state.db.retain_playlists(&indexed);
+    finish_data_api_run(state, data.as_ref(), &mut summary, &mut reader).await;
     back_up_run(state, indexed).await;
     state.db.set_setting(PLAYLIST_INDEX_STAMP, &now_secs().to_string());
     note_sync_attempt(&state.db, started, summary.outcome() != "failed");
     monitor::save_summary(&state.db, &summary);
     let short = summary.playlists - summary.complete - summary.failed;
-    let detail = json!({ "scope": "all", "failed": failed_ids, "incomplete": short });
+    let detail =
+        json!({ "scope": "all", "failed": failed_ids, "incomplete": short, "reader": reader });
     record_run(state, &summary, started, summary.outcome(), detail);
     announce_sync(state, &summary);
     Ok(summary)
@@ -1828,7 +1911,9 @@ pub async fn sync_playlist(state: St<'_>, playlist_id: String) -> Result<SyncSum
     let account = state.db.get_setting("active_account");
     let progress = json!({ "done": 0, "total": 1, "current": playlist_id });
     let _ = state.app.emit("playlist-sync-progress", progress);
-    match sync_one(&state, client, &playlist_id, None, account.as_deref()).await {
+    let scope = crate::ytdata_sync::Scope::One(&playlist_id);
+    let (data, mut reader) = data_api_run(&state, scope, "manual_ui").await;
+    match sync_one(&state, client, &playlist_id, None, account.as_deref(), data.as_ref()).await {
         PlaylistRead::NotYours => {}
         PlaylistRead::Failed => {
             summary.playlists = 1;
@@ -1843,8 +1928,9 @@ pub async fn sync_playlist(state: St<'_>, playlist_id: String) -> Result<SyncSum
     let _ = state
         .app
         .emit("playlist-sync-progress", json!({ "done": 1, "total": 1, "current": Value::Null }));
+    finish_data_api_run(&state, data.as_ref(), &mut summary, &mut reader).await;
     back_up_run(&state, vec![playlist_id.clone()]).await;
-    let detail = json!({ "scope": playlist_id });
+    let detail = json!({ "scope": playlist_id, "reader": reader });
     record_run(&state, &summary, started, summary.outcome(), detail);
     announce_sync(&state, &summary);
     if summary.failed > 0 {
@@ -1866,6 +1952,22 @@ pub fn playlist_sync_info(
     state: St<'_>,
 ) -> std::collections::HashMap<String, crate::db::PlaylistSync> {
     state.db.playlist_syncs()
+}
+
+/// `videoId` → the earliest date it was added to one of your playlists, as the Data API reported
+/// it (epoch seconds). Tracks only InnerTube has read are absent: the "In your playlists" view
+/// falls back to their first-seen date. SQLite only.
+#[tauri::command]
+pub fn playlist_added_dates(state: St<'_>) -> std::collections::HashMap<String, i64> {
+    state.db.playlist_added_dates()
+}
+
+/// Whether the YouTube Data API can be used now, and why not ([`crate::ytdata_status`]). States
+/// and counters only: no token or secret ever reaches the webview. Changes arrive as
+/// `ytdata-status-changed`.
+#[tauri::command]
+pub async fn ytdata_status(state: St<'_>) -> Result<crate::ytdata_status::YtDataStatus, String> {
+    Ok(crate::ytdata_status::current(&state).await)
 }
 
 /// Alerts neither seen nor dismissed: the badge's number before any `alerts-changed` arrives.
@@ -3715,6 +3817,9 @@ mod tests {
                     watch: true,
                     at,
                     listed: None,
+                    added_at: None,
+                    privacy: None,
+                    reasons: None,
                 },
             );
         };

@@ -33,7 +33,7 @@ use innertube::SongItem;
 use serde_json::{json, Value};
 
 use crate::commands::playlist_row;
-use crate::db::{alert_dedupe_key, Db, MonitorRun, NewAlert, PlaylistSync, SnapItem};
+use crate::db::{alert_dedupe_key, Db, MonitorRun, NewAlert, PlaylistSync, Privacy, SnapItem};
 use crate::playlist_tools::lis::{self, lis_indices};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -102,11 +102,29 @@ fn song_of(item: &SnapItem) -> SongItem {
     }
 }
 
+/// Whether two reads name their rows with the same handles. InnerTube's `setVideoId` and the Data
+/// API's playlist-item id are two id spaces for the same row, so a snapshot taken by one reader
+/// shares no handle with a read by the other. With handles on both sides and none in common, the
+/// rows are matched by `videoId` and occurrence instead, so switching readers is not every row
+/// removed and added again. (A playlist emptied and refilled with the same songs between two reads
+/// of one reader then reads as unchanged, which is what it is to the listener.)
+fn same_handles(before: &[SnapItem], now: &[SongItem]) -> bool {
+    let was: HashSet<&str> =
+        before.iter().filter_map(|i| i.s.as_deref()).filter(|h| !h.is_empty()).collect();
+    let mut now_handles =
+        now.iter().filter_map(|s| s.set_video_id.as_deref()).filter(|h| !h.is_empty()).peekable();
+    let disjoint = !was.is_empty() && now_handles.peek().is_some();
+    !disjoint || now_handles.any(|h| was.contains(h))
+}
+
 /// Compare a playlist's newest snapshot with a complete fresh read of it. An empty snapshot is
 /// still a snapshot: everything read now was added since (the caller skips a playlist with none).
 pub fn diff(before: &[SnapItem], now: &[SongItem]) -> Vec<Change> {
-    let was_keys = identities(before.iter().map(|i| (i.v.as_str(), i.s.as_deref())));
-    let now_keys = identities(now.iter().map(|s| (&*s.video_id, s.set_video_id.as_deref())));
+    let keep = same_handles(before, now);
+    let was_keys =
+        identities(before.iter().map(|i| (i.v.as_str(), i.s.as_deref().filter(|_| keep))));
+    let now_keys =
+        identities(now.iter().map(|s| (&*s.video_id, s.set_video_id.as_deref().filter(|_| keep))));
     let was_at: HashMap<&str, usize> =
         was_keys.iter().enumerate().map(|(i, k)| (k.as_str(), i)).collect();
     let still: HashSet<&str> = now_keys.iter().map(String::as_str).collect();
@@ -309,6 +327,25 @@ pub struct Read<'a> {
     /// How many tracks the playlist's header says it holds, when it says
     /// ([`header_track_count`]). Only a header saying 0 lets an empty read follow one that was not.
     pub listed: Option<usize>,
+    /// When each track was added to the playlist (`videoId` → epoch seconds), when the reader
+    /// knows (the Data API). Written on the index rows; `None` keeps what is stored.
+    pub added_at: Option<&'a HashMap<String, i64>>,
+    /// The playlist's privacy (`public` / `unlisted` / `private`), when the reader knows.
+    pub privacy: Option<&'a str>,
+    /// Why a track is unavailable (`deleted`, `private`, `region_restricted`), by `videoId`, when
+    /// the reader knows: kept in its `song_json` as `unavailable_reason`.
+    pub reasons: Option<&'a HashMap<String, String>>,
+}
+
+/// A song as JSON, with the reason it is unavailable when one is known.
+fn song_json(song: &SongItem, reasons: Option<&HashMap<String, String>>) -> Option<String> {
+    let reason = reasons.and_then(|r| r.get(&song.video_id)).filter(|_| song.unavailable);
+    let Some(reason) = reason else { return serde_json::to_string(song).ok() };
+    let mut value = serde_json::to_value(song).ok()?;
+    if let Some(obj) = value.as_object_mut() {
+        obj.insert("unavailable_reason".into(), json!(reason));
+    }
+    Some(value.to_string())
 }
 
 /// The track count a playlist header's subtitle states ("12 songs • 45 minutes", "1 track"), when
@@ -390,7 +427,7 @@ pub fn record(db: &Db, read: &Read<'_>) -> Counts {
             };
             let json = indexed_json
                 .map(str::to_owned)
-                .or_else(|| c.song.as_ref().and_then(|s| serde_json::to_string(s).ok()));
+                .or_else(|| c.song.as_ref().and_then(|s| song_json(s, read.reasons)));
             let kind = c.kind.as_str();
             let key = alert_dedupe_key(read.playlist_id, &c.video_id, kind, Some(&scope));
             let filed = db.insert_alert(&NewAlert {
@@ -413,7 +450,7 @@ pub fn record(db: &Db, read: &Read<'_>) -> Counts {
         .songs
         .iter()
         .map(|s| {
-            let json = serde_json::to_string(&playlist_row(s.clone())).unwrap_or_default();
+            let json = song_json(&playlist_row(s.clone()), read.reasons).unwrap_or_default();
             (s.video_id.clone(), json)
         })
         .collect();
@@ -425,6 +462,11 @@ pub fn record(db: &Db, read: &Read<'_>) -> Counts {
     } else {
         db.upsert_playlist_songs_at(read.playlist_id, &rows, read.at);
     }
+    // The rewrite kept every surviving track's date; the reader's dates, when it has them, are
+    // the playlist's own word and replace them.
+    if let Some(dates) = read.added_at {
+        db.set_playlist_added_at(read.playlist_id, dates);
+    }
     if complete {
         let _ = db.set_playlist_sync(
             read.playlist_id,
@@ -434,6 +476,7 @@ pub fn record(db: &Db, read: &Read<'_>) -> Counts {
                 added: i64::from(counts.added),
                 removed: i64::from(counts.removed),
                 moved: i64::from(counts.moved),
+                privacy: read.privacy.and_then(Privacy::parse),
             },
         );
     }
@@ -461,6 +504,10 @@ pub struct SyncSummary {
     pub unavailable: u32,
     pub restored: u32,
     pub alerts_new: u32,
+    /// Data API units the run spent (`monitor_runs.units_spent`, what the backup reserve shrinks
+    /// by); 0 when it read through InnerTube.
+    #[serde(default)]
+    pub units_spent: i64,
 }
 
 impl SyncSummary {
@@ -627,7 +674,62 @@ mod tests {
             watch: true,
             at,
             listed: None,
+            added_at: None,
+            privacy: None,
+            reasons: None,
         }
+    }
+
+    #[test]
+    fn switching_readers_is_not_every_row_removed_and_added() {
+        // InnerTube's setVideoIds in the snapshot, the Data API's item ids now: same rows.
+        let before = snap(&[row("a", "S1"), row("b", "S2"), row("c", "S3"), row("d", "S4")]);
+        let now = [row("a", "UExA"), row("b", "UExB"), row("c", "UExC"), row("d", "UExD")];
+        assert!(diff(&before, &now).is_empty());
+        // Matched by video and occurrence, a move and a removal still show.
+        let now = [row("d", "UExD"), row("a", "UExA"), row("c", "UExC")];
+        let changes = diff(&before, &now);
+        let got = kinds(&changes);
+        let want = [("b", Kind::Removed, Some(1), None), ("d", Kind::Moved, Some(3), Some(0))];
+        assert_eq!(got, want);
+        // One handle in common: the same reader, matched by handle as before.
+        let now = [row("a", "S1"), row("a", "S9")];
+        let changes = diff(&snap(&[row("a", "S1"), row("a", "S2")]), &now);
+        let got = kinds(&changes);
+        assert_eq!(got, [("a", Kind::Removed, Some(1), None), ("a", Kind::Added, None, Some(1))]);
+    }
+
+    #[test]
+    fn a_data_api_read_writes_dates_privacy_and_reasons() {
+        let db = mem();
+        record(&db, &read(&[row("a", "1"), row("b", "2")], 100));
+        let dates: HashMap<String, i64> = [("a".to_owned(), 50), ("b".to_owned(), 60)].into();
+        let reasons: HashMap<String, String> = [("b".to_owned(), "deleted".to_owned())].into();
+        let songs = [row("a", "UExA"), SongItem { unavailable: true, ..row("b", "UExB") }];
+        let got = record(
+            &db,
+            &Read {
+                added_at: Some(&dates),
+                privacy: Some("unlisted"),
+                reasons: Some(&reasons),
+                ..read(&songs, 200)
+            },
+        );
+        assert_eq!((got.unavailable, got.alerts_new), (1, 1), "b greyed out, nothing else");
+        assert_eq!(db.playlist_syncs()["VLPL1"].privacy, Some(Privacy::Unlisted));
+        assert_eq!(db.playlist_added_dates().get("a"), Some(&50));
+        let stored: HashMap<String, Option<String>> =
+            db.playlist_songs("VLPL1").into_iter().collect();
+        let b: Value = serde_json::from_str(stored["b"].as_deref().unwrap()).unwrap();
+        assert_eq!(b["unavailable_reason"], "deleted");
+        let a: Value = serde_json::from_str(stored["a"].as_deref().unwrap()).unwrap();
+        assert!(a.get("unavailable_reason").is_none(), "only on an unavailable track");
+        let alert = db.alert_rows(true).into_iter().find(|a| a.kind == "unavailable").unwrap();
+        assert!(alert.song_json.unwrap_or_default().contains("\"unavailable_reason\":\"deleted\""));
+        // An InnerTube read next keeps the dates and the privacy it cannot see.
+        record(&db, &read(&[row("a", "1"), row("b", "2")], 300));
+        assert_eq!(db.playlist_added_dates().get("a"), Some(&50));
+        assert_eq!(db.playlist_syncs()["VLPL1"].privacy, Some(Privacy::Unlisted));
     }
 
     #[test]

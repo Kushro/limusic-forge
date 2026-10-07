@@ -687,6 +687,8 @@ export type SyncSummary = {
 	unavailable: number;
 	restored: number;
 	alerts_new: number;
+	/** Data API units the run spent; 0 when it read through InnerTube. */
+	units_spent?: number;
 };
 /** Sync one playlist now, interval or not. Rejects with `busy` while another sync runs, and with
  *  `unreadable` when YouTube would not hand the playlist over. */
@@ -702,10 +704,45 @@ export type PlaylistSyncInfo = {
 	added: number;
 	removed: number;
 	moved: number;
+	/** The privacy the last Data API sync read; absent until one did (InnerTube does not say). */
+	privacy?: PlaylistPrivacy;
 };
+export type PlaylistPrivacy = 'public' | 'unlisted' | 'private';
 /** Playlist id → its last complete sync; playlists never synced are absent. SQLite only. */
 export const playlistSyncInfo = () =>
 	invoke<Record<string, PlaylistSyncInfo>>('playlist_sync_info');
+/** `videoId` → the earliest date (epoch seconds) it was added to one of your playlists, as the Data
+ *  API reported it. Tracks only InnerTube has read are absent. SQLite only. */
+export const playlistAddedDates = () => invoke<Record<string, number>>('playlist_added_dates');
+/** Whether the YouTube Data API can be used now (src-tauri/src/ytdata_status.rs). Precedence:
+ *  not_configured > api_disabled > needs_auth > quota_exhausted > ok. States and counters only. */
+export type YtDataState =
+	| 'not_configured'
+	| 'needs_auth'
+	| 'quota_exhausted'
+	| 'api_disabled'
+	| 'ok';
+export type YtDataReason =
+	| 'no_client_secret'
+	| 'no_account_for_active'
+	| 'invalid_grant'
+	| 'no_refresh_token'
+	| 'keyring_unavailable'
+	| 'secret_undecryptable';
+export type YtDataStatus = {
+	state: YtDataState;
+	reason?: YtDataReason;
+	/** The channel id the Data API acts as, and its title. */
+	account?: string;
+	account_title?: string;
+	spent_today: number;
+	daily_units: number;
+	/** The next quota reset (midnight Pacific), RFC 3339. */
+	next_reset: string;
+};
+export const ytdataStatus = () => invoke<YtDataStatus>('ytdata_status');
+export const onYtDataStatus = (cb: (s: YtDataStatus) => void): Promise<UnlistenFn> =>
+	listen<YtDataStatus>('ytdata-status-changed', (e) => cb(e.payload));
 /** Alerts neither seen nor dismissed (the badge). */
 export const unseenAlertCount = () => invoke<number>('unseen_alert_count');
 /** The monitor page's cards. `items` is index rows (a track once per playlist); `duplicates_estimate`

@@ -331,14 +331,22 @@ impl Executor for YtDataExecutor {
         let result = self
             .call(channel, move |token| execute_planned_action(client, token, channel, action_ref))
             .await;
+        // What a write learns about the API as a whole (disabled, out of quota, enabled again)
+        // feeds the same marks the warnings and the engine choice read (ytdata_status.rs).
         match result {
-            Ok((api_result, units, endpoint)) => ItemOutcome::Done {
-                inverse: action.inverse_json(Some(&api_result)),
-                api_result,
-                units,
-                endpoint: Some(endpoint),
-            },
-            Err(e) => classify(&e),
+            Ok((api_result, units, endpoint)) => {
+                crate::ytdata_status::note_success(&self.db);
+                ItemOutcome::Done {
+                    inverse: action.inverse_json(Some(&api_result)),
+                    api_result,
+                    units,
+                    endpoint: Some(endpoint),
+                }
+            }
+            Err(e) => {
+                crate::ytdata_status::note_error(&self.db, &e, Utc::now());
+                classify(&e)
+            }
         }
     }
 

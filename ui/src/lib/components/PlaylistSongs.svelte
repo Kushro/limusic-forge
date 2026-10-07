@@ -3,7 +3,7 @@
 	// that holds it (PlaylistForge's global Videos screen). Tick songs to keep them in one playlist
 	// only, or to take them out of all of them; both undo from the toast. Drag rows onto a sidebar
 	// playlist to copy them there. The facet chips (`FilterChips` in its global mode) narrow by
-	// playlist, availability, first seen and spread, and the list sorts. Above the list, the
+	// playlist, availability, first seen, date added and spread, and the list sorts. Above the list, the
 	// monitor's alerts: tracks that left a playlist or turned unavailable since the last sync.
 	import { onMount, untrack } from 'svelte';
 	import { goto } from '$app/navigation';
@@ -46,11 +46,14 @@
 	import * as Select from './ui/select';
 	import TrackFilter from './TrackFilter.svelte';
 	import FilterChips from './FilterChips.svelte';
+	import YtDataWarning from './YtDataWarning.svelte';
 
 	let { onalerts }: { onalerts?: (n: number) => void } = $props();
 
 	let songs = $state.raw<Everywhere[]>([]);
 	let alerts = $state.raw<PlaylistAlert[]>([]);
+	// videoId → when it was added to a playlist, by the Data API (the date-added facet's real date).
+	let addedDates = $state.raw<Record<string, number>>({});
 	let loading = $state(true);
 	let query = $state('');
 	let facets = $state<Facets>({ ...NO_FACETS });
@@ -64,7 +67,11 @@
 
 	async function load() {
 		try {
-			[songs, alerts] = await Promise.all([api.songsEverywhere(), api.playlistAlerts()]);
+			[songs, alerts, addedDates] = await Promise.all([
+				api.songsEverywhere(),
+				api.playlistAlerts(),
+				api.playlistAddedDates()
+			]);
 			onalerts?.(alerts.length);
 		} catch (e) {
 			toast.error(String(e));
@@ -92,6 +99,7 @@
 		elsewhere: (v) => (byId.get(v)?.playlists.length ?? 0) > 1,
 		playlistsOf: (v) => byId.get(v)?.playlists ?? [],
 		firstSeen: (v) => byId.get(v)?.first_seen ?? null,
+		addedAt: (v) => addedDates[v] ?? null,
 		// Reactive through the store's map, so the list re-filters as the answers arrive.
 		downloaded: isDownloaded
 	};
@@ -239,6 +247,8 @@
 {#if loading}
 	<div class="mb-4 h-24 animate-pulse rounded-2xl border bg-card/40"></div>
 {:else}
+	<!-- The dates added and unavailability reasons here come from syncs through the Data API. -->
+	<YtDataWarning />
 	{#if alerts.length}
 		<section class="mb-4 rounded-xl border border-destructive/30 bg-destructive/5 p-3">
 			<div class="flex items-center gap-3">
