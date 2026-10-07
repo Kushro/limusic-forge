@@ -41,6 +41,7 @@
 	import ListenTogether from '$lib/components/ListenTogether.svelte';
 	import LinkDialog from '$lib/components/LinkDialog.svelte';
 	import ImportDialog from '$lib/components/ImportDialog.svelte';
+	import ImportPrompt from '$lib/components/ImportPrompt.svelte';
 	import { handleImportDrop, initImport } from '$lib/import.svelte';
 	import MiniPlayer from '$lib/components/MiniPlayer.svelte';
 	import NowPlaying from '$lib/components/NowPlaying.svelte';
@@ -55,6 +56,7 @@
 	import { initZoom } from '$lib/zoom.svelte';
 	import { initShortcuts } from '$lib/shortcuts';
 	import { initErrorLog } from '$lib/errlog';
+	import { dbMigrationError } from '$lib/api';
 	import {
 		updateState,
 		availableMessage,
@@ -183,6 +185,8 @@
 	if (browser) initTheme();
 	// The custom app icon (#173) is a file on disk, so the titlebar has to ask Rust for it.
 	if (browser) loadAppIcon();
+	// The database's schema upgrade failed at startup (`db_migration_error`): a banner that stays.
+	let dbUpgradeFailed = $state(false);
 
 	// Wire the Tauri event bridge once for the whole app; teardown on destroy. Check for an update
 	// on every app open (silent unless one exists).
@@ -208,6 +212,10 @@
 		const teardownZoom = initZoom();
 		const teardownShortcuts = initShortcuts();
 		initImport();
+		// A failed schema upgrade leaves the app at the old schema: say so until closed.
+		dbMigrationError()
+			.then((e) => (dbUpgradeFailed = !!e))
+			.catch(() => {});
 		return () => {
 			clearInterval(updateTimer);
 			teardownApp();
@@ -324,6 +332,8 @@
 	<ListenTogether />
 	<LinkDialog />
 	<ImportDialog />
+	<!-- First run: offers LiMusic's / PlaylistForge's data once (onboarding.ts). -->
+	<ImportPrompt />
 
 	<!-- The two notification banners below run at z-[100]. Dialogs and menus sit at z-50 and portal to
 	     <body>, so a z-50 banner loses the tie on DOM order and hides behind an open modal. -->
@@ -353,6 +363,26 @@
 					<HugeiconsIcon icon={Cancel01Icon} strokeWidth={2} />
 				</Button>
 			{/if}
+		</div>
+	{/if}
+
+	{#if dbUpgradeFailed}
+		<div
+			role="alert"
+			transition:fly={{ y: -16, duration: 220, easing: cubicOut }}
+			class="fixed top-12 left-1/2 z-[100] flex max-w-[90vw] -translate-x-1/2 items-center gap-2 rounded-lg border bg-card px-4 py-2 text-sm shadow-lg"
+		>
+			<HugeiconsIcon icon={AlertCircleIcon} class="h-4 w-4 shrink-0 text-destructive" />
+			<span>{t('errors.db_upgrade_failed')}</span>
+			<Button
+				variant="ghost"
+				size="icon-sm"
+				class="-mr-2 text-muted-foreground hover:text-foreground"
+				aria-label={t('common.close')}
+				onclick={() => (dbUpgradeFailed = false)}
+			>
+				<HugeiconsIcon icon={Cancel01Icon} strokeWidth={2} />
+			</Button>
 		</div>
 	{/if}
 

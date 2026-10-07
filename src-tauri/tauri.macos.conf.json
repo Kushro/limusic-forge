@@ -9,7 +9,7 @@
   "app": {
     "windows": [
       {
-        "title": "Limusic",
+        "title": "LiMusic Forge",
         "width": 1200,
         "height": 800,
         "minWidth": 900,

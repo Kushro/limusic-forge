@@ -30,6 +30,8 @@ pub enum Step {
     Reorder { playlist_id: String, order: Vec<String> },
     /// Delete a playlist the operation created.
     DeletePlaylist { playlist_id: String },
+    /// Undo a queued job (`jobs/`): queue the job that reverts its done items, newest first.
+    RevertJob { job_id: i64 },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -76,6 +78,8 @@ fn step_is_local(s: &Step) -> bool {
         | Step::Remove { playlist_id, .. }
         | Step::Reorder { playlist_id, .. }
         | Step::DeletePlaylist { playlist_id } => is_local_playlist(playlist_id),
+        // A job's playlists are on the account (local edits are never queued).
+        Step::RevertJob { .. } => false,
     }
 }
 
@@ -100,7 +104,19 @@ fn to_record(state: &AppState, row: PlaylistOpRow) -> OpRecord {
 /// Record an operation. A journal that can't be written costs the undo, not the edit, so this
 /// logs and answers `None` rather than failing an operation that already happened.
 pub fn record(state: &AppState, kind: &str, summary: &Summary, undo: &[Step]) -> Option<OpRecord> {
-    let account = if local_only(undo) { None } else { active_account(state) };
+    record_with_account(state, kind, summary, undo, active_account(state).as_deref())
+}
+
+/// [`record`], for an operation run under a known account rather than the one signed in now: a
+/// queued job finishes after the user may have switched.
+pub fn record_with_account(
+    state: &AppState,
+    kind: &str,
+    summary: &Summary,
+    undo: &[Step],
+    account: Option<&str>,
+) -> Option<OpRecord> {
+    let account = if local_only(undo) { None } else { account.map(str::to_owned) };
     let summary_json = serde_json::to_string(summary).ok()?;
     let inverse_json = serde_json::to_string(undo).ok()?;
     match state.db.record_playlist_op(
@@ -120,6 +136,11 @@ pub fn record(state: &AppState, kind: &str, summary: &Summary, undo: &[Step]) ->
 
 pub fn history(state: &AppState) -> Vec<OpRecord> {
     state.db.playlist_ops().into_iter().map(|r| to_record(state, r)).collect()
+}
+
+/// One journal entry as the UI gets it.
+pub fn get(state: &AppState, id: i64) -> Option<OpRecord> {
+    state.db.playlist_op(id).map(|r| to_record(state, r))
 }
 
 /// One undo at a time: two clicks racing must not both replay the same inverse.
@@ -143,16 +164,18 @@ pub async fn undo(state: &Arc<AppState>, id: i64) -> Result<OpRecord, String> {
         if i > 0 && !step_is_local(step) {
             crate::import::before_playlist_write(state, &|| false).await?;
         }
-        run(state, step).await?;
+        run_step(state, step).await?;
     }
     announce(state, &record.summary.playlists.iter().map(|p| p.id.clone()).collect::<Vec<_>>());
     state.db.mark_playlist_op_undone(id, now_secs()).map_err(|e| e.to_string())?;
     state.db.playlist_op(id).map(|r| to_record(state, r)).ok_or_else(|| "gone".into())
 }
 
-async fn run(state: &Arc<AppState>, step: &Step) -> Result<(), String> {
+/// Runs one step. Also what a queued InnerTube job's `it_step` item runs (`jobs::exec_innertube`).
+pub(crate) async fn run_step(state: &Arc<AppState>, step: &Step) -> Result<(), String> {
     let none = &|| false;
     match step {
+        Step::RevertJob { job_id } => revert_job(state, *job_id),
         Step::Remove { playlist_id, rows: gone } => {
             // Only rows still there: one removed by hand meanwhile would fail the whole request.
             let now: HashSet<String> = rows::read_all(state, playlist_id)
@@ -169,7 +192,12 @@ async fn run(state: &Arc<AppState>, step: &Step) -> Result<(), String> {
             rows::remove_rows(state, playlist_id, &gone, none).await
         }
         Step::Reorder { playlist_id, order } => {
-            rows::reorder(state, playlist_id, order, none).await.map(|_| ())
+            let (before, moved) = rows::reorder(state, playlist_id, order, none).await?;
+            // The order put back is yours too: no `moved` alerts for it on the next sync.
+            if moved > 0 {
+                super::monitor::after_reorder(&state.db, playlist_id, &before, order, now_secs());
+            }
+            Ok(())
         }
         Step::Restore { playlist_id, rows: back } => {
             let songs: Vec<SongItem> = back.iter().map(|r| r.song.clone()).collect();
@@ -188,6 +216,34 @@ async fn run(state: &Arc<AppState>, step: &Step) -> Result<(), String> {
             crate::commands::delete_playlist_inner(state, playlist_id).await
         }
     }
+}
+
+/// The undo of a queued job: its revert goes in the queue (SYSTEM priority, so first), and the
+/// runner is woken for it. The history marks the change undone now; the jobs page shows the
+/// revert running.
+fn revert_job(state: &AppState, job_id: i64) -> Result<(), String> {
+    use tauri::Manager;
+    let job = crate::jobs::repo::get_job(&state.db, job_id)
+        .map_err(|e| e.to_string())?
+        .ok_or("That change is no longer in the queue's history.")?;
+    if job.params.get("revert_job_id").is_some_and(|v| !v.is_null()) {
+        return Err("That change was already undone.".into());
+    }
+    if !job.status.is_terminal() {
+        // Still running: stop it, and revert what it did once nothing of it is in flight.
+        crate::jobs::control::cancel(&state.db, job_id, true, chrono::Utc::now())
+            .map_err(|e| e.to_string())?;
+    } else {
+        let revert = crate::jobs::control::create_revert_job(&state.db, job_id, chrono::Utc::now())
+            .map_err(|e| e.to_string())?
+            .ok_or("Nothing of that change is left to undo.")?;
+        let params = crate::jobs::set_param(job.params, "revert_job_id", serde_json::json!(revert));
+        crate::jobs::repo::set_job_params(&state.db, job_id, &params).map_err(|e| e.to_string())?;
+    }
+    if let Some(jobs) = state.app.try_state::<Arc<crate::jobs::JobsState>>() {
+        jobs.nudge();
+    }
+    Ok(())
 }
 
 /// The moves that put re-added rows back where they were. `added` are the new rows, in the order

@@ -1,23 +1,29 @@
-//! Limusic Tauri app. Wires transport + player + db + orchestrator behind the command boundary.
+//! LiMusic Forge Tauri app. Wires transport + player + db + orchestrator behind the command boundary.
 
 mod appicon;
 mod audioproxy;
+mod backups;
 mod blocked;
+mod brand;
 mod cipher;
 mod commands;
 mod db;
 mod diagnostics;
 mod discord;
+mod download;
+mod headless;
 mod hotkeys;
 mod http;
 mod import;
 #[cfg(target_os = "linux")]
 mod inhibit;
+mod jobs;
 mod lastfm;
 mod listentogether;
 mod local;
 mod lyrics;
 mod media;
+mod migrate_upstream;
 mod mini;
 #[cfg(target_os = "linux")]
 mod nativevideo;
@@ -26,8 +32,11 @@ mod nativevideo;
 mod nativevideo;
 mod notify;
 mod orchestrator;
+mod paths;
+mod pf_import;
 mod playlist_tools;
 mod potoken;
+mod quota;
 mod romanize;
 mod session;
 mod spotify;
@@ -37,6 +46,12 @@ mod taskbar;
 mod tray;
 mod videoproxy;
 mod webview;
+mod winstate;
+mod wintask;
+mod ytdata_accounts;
+mod ytdata_secrets;
+mod ytdata_status;
+mod ytdata_sync;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -249,6 +264,55 @@ fn fatal(what: &str, detail: &str) -> ! {
     std::process::exit(1)
 }
 
+/// Portable mode on a Windows with no WebView2 runtime: say so, and where to get it, then stop.
+/// The installer bootstraps the runtime; a portable zip cannot, and without it the window would
+/// simply never appear. Runs before the event loop exists, so a plain message box is safe here
+/// (unlike in `fatal`).
+#[cfg(windows)]
+fn webview2_missing() -> ! {
+    use windows::core::HSTRING;
+    use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR, MB_OK};
+
+    const URL: &str = "https://developer.microsoft.com/microsoft-edge/webview2/";
+    let name = brand::APP_NAME;
+    let text = format!(
+        "{name} needs the Microsoft Edge WebView2 Runtime, which is not installed on this PC.\n\n\
+         Download the Evergreen Runtime from:\n{URL}\n\nthen start {name} again."
+    );
+    // SAFETY: both strings outlive the call, and no owner window is passed.
+    unsafe { MessageBoxW(None, &HSTRING::from(text), &HSTRING::from(name), MB_OK | MB_ICONERROR) };
+    std::process::exit(1)
+}
+
+/// Build the main window from its `tauri.conf.json` entry, which is `"create": false` so that this
+/// happens here: in portable mode the webview profile has to point into `data` before the window
+/// exists, or Tauri creates `%LOCALAPPDATA%\<identifier>` for it. Installed builds get the exact
+/// config they always had. macOS still creates it from `tauri.macos.conf.json` (its window array
+/// replaces this one, `create` included), so an existing window is left alone.
+fn create_main_window(app: &tauri::App, data_dir: &std::path::Path) -> Result<(), String> {
+    if app.get_webview_window("main").is_some() {
+        return Ok(());
+    }
+    let conf = app
+        .config()
+        .app
+        .windows
+        .iter()
+        .find(|w| w.label == "main")
+        .ok_or("tauri.conf.json has no main window")?
+        .clone();
+    let mut builder =
+        tauri::WebviewWindowBuilder::from_config(app.handle(), &conf).map_err(|e| e.to_string())?;
+    if let Some(dir) = paths::webview_dir() {
+        builder = builder.data_directory(dir);
+    }
+    let win = builder.build().map_err(|e| e.to_string())?;
+    if paths::is_portable() {
+        winstate::attach(&win, data_dir);
+    }
+    Ok(())
+}
+
 /// Whether the OS launched us at login, through the autostart entry's `--autostart`.
 ///
 /// Not the argument alone: Tauri restarts (the update banner's relaunch, the tray's Restart) hand
@@ -259,7 +323,7 @@ fn fatal(what: &str, detail: &str) -> ! {
 static AUTOSTARTED: AtomicBool = AtomicBool::new(false);
 const RESTARTED_ENV: &str = "LIMUSIC_RESTARTED";
 
-/// What a cold launch was given, so `limusic-app 'https://music.youtube.com/watch?v=…'` opens the
+/// What a cold launch was given, so `limusic-forge 'https://music.youtube.com/watch?v=…'` opens the
 /// link once the SPA has mounted (#348). Taken once by `take_launch_args`. A launch while we are
 /// already running reaches the single-instance callback instead, which emits `open-link`. Raw
 /// strings either way: `parseYtLink` in the UI decides what is a link, so there is one parser.
@@ -274,10 +338,24 @@ fn should_start_minimized(db: &Db) -> bool {
         && tray::available()
 }
 
+/// The app's Tauri context, built once: the headless check (headless.rs) and the app share it, so
+/// the frontend's assets are embedded a single time.
+fn context() -> tauri::Context<tauri::Wry> {
+    tauri::generate_context!()
+}
+
 /// Tauri entry point. Applies the platform boot fixes (open-fd limit, NVIDIA/WebKit env), restores
 /// the persisted session, wires every command and plugin, and runs the event loop. context/01
 /// §startup.
 pub fn run() {
+    // `--monitor` (the Windows scheduled task, wintask.rs) checks the playlists with no window
+    // and exits; with the app already open, the single-instance plugin hands it over instead (D26).
+    // Not on macOS, whose config would create a window for it.
+    #[cfg(not(target_os = "macos"))]
+    if let Some(args) = headless::parse_args(std::env::args_os()) {
+        headless::run(args, context());
+    }
+
     // Must happen before any webview exists: the limit is inherited by the web processes WebKit
     // forks, and cannot be raised for them afterwards.
     #[cfg(target_os = "linux")]
@@ -344,6 +422,22 @@ pub fn run() {
         }
     }
 
+    // Portable mode (paths.rs): the WebView2 profile goes into `data\webview`. Every webview also
+    // gets it as its `data_directory`; the variable covers anything that reaches WebView2 without
+    // one. Before any webview exists, which is the only time WebView2 reads it.
+    #[cfg(windows)]
+    if let Some(dir) = paths::webview_dir() {
+        std::env::set_var("WEBVIEW2_USER_DATA_FOLDER", &dir);
+        if tauri::webview_version().is_err() {
+            webview2_missing();
+        }
+    }
+
+    // Phase 2 of Settings ▸ Import & migrate (migrate_upstream.rs): upstream LiMusic's data is
+    // copied in here, before anything opens the database or the webview profile it replaces.
+    // A no-op unless phase 1 left its marker. Logged once logging is up, in `setup`.
+    let migrated = migrate_upstream::apply_pending();
+
     let mut builder = tauri::Builder::default();
 
     // Must be the first plugin registered (its documented requirement). A second launch —
@@ -355,15 +449,38 @@ pub fn run() {
     // (Windows) pointing somewhere else, or the second copy opens the first one's SQLite file and
     // the two fight over it, which is what the guard exists to prevent:
     //
-    //     LIMUSIC_MULTI=1 XDG_DATA_HOME=/tmp/limusic-b ./target/debug/limusic-app
+    //     LIMUSIC_MULTI=1 XDG_DATA_HOME=/tmp/limusic-b ./target/debug/limusic-forge
     if std::env::var_os("LIMUSIC_MULTI").is_none() {
         builder = builder.plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+            // The scheduled task's `--monitor` runs the check here, window left as it is (D26).
+            if headless::forwarded(&args) == headless::Forwarded::Monitor {
+                headless::delegated_monitor(app);
+                return;
+            }
             tray::show_main(app);
-            // `limusic-app <link>` against this instance (#348). argv[0] leads on every platform.
+            // `limusic-forge <link>` against this instance (#348). argv[0] leads on every platform.
             if args.len() > 1 {
                 let _ = app.emit_to("main", "open-link", &args[1..]);
             }
         }));
+    }
+
+    // Reopen at the size/position the window was left at. Only "main": the mini widget is
+    // fixed-size and the login/cipher/PoToken webviews are windows too. Size, position and
+    // maximized only — VISIBLE would restore a window hidden to the tray as invisible, and
+    // DECORATIONS would fight the custom titlebar. Not in portable mode: the plugin creates
+    // `app_config_dir()` whatever file name it is given, so winstate.rs does this there instead.
+    if !paths::is_portable() {
+        builder = builder.plugin(
+            tauri_plugin_window_state::Builder::new()
+                .with_state_flags(
+                    tauri_plugin_window_state::StateFlags::SIZE
+                        | tauri_plugin_window_state::StateFlags::POSITION
+                        | tauri_plugin_window_state::StateFlags::MAXIMIZED,
+                )
+                .with_filter(|label| label == "main")
+                .build(),
+        );
     }
 
     builder
@@ -388,20 +505,6 @@ pub fn run() {
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             Some(vec!["--autostart"]),
         ))
-        // Reopen at the size/position the window was left at. Only "main": the mini widget is
-        // fixed-size and the login/cipher/PoToken webviews are windows too. Size, position and
-        // maximized only — VISIBLE would restore a window hidden to the tray as invisible, and
-        // DECORATIONS would fight the custom titlebar.
-        .plugin(
-            tauri_plugin_window_state::Builder::new()
-                .with_state_flags(
-                    tauri_plugin_window_state::StateFlags::SIZE
-                        | tauri_plugin_window_state::StateFlags::POSITION
-                        | tauri_plugin_window_state::StateFlags::MAXIMIZED,
-                )
-                .with_filter(|label| label == "main")
-                .build(),
-        )
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(|app, shortcut, event| {
@@ -411,13 +514,33 @@ pub fn run() {
                 })
                 .build(),
         )
-        .setup(|app| {
+        .setup(move |app| {
             let handle = app.handle().clone();
 
-            // App data dir for the SQLite file and mpv's on-disk audio cache.
-            let data_dir = app.path().app_data_dir().unwrap_or_else(|_| std::env::temp_dir());
+            // App data dir for the SQLite file and mpv's on-disk audio cache: `data` next to the
+            // exe in portable mode (paths.rs).
+            let data_dir = paths::data_dir(&handle);
             std::fs::create_dir_all(&data_dir).ok();
             init_logging(&data_dir);
+            if paths::is_portable() {
+                tracing::info!(dir = %data_dir.display(), "portable mode");
+            }
+            if let Some(problem) = paths::portable_problem() {
+                tracing::warn!("portable mode off: {problem}");
+            }
+            if let Some(r) = &migrated {
+                tracing::info!(
+                    status = %r.status,
+                    files = r.files,
+                    bytes = r.bytes,
+                    aside = ?r.aside,
+                    error = ?r.error,
+                    "upstream LiMusic migration"
+                );
+            }
+            if let Err(e) = create_main_window(app, &data_dir) {
+                fatal("LiMusic Forge could not open its window", &e);
+            }
             let cache_dir = data_dir.join("audio-cache");
             std::fs::create_dir_all(&cache_dir).ok();
 
@@ -426,7 +549,7 @@ pub fn run() {
             let (db, quarantined) = match Db::open_or_quarantine(&data_dir.join("limusic.sqlite")) {
                 Ok(v) => v,
                 Err(e) => fatal(
-                    "Limusic could not open or create its database",
+                    "LiMusic Forge could not open or create its database",
                     &format!("{}: {e}", data_dir.display()),
                 ),
             };
@@ -436,6 +559,20 @@ pub fn run() {
                 tracing::warn!(
                     "started with a fresh database; the previous one is at {}",
                     aside.display()
+                );
+            }
+            // The database may have just been replaced by upstream's, which never answered the
+            // first-run import prompt: write the answer back so it is not asked again. Only while
+            // the stored answer does not list this source yet, so a later answer is never undone.
+            let asked = db
+                .get_setting(migrate_upstream::PROMPTED_KEY)
+                .is_some_and(|v| v.contains(&format!("\"{}\"", migrate_upstream::SOURCE_ID)));
+            if let Some(r) = migrate_upstream::peek_result(&data_dir)
+                .filter(|r| r.status == "done" && !asked)
+            {
+                db.set_setting(
+                    migrate_upstream::PROMPTED_KEY,
+                    &migrate_upstream::prompted_after_migration(r.prompted.as_deref()),
                 );
             }
             let db = Arc::new(db);
@@ -478,7 +615,7 @@ pub fn run() {
             let session = Session { locale: Locale::default(), visitor_data, data_sync_id, cookie };
             let it = match InnerTube::new(session, proxy.as_deref()) {
                 Ok(it) => it,
-                Err(e) => fatal("Limusic could not start its network client", &e.to_string()),
+                Err(e) => fatal("LiMusic Forge could not start its network client", &e.to_string()),
             };
             // Shelf titles, mood chips and playlist subtitles are YouTube's text, so the UI's
             // language has to go out with the request (#274). Persisted rather than pushed from the
@@ -498,7 +635,7 @@ pub fn run() {
             let mut player = match Player::new(&cache_dir.to_string_lossy()) {
                 Ok(p) => p,
                 Err(e) => fatal(
-                    "Limusic could not load libmpv, which it uses to play audio",
+                    "LiMusic Forge could not load libmpv, which it uses to play audio",
                     &format!(
                         "{e}. On Linux, install your distribution's mpv library \
                          (Fedora: mpv-libs, Debian/Ubuntu: libmpv2)."
@@ -521,7 +658,7 @@ pub fn run() {
             let events = match player.take_events() {
                 Some(ev) => ev,
                 None => fatal(
-                    "Limusic could not start its audio event loop",
+                    "LiMusic Forge could not start its audio event loop",
                     "the player's event channel was already taken, which is a bug",
                 ),
             };
@@ -581,6 +718,34 @@ pub fn run() {
             ));
             app.manage(app_state.clone());
 
+            // Downloads (download/): the queue lives in SQLite, one task runs it, one yt-dlp at a
+            // time. Its start requeues interrupted runs and checks the downloaded files.
+            let downloads = download::runner::Runner::new();
+            app.manage(downloads.clone());
+            download::runner::spawn(app_state.clone(), downloads);
+
+            // The playlist job queue (jobs/): one runner for both engines, holding the runner lock
+            // so a headless run never writes the same playlists at once. The Data API's account
+            // manager reads its channels from the database and its client secret from the data
+            // dir; with neither, Data API jobs wait for the user and InnerTube ones run as usual.
+            let jobs_state = jobs::JobsState::new();
+            {
+                let store = ytdata_secrets::token_store(&handle);
+                let repo = Arc::new(ytdata_accounts::DbAccountsRepo::new(db.clone()));
+                match ytdata::auth::accounts::AccountManager::new(store, repo) {
+                    Ok(manager) => {
+                        let data_dir = paths::data_dir(&handle);
+                        if let Some(secret) = ytdata::client_secret::load_existing(&data_dir) {
+                            manager.set_client_secret(secret);
+                        }
+                        jobs_state.set_account_manager(Some(Arc::new(manager)));
+                    }
+                    Err(e) => tracing::warn!(error = %e, "jobs: no Data API account manager"),
+                }
+            }
+            app.manage(jobs_state.clone());
+            jobs::runner::spawn(app_state.clone(), jobs_state);
+
             // The player view's <video> pulls its bytes from Rust over loopback, so the webview
             // never sees a googlevideo URL (context/11). videoproxy.rs explains why a socket and
             // not a custom scheme.
@@ -600,8 +765,9 @@ pub fn run() {
             // window, "Could not connect to localhost". An AppImage moved after enabling leaves it
             // pointing at nothing. So an installed build repoints an existing entry at itself.
             // Only an existing one: `is_enabled` is false after a Task Manager disable on Windows,
-            // and that choice is the user's.
-            if !tauri::is_dev() {
+            // and that choice is the user's. Never in portable mode, which has no autostart: the
+            // entry would follow the folder around, or point at a stick that is not plugged in.
+            if !tauri::is_dev() && !paths::is_portable() {
                 use tauri_plugin_autostart::ManagerExt;
                 let al = app.autolaunch();
                 if al.is_enabled().unwrap_or(false) {
@@ -720,6 +886,25 @@ pub fn run() {
                             _ = rotated.notified() => st.persist_rotated_cookie(),
                             _ = keepalive.tick() => st.keep_session_alive().await,
                         }
+                    }
+                });
+            }
+
+            // The playlist monitor's clock: once a minute, a full sync if `monitor_interval_hours`
+            // says one is due (`commands::scheduled_sync`). The first look waits a minute: launch
+            // and sign-in already ask for the same due sync from the UI, which paints the saved
+            // marks from it, and the stamp and the monitor's lock keep the two from both crawling.
+            // A sync that failed is retried on a back-off (15 min doubling, up to the interval),
+            // not on every tick.
+            {
+                let st = app_state.clone();
+                tauri::async_runtime::spawn(async move {
+                    let mut tick = tokio::time::interval(Duration::from_secs(60));
+                    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                    tick.tick().await; // immediate
+                    loop {
+                        tick.tick().await;
+                        commands::scheduled_sync(&st).await;
                     }
                 });
             }
@@ -848,6 +1033,7 @@ pub fn run() {
             commands::ambient_frame,
             commands::get_settings,
             commands::set_setting,
+            commands::db_migration_error,
             commands::get_global_hotkeys,
             commands::global_hotkeys_on_wayland,
             commands::set_global_hotkeys,
@@ -881,6 +1067,39 @@ pub fn run() {
             commands::get_playlist_more,
             commands::playlist_index,
             commands::sync_playlist_index,
+            commands::sync_playlist,
+            commands::last_sync_summary,
+            commands::playlist_sync_info,
+            commands::playlist_added_dates,
+            commands::ytdata_status,
+            commands::ytdata_import_client_secret,
+            commands::ytdata_client_secret_info,
+            commands::ytdata_connect_start,
+            commands::ytdata_connect_cancel,
+            commands::ytdata_accounts,
+            commands::ytdata_disconnect,
+            commands::ytdata_link_account,
+            commands::budget_get,
+            commands::estimate_op,
+            commands::unseen_alert_count,
+            commands::monitor_stats,
+            commands::monitor_runs,
+            commands::alerts_by_day,
+            commands::backups_info,
+            commands::export_backups_now,
+            commands::open_backups_dir,
+            commands::download_tools_status,
+            commands::install_ytdlp,
+            commands::install_ffmpeg,
+            commands::downloads_info,
+            commands::open_downloads_dir,
+            commands::download_enqueue,
+            commands::download_cancel,
+            commands::download_retry,
+            commands::download_remove,
+            commands::download_active,
+            commands::downloads_for,
+            commands::downloads_recent,
             commands::play_counts,
             commands::get_album,
             commands::get_blocked_artists,
@@ -908,6 +1127,7 @@ pub fn run() {
             commands::remove_tracks,
             commands::transfer_tracks,
             commands::find_duplicates,
+            commands::playlist_rows,
             commands::plan_split,
             commands::merge_preview,
             commands::build_playlists,
@@ -917,6 +1137,8 @@ pub fn run() {
             commands::keep_only_in,
             commands::playlist_alerts,
             commands::dismiss_playlist_alert,
+            commands::mark_alerts_seen,
+            commands::playlist_timeline,
             commands::playlist_history,
             commands::undo_playlist_op,
             commands::create_playlist,
@@ -959,12 +1181,37 @@ pub fn run() {
             commands::theater_fullscreen,
             commands::release_notes,
             commands::can_self_update,
+            commands::install_info,
+            commands::import_sources,
+            commands::migrate_upstream_request,
+            commands::migrate_upstream_result,
+            commands::migrate_upstream_pending,
+            commands::migrate_upstream_cancel,
             commands::check_beta_update,
             commands::open_external,
             commands::diagnostics,
             commands::diagnostics_summary,
             commands::save_diagnostics,
             commands::log_ui,
+            commands::jobs_list,
+            commands::job_detail,
+            commands::job_pause,
+            commands::job_resume,
+            commands::job_cancel,
+            commands::job_retry_failed,
+            commands::job_set_priority,
+            commands::jobs_reorder,
+            commands::quota_today,
+            commands::quota_history,
+            commands::budget_partition,
+            commands::wintask_status,
+            commands::wintask_register,
+            commands::wintask_unregister,
+            commands::pf_detect,
+            commands::pf_preview,
+            commands::pf_import_apply,
+            commands::pf_import_credentials,
+            commands::pf_unregister_task,
         ])
         .on_window_event(|window, event| {
             // Close-to-tray: ✕ hides the main window and playback keeps running; real quit is
@@ -1001,7 +1248,7 @@ pub fn run() {
                 }
             }
         })
-        .build(tauri::generate_context!())
+        .build(context())
         .expect("error while building tauri application")
         .run(|handle, event| {
             // The hidden cipher/PoToken webviews are windows too, so closing the main window no
@@ -1014,6 +1261,11 @@ pub fn run() {
             {
                 if label == "main" {
                     handle.exit(0);
+                }
+            }
+            if let tauri::RunEvent::Exit = event {
+                if paths::is_portable() {
+                    winstate::save();
                 }
             }
         });
@@ -1165,7 +1417,14 @@ mod tests {
 
         // Only these two may differ; the frame is the compositor's on macOS.
         let overridden = ["decorations", "transparent"];
+        // `create: false` is for `create_main_window`, which builds the window by code so portable
+        // mode can point its webview profile into `data`. macOS is never portable, so its copy may
+        // keep the default and have Tauri create the window; `create_main_window` then skips it.
+        let optional = ["create"];
         for (k, v) in base_win {
+            if optional.contains(&k.as_str()) && !mac_win.contains_key(k) {
+                continue;
+            }
             let got = mac_win.get(k).unwrap_or_else(|| panic!("tauri.macos.conf.json drops `{k}`"));
             if !overridden.contains(&k.as_str()) {
                 assert_eq!(got, v, "tauri.macos.conf.json disagrees on `{k}`");
@@ -1180,6 +1439,48 @@ mod tests {
             mac["app"]["windows"][0].clone(),
         )
         .expect("macOS window config is not a valid WindowConfig");
+    }
+
+    /// The fork must never ship under upstream's identifier: that would share (and could clobber)
+    /// upstream LiMusic's data dirs, single-instance lock and updater channel. Also pins the names
+    /// `brand.rs` mirrors, and keeps the bundle version in step with Cargo's.
+    #[test]
+    fn brand_identity_is_forge() {
+        let conf: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+        assert_eq!(conf["identifier"], "com.limusicforge.desktop");
+        assert_eq!(conf["mainBinaryName"], crate::brand::APP_SLUG);
+        assert_eq!(conf["mainBinaryName"], "limusic-forge");
+        assert_eq!(conf["productName"], crate::brand::APP_NAME);
+        assert_eq!(conf["productName"], "LiMusic Forge");
+        assert_eq!(conf["app"]["windows"][0]["title"], crate::brand::APP_NAME);
+        assert_eq!(conf["version"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(env!("CARGO_PKG_NAME"), "limusic-forge");
+    }
+
+    /// The Windows installer the fork ships: NSIS only (WiX rejects the `-forge.N` suffix, so no
+    /// MSI while the version carries one), per-user so it never asks for elevation, English and
+    /// Spanish, and the WebView2 bootstrapper as the regular installer's mode. The updater
+    /// downloads this same setup, so it must stay small; the offline WebView2 setup is a second
+    /// CI pass that overrides `webviewInstallMode` with `--config`. Nothing here builds a Windows
+    /// bundle, so a drifted key would only surface in a release; this fails instead.
+    #[test]
+    fn windows_bundle_config_is_forge() {
+        let conf: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.windows.conf.json")).unwrap();
+        let bundle = &conf["bundle"];
+        assert_eq!(bundle["targets"], serde_json::json!(["nsis"]));
+        let resources = bundle["resources"].as_array().unwrap();
+        assert!(resources.contains(&serde_json::json!("libmpv-2.dll")));
+
+        let win = &bundle["windows"];
+        assert_eq!(win["nsis"]["installMode"], "currentUser");
+        assert_eq!(win["nsis"]["languages"], serde_json::json!(["English", "Spanish"]));
+        assert_eq!(win["webviewInstallMode"]["type"], "downloadBootstrapper");
+
+        // Catches a typo or a key Tauri would reject.
+        serde_json::from_value::<tauri::utils::config::WindowsConfig>(win.clone())
+            .expect("bundle.windows is not a valid WindowsConfig");
     }
 
     #[test]

@@ -29,11 +29,11 @@
 		FilterHorizontalIcon,
 		FileExportIcon,
 		ArrowReloadHorizontalIcon,
+		RefreshIcon,
 		Tick02Icon
 	} from '@hugeicons/core-free-icons';
 	import { Badge } from '$lib/components/ui/badge';
 	import { Button } from '$lib/components/ui/button';
-	import * as RadioGroup from '$lib/components/ui/radio-group';
 	import * as AlertDialog from '$lib/components/ui/alert-dialog';
 	import { Skeleton } from '$lib/components/ui/skeleton';
 	import TrackRow from '$lib/components/TrackRow.svelte';
@@ -46,7 +46,8 @@
 	import ErrorState from '$lib/components/ErrorState.svelte';
 	import * as api from '$lib/api';
 	import { ON_REPEAT_ID } from '$lib/api';
-	import type { BrowseItem, PlaylistPage, SongItem } from '$lib/api';
+	import type { BrowseItem, PlaylistPage, PlaylistSyncInfo, SongItem } from '$lib/api';
+	import { infoFor, relativeAgo, syncLine } from '$lib/plsort';
 	import { getCached, putCached, invalidateCachedPrefix } from '$lib/pagecache';
 	import { thumb } from '$lib/thumb';
 	import { anchorMenu, fitMenu, NO_ANCHOR } from '$lib/menu';
@@ -56,6 +57,7 @@
 	import { dragScroll, isDragRows, setDragRows, TRACK_ROWS_MIME, type TrackRowsDrag } from '$lib/dnd';
 	import MoveToPlaylist from '$lib/components/MoveToPlaylist.svelte';
 	import PlaylistToolsDialog from '$lib/components/PlaylistToolsDialog.svelte';
+	import PlaylistSortPanel from '$lib/components/PlaylistSortPanel.svelte';
 	import ExportPlaylist from '$lib/components/ExportPlaylist.svelte';
 	import FilterChips from '$lib/components/FilterChips.svelte';
 	import { applyFacets, facetsActive, NO_FACETS, regexFilter, type Facets } from '$lib/facets';
@@ -64,7 +66,6 @@
 	import { t } from '$lib/i18n.svelte';
 	import { imp, updateFromSpotify } from '$lib/import.svelte';
 	import {
-		SORTS,
 		fetchSort,
 		persistedSort,
 		sortSongs,
@@ -223,6 +224,75 @@
 				? (pl.subtitle ?? '').replace(/^[\d,.]+ songs?/i, `${pl.items.length} songs`)
 				: pl?.subtitle
 	);
+	// --- last sync and "Sync" (the playlist monitor) ------------------------------------------------
+	// Only what the monitor reads: a YouTube playlist you own or edit, or Liked Music. A playlist on
+	// this machine and On Repeat have nothing on YouTube to read.
+	const canSync = $derived(
+		!!pl &&
+			!!auth.account?.signedIn &&
+			!isOnRepeat &&
+			!isLocalList &&
+			(pl.owned || !!pl.collaborative || isLiked)
+	);
+	let syncInfo = $state<PlaylistSyncInfo | null>(null);
+	let syncingThis = $state(false);
+	function loadSyncInfo(pid: string) {
+		api
+			.playlistSyncInfo()
+			.then((all) => {
+				if (pid === id) syncInfo = infoFor(all, pid) ?? null;
+			})
+			.catch(() => {});
+	}
+	$effect(() => {
+		const pid = id;
+		syncInfo = null;
+		if (pid) untrack(() => loadSyncInfo(pid));
+	});
+	// Any sync's end (this button's, a menu's, Sync all, the scheduler) may have read this one.
+	// "2 h ago" ages on a minute's tick while the page stays open.
+	let now = $state(Date.now() / 1000);
+	$effect(() => {
+		const off = api.onPlaylistIndexSynced(() => loadSyncInfo(untrack(() => id)));
+		const tick = setInterval(() => (now = Date.now() / 1000), 60_000);
+		return () => {
+			clearInterval(tick);
+			void off.then((f) => f());
+		};
+	});
+	const syncedText = $derived.by(() => {
+		if (!syncInfo) return null;
+		const a = relativeAgo(syncInfo.synced_at, now);
+		const ago = t(`library.sync_ago_${a.unit}`, { n: a.n });
+		const changes = syncLine(syncInfo);
+		return changes
+			? t('library.synced_line_changes', { ago, changes })
+			: t('library.synced_line', { ago });
+	});
+	// Then the rows again: the sync read YouTube's copy, which may differ from the cached one here.
+	async function syncThis() {
+		if (syncingThis) return;
+		const pid = id;
+		syncingThis = true;
+		try {
+			const s = await api.syncPlaylist(pid);
+			const changes = syncLine(s);
+			toast.success(changes ? t('library.sync_done', { changes }) : t('library.sync_no_changes'));
+			if (pid === id) {
+				invalidateCachedPrefix(`playlist:${pid}`);
+				await load(pid);
+			}
+		} catch (e) {
+			const msg = String(e);
+			if (msg === 'busy') toast(t('monitor.busy'));
+			else if (msg === 'unreadable') toast.error(t('library.sync_unreadable'));
+			else toast.error(msg);
+		} finally {
+			syncingThis = false;
+			loadSyncInfo(pid);
+		}
+	}
+
 	// How many times each video is in this playlist: the ×2 chip on its rows, and the duplicates facet.
 	const copies = $derived.by(() => {
 		const n = new Map<string, number>();
@@ -1265,6 +1335,9 @@
 						{pl.title ?? t('common.playlist_singular')}
 					</h1>
 					{#if subtitle}<p class="mt-2 text-sm text-muted-foreground">{subtitle}</p>{/if}
+					{#if syncedText && canSync}
+						<p class="mt-1 text-xs tabular-nums text-muted-foreground">{syncedText}</p>
+					{/if}
 					{#if pl.description}
 						<!-- Two lines, then More/Less, same as the album page. -->
 						<div class="mt-2 max-w-2xl">
@@ -1303,6 +1376,19 @@
 								{selection}
 								class="-ml-2 flex h-9 w-9 cursor-pointer items-center justify-center rounded-full transition hover:bg-muted hover:text-foreground"
 							/>
+							{#if canSync}
+								<Button
+									variant="ghost"
+									size="sm"
+									class="gap-2 text-muted-foreground"
+									title={t('library.sync_tooltip')}
+									disabled={syncingThis}
+									onclick={syncThis}
+								>
+									<HugeiconsIcon icon={RefreshIcon} class="h-4 w-4 {syncingThis ? 'animate-spin' : ''}" />
+									{syncingThis ? t('library.syncing') : t('library.sync')}
+								</Button>
+							{/if}
 						</div>
 						<!-- Pushed to the far end of the header, away from the play controls. -->
 						<div class="flex items-center gap-1">
@@ -1514,31 +1600,13 @@
 		style={sortAnchor.style}
 		{@attach fitMenu(sortAnchor)}
 	>
-		<RadioGroup.Root
+		<PlaylistSortPanel
 			value={sort}
-			onValueChange={(v) => chooseSort(v as SortKey)}
-			class="gap-0"
-		>
-			{#each SORTS as key (key)}
-				<label
-					class="flex w-full cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm hover:bg-accent/10"
-				>
-					<RadioGroup.Item value={key} />
-					{t(`sort.${key}`)}
-				</label>
-			{/each}
-		</RadioGroup.Root>
-		{#if reorderable && (sort !== 'default' || desc)}
-			<div class="my-1 h-px bg-border"></div>
-			<button
-				class="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm hover:bg-accent/10 disabled:opacity-50"
-				onclick={keepSortAsOrder}
-				disabled={savingOrder}
-			>
-				<HugeiconsIcon icon={Tick02Icon} class="h-4 w-4" />
-				{t('reorder.keep_sort')}
-			</button>
-		{/if}
+			onchoose={chooseSort}
+			canKeep={reorderable && (sort !== 'default' || desc)}
+			onkeep={keepSortAsOrder}
+			saving={savingOrder}
+		/>
 	</div>
 {/if}
 

@@ -15,7 +15,7 @@ use std::path::Path;
 use std::sync::LazyLock;
 
 use regex::Regex;
-use tauri::{AppHandle, Manager};
+use tauri::AppHandle;
 
 use crate::db::Db;
 
@@ -56,12 +56,12 @@ const SECRET_ENV_KEYS: &[&str] =
 pub fn report(app: &AppHandle, db: &Db) -> String {
     let mut out = String::new();
     out.push_str(
-        "# Limusic diagnostics. Paste this into your bug report.\n\
+        "# LiMusic Forge diagnostics. Paste this into your bug report.\n\
          # Cookies, tokens, signed URLs, file paths and IP addresses have been removed.\n\n",
     );
     out.push_str(&redact(&header(app, db)));
 
-    let dir = app.path().app_data_dir().unwrap_or_else(|_| std::env::temp_dir());
+    let dir = crate::paths::data_dir(app);
     let budget = MAX_CHARS.saturating_sub(out.chars().count() + 64);
     let log = redact(&log_text(&dir, budget));
     out.push_str("\n--- log ---\n");
@@ -88,7 +88,7 @@ fn header(app: &AppHandle, db: &Db) -> String {
     let mut out = String::new();
     let _ = writeln!(
         out,
-        "Limusic {} ({} {}, {})",
+        "LiMusic Forge {} ({} {}, {})",
         env!("CARGO_PKG_VERSION"),
         std::env::consts::OS,
         std::env::consts::ARCH,
@@ -174,11 +174,16 @@ fn yes_no(b: bool) -> &'static str {
 /// How this copy was installed, which decides whether the in-app updater can do anything and how
 /// the user should update. Mirrors [`crate::commands::can_self_update`]'s reasoning.
 fn install_kind(app: &AppHandle) -> &'static str {
+    // Before the dev check: where the data lives is the first thing a portable report needs.
+    if crate::paths::is_portable() {
+        return "portable";
+    }
     if cfg!(debug_assertions) {
         return "dev build";
     }
     #[cfg(target_os = "linux")]
     {
+        use tauri::Manager;
         if app.env().appimage.is_some() {
             return "AppImage";
         }
@@ -334,14 +339,14 @@ mod tests {
     #[test]
     fn redaction_leaves_the_header_readable() {
         let header = concat!(
-            "Limusic 0.7.3 (linux x86_64, AppImage)\n",
+            "LiMusic Forge 0.7.3 (linux x86_64, AppImage)\n",
             "System: Fedora Linux 44 (KDE Plasma), kernel 7.1.8-200.fc44.x86_64, wayland session on KDE\n",
             "WebKitGTK: 2.50.6, NVIDIA: yes\n",
             "Signed in: yes | Proxy: no | Quality: HIGH | Normalize: yes | Music videos: yes | Disabled clients: none\n",
         );
         let out = redact(header);
         for kept in [
-            "Limusic 0.7.3",
+            "LiMusic Forge 0.7.3",
             "Fedora Linux 44",
             "7.1.8-200.fc44.x86_64",
             "WebKitGTK: 2.50.6",

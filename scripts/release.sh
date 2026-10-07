@@ -19,16 +19,17 @@
 # CI has attached the binaries, the updater endpoint (.../releases/latest/download/latest.json)
 # keeps resolving to the previous, complete manifest instead of one with no platforms in it.
 #
-# Usage:  scripts/release.sh ["release notes"]
+# Usage:  bash scripts/release.sh ["release notes"]
 # Bump "version" in src-tauri/tauri.conf.json AND Cargo.toml BEFORE running (tauri.conf.json is the
 # app version the updater compares against; the preflight below refuses to run if they disagree).
 #
-# Requires: the private signing key at ~/.tauri/limusic.key, `gh` authed, jq, curl.
+# Requires: the private signing key at ~/.tauri/limusic-forge.key (docs/RELEASING-FORK.md), `gh`
+# authed, jq, curl.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-REPO="SimoHypers/limusic"
-KEY="${TAURI_SIGNING_PRIVATE_KEY_FILE:-$HOME/.tauri/limusic.key}"
+REPO="Kushro/limusic-forge"
+KEY="${TAURI_SIGNING_PRIVATE_KEY_FILE:-$HOME/.tauri/limusic-forge.key}"
 NOTES="${1:-See the commit history for changes.}"
 
 die() { echo "ERROR: $*" >&2; exit 1; }
@@ -48,12 +49,27 @@ semver_gt() {
   [ "$(printf '%s\n%s\n' "${1#*-}" "${2#*-}" | sort -V | tail -1)" = "${1#*-}" ]
 }
 
+# is_prerelease V: drop build metadata (+…), take the suffix after the FIRST '-', and V is a
+# prerelease only if that suffix starts with rc, beta or alpha, any case. Any other suffix is a
+# stable release: the fork ships 1.2.0-forge.1 (and 1.2.0-forge.2-rc.1) as Latest (design D1).
+# Same rule as isPrerelease (ui/src/lib/version.ts), is_prerelease (src-tauri/src/commands.rs)
+# and the identical function in the three release workflows. `tr`, not ${x,,}: macOS bash is 3.2.
+is_prerelease() {
+  local core="${1%%+*}"
+  case "$core" in *-*) ;; *) return 1 ;; esac
+  case "$(printf '%s' "${core#*-}" | tr '[:upper:]' '[:lower:]')" in rc*|beta*|alpha*) return 0 ;; *) return 1 ;; esac
+}
+
+# `RELEASE_SH_LIB=1 source scripts/release.sh` stops here, with the two functions above defined
+# and nothing run, so they can be tested without a release.
+if [ "${RELEASE_SH_LIB:-}" = 1 ]; then return 0 2>/dev/null || exit 0; fi
+
 VERSION="$(jq -r .version src-tauri/tauri.conf.json)"
 [ "$VERSION" != "null" ] && [ -n "$VERSION" ] || die "no version in tauri.conf.json"
 TAG="v$VERSION"
-# A version with a `-` (1.1.0-rc.1) is a release candidate: published as a prerelease, never
-# Latest, no rpm, and reaching only installs on the beta channel (RELEASING.md §8).
-RC=0; [[ "$VERSION" != *-* ]] || RC=1
+# A release candidate (1.1.0-rc.1) is published as a prerelease, never Latest, no rpm, and reaches
+# only installs on the beta channel (RELEASING.md §8). 1.2.0-forge.1 is not one.
+RC=0; ! is_prerelease "$VERSION" || RC=1
 echo "==> Releasing $TAG$([ "$RC" = 0 ] || echo " (release candidate, beta channel only)")"
 
 # ---------------------------------------------------------------------------
@@ -98,7 +114,7 @@ git fetch --quiet origin master
 # already holds. The `beta` pointer's own tag is not a version and is skipped.
 HIGHEST=""
 while read -r v; do
-  [ "$RC" = 1 ] || [[ "$v" != *-* ]] || continue
+  [ "$RC" = 1 ] || ! is_prerelease "$v" || continue
   if [ -z "$HIGHEST" ] || semver_gt "$v" "$HIGHEST"; then HIGHEST="$v"; fi
 done < <(gh release list --repo "$REPO" --limit 50 --json tagName --jq '.[].tagName' \
   | sed -n 's/^v\([0-9]\)/\1/p')
@@ -211,16 +227,27 @@ else
     echo "ERROR: the rpm build failed, but $TAG is already published and CI is building the rest." >&2
     echo "       Fix it, then attach the rpm by hand:" >&2
     echo "         cargo tauri build --bundles rpm" >&2
-    echo "         gh release upload $TAG target/release/bundle/rpm/limusic-$VERSION-*.rpm --clobber --repo $REPO" >&2
+    echo "         then rename it to limusic-forge_${VERSION}_x86_64.rpm and" >&2
+    echo "         gh release upload $TAG limusic-forge_${VERSION}_x86_64.rpm --clobber --repo $REPO" >&2
     exit 1
   fi
 
   # Pin to $VERSION — a stale bundle from a previous build otherwise sorts first and gets shipped
-  # (e.g. an old 0.1.1 rpm uploaded to the 0.1.2 release).
-  RPM="$(ls target/release/bundle/rpm/limusic-${VERSION}-*.rpm 2>/dev/null | head -1)"
+  # (e.g. an old 0.1.1 rpm uploaded to the 0.1.2 release). The bundler names it after productName
+  # ("LiMusic Forge-<version>-1.x86_64.rpm"), and rpm forbids `-` inside a version, so the
+  # 1.2.0-forge.1 in the name may come out with the dash rewritten; try each spelling.
+  RPM=""
+  for v in "$VERSION" "${VERSION//-/\~}" "${VERSION//-/_}" "${VERSION//-/.}"; do
+    RPM="$(ls -t target/release/bundle/rpm/*-"$v"-*.rpm 2>/dev/null | head -1 || true)"
+    [ -z "$RPM" ] || break
+  done
   [ -n "$RPM" ] || die "no rpm for $VERSION in target/release/bundle/rpm"
-  gh release upload "$TAG" "$RPM" --clobber --repo "$REPO"
-  echo "    attached $(basename "$RPM")"
+  # Ship it under the same slug as every other asset: limusic-forge_<version>_<arch>.rpm.
+  ARCH="${RPM%.rpm}"; ARCH="${ARCH##*.}"
+  SLUG="target/release/bundle/rpm/limusic-forge_${VERSION}_${ARCH}.rpm"
+  [ "$RPM" = "$SLUG" ] || cp -f "$RPM" "$SLUG"
+  gh release upload "$TAG" "$SLUG" --clobber --repo "$REPO"
+  echo "    attached $(basename "$SLUG") (built as $(basename "$RPM"))"
 fi
 
 # ---------------------------------------------------------------------------

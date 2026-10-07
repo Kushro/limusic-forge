@@ -12,12 +12,14 @@
 		KeyboardIcon,
 		Cancel01Icon as RemoveIcon,
 		Copy01Icon,
-		Coffee02Icon,
 		DiscordIcon,
 		Globe02Icon,
 		ArrowDown01Icon,
 		Alert02Icon,
-		LinkSquare02Icon
+		LinkSquare02Icon,
+		DatabaseImportIcon,
+		Download04Icon,
+		YoutubeIcon
 	} from '@hugeicons/core-free-icons';
 	import { Button } from '$lib/components/ui/button';
 	import { Input } from '$lib/components/ui/input';
@@ -31,7 +33,18 @@
 	import { HELP_COMBO } from '$lib/shortcuts';
 	import { copyText } from '$lib/clipboard';
 	import * as api from '$lib/api';
-	import { blocked, prefs, refreshView, setAutoplay, ui, toast, unblockArtist, type DropMode } from '$lib/player.svelte';
+	import { pendingNotice } from '$lib/onboarding';
+	import {
+		blocked,
+		prefs,
+		refreshView,
+		setAutoplay,
+		ui,
+		toast,
+		unblockArtist,
+		type DropMode,
+		type SettingsTab
+	} from '$lib/player.svelte';
 	import { rememberDrop } from '$lib/transfer.svelte';
 	const DROP_MODES: DropMode[] = ['ask', 'copy', 'move'];
 	import { win } from '$lib/win.svelte';
@@ -71,13 +84,23 @@
 		recheckForUpdates
 	} from '$lib/updater.svelte';
 	import { getVersion } from '@tauri-apps/api/app';
-	import { t, setLocale, currentLocale, LOCALES } from '$lib/i18n.svelte';
+	import { t, setLocale, currentLocale, LOCALES, type TranslationKey } from '$lib/i18n.svelte';
 	import { appIcon, chooseAppIcon } from '$lib/appicon.svelte';
 	import GlobalHotkeysSettings from '$lib/components/GlobalHotkeysSettings.svelte';
 	import LyricsSourcesSettings from '$lib/components/LyricsSourcesSettings.svelte';
 	import LanguagePicker from '$lib/components/LanguagePicker.svelte';
+	import { APP_NAME, REPO_URL, UPSTREAM_VERSION } from '$lib/brand';
+	import YtDataStatusLine from '$lib/components/ytdata/StatusLine.svelte';
+	import ConnectGuide from '$lib/components/ytdata/ConnectGuide.svelte';
+	import YtDataAccounts from '$lib/components/ytdata/Accounts.svelte';
+	import EngineSettings from '$lib/components/ytdata/EngineSettings.svelte';
+	import LocalEchoSlider from '$lib/components/ytdata/LocalEchoSlider.svelte';
+	import BudgetSettings from '$lib/components/ytdata/BudgetSettings.svelte';
+	import ScheduleSettings from '$lib/components/ytdata/ScheduleSettings.svelte';
+	import PfPreview from '$lib/components/import/PfPreview.svelte';
 
-	type TabId = 'general' | 'themes' | 'playback' | 'hotkeys' | 'discord' | 'data' | 'about';
+	// `downloads` is only reached from the rail, so it is not one of the tabs others open onto.
+	type TabId = SettingsTab | 'downloads';
 	const TABS = $derived<{ id: TabId; label: string; hint: string; icon: typeof Settings02Icon }[]>([
 		{ id: 'general', label: t('settings.tabs.general'), hint: t('settings.tabs.general_hint'), icon: Settings02Icon },
 		{ id: 'themes', label: t('settings.tabs.themes'), hint: t('settings.tabs.themes_hint'), icon: PaintBoardIcon },
@@ -85,6 +108,15 @@
 		{ id: 'hotkeys', label: t('settings.tabs.hotkeys'), hint: t('settings.tabs.hotkeys_hint'), icon: KeyboardIcon },
 		{ id: 'discord', label: t('settings.tabs.discord'), hint: t('settings.tabs.discord_hint'), icon: DiscordIcon },
 		{ id: 'data', label: t('settings.tabs.data'), hint: t('settings.tabs.data_hint'), icon: Database02Icon },
+		// D31: the Data API's own tab (channels, guide, budget, engine, queue, local echo).
+		{ id: 'ytdata', label: t('settings.tabs.ytdata'), hint: t('settings.tabs.ytdata_hint'), icon: YoutubeIcon },
+		{
+			id: 'downloads',
+			label: t('settings.tabs.downloads'),
+			hint: t('settings.tabs.downloads_hint'),
+			icon: Download04Icon
+		},
+		{ id: 'import', label: t('settings.tabs.import'), hint: t('settings.tabs.import_hint'), icon: DatabaseImportIcon },
 		{ id: 'about', label: t('settings.tabs.about'), hint: t('settings.tabs.about_hint'), icon: InformationCircleIcon }
 	]);
 
@@ -217,6 +249,11 @@
 	// nothing to take from the beta channel. Shown in dev, which is never the AppImage either.
 	let betaAvailable = $state(import.meta.env.DEV);
 	api.canSelfUpdate().then((v) => (betaAvailable ||= v)).catch(() => {});
+	// Portable copies (a `data` folder next to the exe) install nothing: no autostart entry, and
+	// About says where the data lives.
+	let install = $state<api.InstallInfo | null>(null);
+	api.installInfo().then((v) => (install = v)).catch(() => {});
+	const portable = $derived(install?.portable === true);
 	// Result of the last "Check for updates" click — shown inline (a toast renders behind the modal).
 	let updateResult = $state<{ message: string; error: boolean } | null>(null);
 
@@ -227,14 +264,18 @@
 	$effect(() => {
 		if (!ui.settingsOpen) return;
 		untrack(() => {
-			// Opened on a section from elsewhere (the lyrics source picker): its tab, scrolled to it
-			// once the tab has rendered.
-			if (ui.settingsFocus) {
-				tab = 'playback';
-				const id = `settings-${ui.settingsFocus}`;
-				ui.settingsFocus = null;
+			// Opened on a tab or a section from elsewhere (the lyrics source picker, the first-run
+			// import prompt): that tab, scrolled to the section once the tab has rendered.
+			const focus =
+				ui.settingsFocus === 'lyrics'
+					? { tab: 'playback' as const, section: 'lyrics' }
+					: ui.settingsFocus;
+			ui.settingsFocus = null;
+			if (focus) {
+				tab = focus.tab;
+				const id = focus.section ? `settings-${focus.section}` : null;
 				load().then(tick).then(() => {
-					document.getElementById(id)?.scrollIntoView({ block: 'start', behavior: 'smooth' });
+					if (id) document.getElementById(id)?.scrollIntoView({ block: 'start', behavior: 'smooth' });
 				});
 			} else {
 				load();
@@ -250,6 +291,103 @@
 			}
 		});
 	});
+
+	// --- Import & migrate tab ---
+	// Detection runs each time the tab is shown: LiMusic being open or closed changes while the
+	// dialog is up, and the button depends on it.
+	let sources = $state<api.ImportSources | null>(null);
+	let sourcesError = $state('');
+	let includeWebview = $state(true);
+	let migrating = $state(false);
+	let migrateError = $state('');
+	// A migration marker still waiting (valid ten minutes; past that, never carried out on its own).
+	let pending = $state<api.MigratePending | null>(null);
+	const pendingKind = $derived(pendingNotice(pending));
+	let pendingBusy = $state(false);
+	let pendingError = $state('');
+	async function loadImport() {
+		sourcesError = '';
+		try {
+			sources = await api.importSources();
+		} catch (e) {
+			sourcesError = String(e);
+		}
+		pending = await api.migrateUpstreamPending().catch(() => null);
+	}
+	async function retryPending() {
+		if (!pending) return;
+		pendingError = '';
+		pendingBusy = true;
+		try {
+			// A fresh marker and a restart: nothing after this line runs on success.
+			await api.migrateUpstreamRequest(pending.include_webview);
+		} catch (e) {
+			pendingBusy = false;
+			pendingError =
+				String(e) === 'upstream_running' ? t('settings.import.limusic_running') : String(e);
+			loadImport();
+		}
+	}
+	async function cancelPending() {
+		pendingError = '';
+		pendingBusy = true;
+		try {
+			await api.migrateUpstreamCancel();
+			if (ui.importResult?.status === 'retry' || ui.importResult?.status === 'expired') {
+				ui.importResult = null;
+			}
+		} catch (e) {
+			pendingError = String(e);
+		} finally {
+			pendingBusy = false;
+			loadImport();
+		}
+	}
+	$effect(() => {
+		if (ui.settingsOpen && tab === 'import') untrack(loadImport);
+	});
+
+	// --- YouTube Data API tab ---
+	// The imported client is read here, once per visit, and shared: the guide replaces it, the
+	// channels list needs it to connect. The guide mounts only once it is known, so it opens itself
+	// when there is none.
+	let ytSecret = $state<api.ClientSecretInfo | null>(null);
+	let ytSecretLoaded = $state(false);
+	async function loadYtSecret() {
+		ytSecretLoaded = false;
+		try {
+			ytSecret = await api.ytdataClientSecretInfo();
+		} catch {
+			ytSecret = null;
+		}
+		ytSecretLoaded = true;
+	}
+	$effect(() => {
+		if (ui.settingsOpen && tab === 'ytdata') untrack(loadYtSecret);
+	});
+	async function migrateUpstream() {
+		migrateError = '';
+		migrating = true;
+		try {
+			// Restarts the app on success: nothing after this line runs.
+			await api.migrateUpstreamRequest(includeWebview);
+		} catch (e) {
+			migrating = false;
+			migrateError =
+				String(e) === 'upstream_running' ? t('settings.import.limusic_running') : String(e);
+			loadImport();
+		}
+	}
+	const sizeLabel = (bytes: number) =>
+		bytes >= 1 << 30
+			? `${(bytes / (1 << 30)).toFixed(1)} GB`
+			: `${Math.max(1, Math.round(bytes / (1 << 20)))} MB`;
+	const offerAutostart = $derived(
+		ui.importResult?.status === 'done' &&
+			ui.importResult.upstream_autostart === true &&
+			!portable &&
+			settings.autostart !== 'true'
+	);
 
 	async function checkUpdates() {
 		updateResult = await checkForUpdatesInteractive();
@@ -280,7 +418,7 @@
 		diagError = '';
 		try {
 			const path = await save({
-				defaultPath: `limusic-diagnostics-${new Date().toISOString().slice(0, 10)}.txt`,
+				defaultPath: `limusic-forge-diagnostics-${new Date().toISOString().slice(0, 10)}.txt`,
 				filters: [{ name: 'Text', extensions: ['txt'] }]
 			});
 			if (!path) return;
@@ -304,7 +442,7 @@
 				version,
 				system
 			});
-			await api.openExternal(`https://github.com/SimoHypers/limusic/issues/new?${q}`);
+			await api.openExternal(`${REPO_URL}/issues/new?${q}`);
 		} catch (e) {
 			diagError = String(e);
 		}
@@ -534,6 +672,228 @@
 			clearing = false;
 		}
 	}
+
+	// --- Data tab: playlist snapshot backups (backups.rs) ---
+	// The folder and the count are the `monitor.backups_dir` and `retention_keep_last` settings
+	// (PlaylistForge's keys); `backupsInfo` resolves them, an empty folder being the default.
+	let backups = $state<api.BackupsInfo | null>(null);
+	let keepInput = $state('');
+	let backupsBusy = $state(false);
+	// Toasts render behind this modal, so the section reports on itself.
+	let backupsNote = $state<{ message: string; error: boolean } | null>(null);
+	async function loadBackups() {
+		try {
+			backups = await api.backupsInfo();
+			keepInput = String(backups.keep);
+		} catch (e) {
+			backupsNote = { message: String(e), error: true };
+		}
+	}
+	$effect(() => {
+		if (ui.settingsOpen && tab === 'data')
+			untrack(() => {
+				backupsNote = null;
+				loadBackups();
+			});
+	});
+	async function pickBackupsDir() {
+		try {
+			const picked = await open({
+				directory: true,
+				title: t('settings.data.backups_dir_dialog'),
+				defaultPath: backups?.dir
+			});
+			if (typeof picked !== 'string') return;
+			await api.setSetting('monitor.backups_dir', picked);
+			await loadBackups();
+		} catch (e) {
+			backupsNote = { message: String(e), error: true };
+		}
+	}
+	async function resetBackupsDir() {
+		try {
+			await api.setSetting('monitor.backups_dir', '');
+			await loadBackups();
+		} catch (e) {
+			backupsNote = { message: String(e), error: true };
+		}
+	}
+	async function saveKeep() {
+		const n = Math.floor(Number(keepInput.trim()));
+		if (!Number.isFinite(n) || n < 1) {
+			keepInput = String(backups?.keep ?? 30);
+			return;
+		}
+		if (n === backups?.keep) return;
+		try {
+			await api.setSetting('retention_keep_last', String(n));
+			await loadBackups();
+		} catch (e) {
+			backupsNote = { message: String(e), error: true };
+		}
+	}
+	async function exportBackups() {
+		backupsNote = null;
+		backupsBusy = true;
+		try {
+			const r = await api.exportBackupsNow();
+			backupsNote = {
+				message: t('settings.data.backups_exported', { written: r.written, pruned: r.pruned_files }),
+				error: false
+			};
+		} catch (e) {
+			const busy = String(e) === 'busy';
+			backupsNote = { message: busy ? t('settings.data.backups_busy') : String(e), error: true };
+		} finally {
+			backupsBusy = false;
+		}
+	}
+	async function openBackups() {
+		try {
+			await api.openBackupsDir();
+		} catch (e) {
+			backupsNote = { message: String(e), error: true };
+		}
+	}
+
+	// --- Downloads tab (Rust `download/`) ---
+	// yt-dlp and ffmpeg: installed into the app's folder on Windows (`managed`), from PATH
+	// elsewhere. The selects write the `downloads.*` settings; each falls back to the Rust default.
+	type DlSelect = { key: string; fallback: string; options: string[]; prefix: string };
+	const DL_SELECTS = {
+		format: { key: 'downloads.default_format', fallback: 'audio', options: ['audio', 'video'], prefix: 'format' },
+		audio: {
+			key: 'downloads.audio_quality',
+			fallback: 'mp3_320',
+			options: ['best', 'mp3_320', 'mp3_256', 'mp3_192'],
+			prefix: 'audio'
+		},
+		video: { key: 'downloads.video_quality', fallback: 'best', options: ['best', '1080p', '720p'], prefix: 'video' },
+		thumbnail: {
+			key: 'downloads.thumbnail_mode',
+			fallback: 'embed',
+			options: ['embed', 'file', 'both', 'none'],
+			prefix: 'thumbnail'
+		},
+		cookies: { key: 'downloads.cookies', fallback: 'session', options: ['session', 'none'], prefix: 'cookies' },
+		channel: { key: 'downloads.ytdlp_channel', fallback: 'stable', options: ['stable', 'nightly'], prefix: 'channel' }
+	} satisfies Record<string, DlSelect>;
+	const dlLabel = (prefix: string, value: string) =>
+		t(`settings.downloads.${prefix}_${value}` as TranslationKey);
+
+	let tools = $state<api.ToolsStatus | null>(null);
+	let dlInfo = $state<api.DownloadsInfo | null>(null);
+	let installing = $state<api.ToolsInstallProgress['tool'] | null>(null);
+	let installProgress = $state<api.ToolsInstallProgress | null>(null);
+	// Toasts render behind this modal, so the sections report on themselves.
+	let toolsNote = $state<{ message: string; error: boolean } | null>(null);
+	let dlNote = $state<{ message: string; error: boolean } | null>(null);
+
+	async function loadDownloads() {
+		try {
+			[tools, dlInfo] = await Promise.all([api.downloadToolsStatus(), api.downloadsInfo()]);
+		} catch (e) {
+			toolsNote = { message: String(e), error: true };
+		}
+	}
+	$effect(() => {
+		if (ui.settingsOpen && tab === 'downloads')
+			untrack(() => {
+				toolsNote = null;
+				dlNote = null;
+				loadDownloads();
+			});
+	});
+	$effect(() => {
+		if (!ui.settingsOpen || tab !== 'downloads') return;
+		let unlisten: (() => void) | undefined;
+		let gone = false;
+		api
+			.onToolsInstallProgress((p) => (installProgress = p))
+			.then((u) => (gone ? u() : (unlisten = u)))
+			.catch(() => {});
+		return () => {
+			gone = true;
+			unlisten?.();
+		};
+	});
+
+	function installError(e: unknown): string {
+		const code = String(e);
+		if (code === 'checksum_mismatch') return t('settings.downloads.err_checksum');
+		if (code === 'busy') return t('settings.downloads.err_busy');
+		if (code === 'not_managed') return t('settings.downloads.err_not_managed');
+		if (code === 'installed_but_does_not_run') return t('settings.downloads.err_broken');
+		return code;
+	}
+	async function installTool(tool: api.ToolsInstallProgress['tool']) {
+		toolsNote = null;
+		installing = tool;
+		installProgress = null;
+		try {
+			if (tool === 'yt-dlp') {
+				const version = await api.installYtdlp();
+				toolsNote = { message: t('settings.downloads.ytdlp_installed', { version }), error: false };
+			} else {
+				await api.installFfmpeg();
+				toolsNote = { message: t('settings.downloads.ffmpeg_installed'), error: false };
+			}
+		} catch (e) {
+			toolsNote = { message: installError(e), error: true };
+		} finally {
+			installing = null;
+			installProgress = null;
+			await loadDownloads();
+		}
+	}
+	function stageLabel(p: api.ToolsInstallProgress): string {
+		if (p.stage !== 'downloading') return t(`settings.downloads.stage_${p.stage}`);
+		const amount = p.total
+			? `${Math.round((p.received / p.total) * 100)}%`
+			: `${(p.received / 1048576).toFixed(1)} MB`;
+		return t('settings.downloads.stage_downloading', { progress: amount });
+	}
+
+	async function pickDownloadsDir() {
+		try {
+			const picked = await open({
+				directory: true,
+				title: t('settings.downloads.dir_dialog'),
+				defaultPath: dlInfo?.dir
+			});
+			if (typeof picked !== 'string') return;
+			await api.setSetting('downloads.dir', picked);
+			await loadDownloads();
+		} catch (e) {
+			dlNote = { message: String(e), error: true };
+		}
+	}
+	async function resetDownloadsDir() {
+		try {
+			await api.setSetting('downloads.dir', '');
+			await loadDownloads();
+		} catch (e) {
+			dlNote = { message: String(e), error: true };
+		}
+	}
+	async function openDownloads() {
+		try {
+			await api.openDownloadsDir();
+		} catch (e) {
+			dlNote = { message: String(e), error: true };
+		}
+	}
+	async function setDlOption(key: string, value: string) {
+		const before: string | undefined = settings[key];
+		settings[key] = value;
+		try {
+			await api.setSetting(key, value);
+		} catch (e) {
+			if (before === undefined) delete settings[key];
+			else settings[key] = before;
+			dlNote = { message: String(e), error: true };
+		}
+	}
 </script>
 
 <!-- One row shape for the whole modal: label and description on the left, the control on the right,
@@ -586,7 +946,10 @@
 	>
 		<Dialog.Description class="sr-only">{t('settings.title')}</Dialog.Description>
 
-		<div class="flex h-[min(38rem,80vh)]">
+		<!-- min-w-0: this is a grid item of the dialog, whose min-width is auto, so the min-content
+		     width of an unbreakable row (a long backups or downloads path) would widen the dialog's
+		     column past the dialog and the overflow-hidden would clip every card. -->
+		<div class="flex h-[min(38rem,80vh)] min-w-0">
 			<!-- Tab rail -->
 			<nav class="flex w-52 shrink-0 flex-col border-r bg-muted/40 p-3">
 				<Dialog.Title class="px-3 pt-1 pb-4 font-heading text-base font-semibold">
@@ -626,7 +989,19 @@
 					<p class="truncate text-xs text-muted-foreground">{currentTab.hint}</p>
 				</header>
 
-				{#if loaded && tab === 'discord'}
+				{#if loaded && tab === 'discord' && settings.discord_available === 'false'}
+					<!-- D4: a build without a Discord application id cannot connect at all. The tab
+					     still shows what the presence would look like, but nothing in it is live. -->
+					<div class="flex min-h-0 flex-1 flex-col">
+						<Alert class="mx-6 mt-4 w-auto shrink-0">
+							<HugeiconsIcon icon={Alert02Icon} size={16} strokeWidth={1.8} />
+							<AlertDescription>{t('settings.discord.unavailable')}</AlertDescription>
+						</Alert>
+						<div class="flex min-h-0 flex-1 opacity-60" inert>
+							<DiscordSettings {settings} />
+						</div>
+					</div>
+				{:else if loaded && tab === 'discord'}
 					<DiscordSettings {settings} />
 				{:else}
 				<div class="min-w-0 flex-1 overflow-y-auto overflow-x-hidden px-6 py-5">
@@ -685,10 +1060,12 @@
 								})}
 								{@render row({
 									title: t('settings.general.autostart'),
-									desc: t('settings.general.autostart_hint'),
+									desc: portable
+										? t('settings.general.autostart_portable')
+										: t('settings.general.autostart_hint'),
 									control: autostartSwitch
 								})}
-								{#if autostartOn}
+								{#if autostartOn && !portable}
 									{@render row({
 										title: t('settings.general.start_minimized'),
 										desc: t('settings.general.start_minimized_hint'),
@@ -961,12 +1338,231 @@
 								})}
 							</div>
 						</section>
+						<section class={GROUP}>
+							<h3 class={LABEL}>{t('settings.sections.backups')}</h3>
+							<div class={CARD}>
+								{@render row({
+									title: t('settings.data.backups_dir'),
+									desc: t('settings.data.backups_dir_hint'),
+									below: backupsDirRow
+								})}
+								{@render row({
+									title: t('settings.data.backups_keep'),
+									desc: t('settings.data.backups_keep_hint'),
+									control: backupsKeepInput,
+									tall: true
+								})}
+								{@render row({
+									title: t('settings.data.backups_export'),
+									desc: t('settings.data.backups_export_hint'),
+									control: backupsButtons,
+									below: backupsNote ? backupsNoteLine : undefined,
+									tall: true
+								})}
+							</div>
+						</section>
+					{:else if tab === 'ytdata'}
+						<section class={GROUP}>
+							<YtDataStatusLine />
+						</section>
+						<section class={GROUP} id="settings-ytdata-connect">
+							<h3 class={LABEL}>{t('ytdata.settings.section_connect')}</h3>
+							{#if ytSecretLoaded}
+								<ConnectGuide bind:secret={ytSecret} />
+							{:else}
+								<p class="px-1 text-sm text-muted-foreground">{t('common.loading')}</p>
+							{/if}
+						</section>
+						<section class={GROUP} id="settings-ytdata-channels">
+							<h3 class={LABEL}>{t('ytdata.settings.section_channels')}</h3>
+							<YtDataAccounts secret={ytSecret} />
+						</section>
+						<section class={GROUP} id="settings-ytdata-engine">
+							<h3 class={LABEL}>{t('ytdata.settings.section_engine')}</h3>
+							<EngineSettings {settings} />
+						</section>
+						<section class={GROUP} id="settings-ytdata-echo">
+							<h3 class={LABEL}>{t('ytdata.settings.section_echo')}</h3>
+							<LocalEchoSlider {settings} />
+						</section>
+						<section class={GROUP} id="settings-ytdata-budget">
+							<h3 class={LABEL}>{t('ytdata.settings.section_budget')}</h3>
+							<BudgetSettings {settings} />
+						</section>
+						<section class={GROUP} id="settings-ytdata-schedule">
+							<h3 class={LABEL}>{t('schedule.section')}</h3>
+							<ScheduleSettings {settings} />
+						</section>
+					{:else if tab === 'downloads'}
+						<section class={GROUP}>
+							<h3 class={LABEL}>{t('settings.sections.download_tools')}</h3>
+							<div class={CARD}>
+								{@render row({
+									title: t('settings.downloads.ytdlp'),
+									badge: tools?.ytdlp_version
+										? t('settings.downloads.version', { version: tools.ytdlp_version })
+										: undefined,
+									desc: tools?.managed === false
+										? t('settings.downloads.ytdlp_hint_system')
+										: t('settings.downloads.ytdlp_hint_managed'),
+									control: ytdlpControl,
+									below: installing === 'yt-dlp' && installProgress ? installLine : undefined,
+									tall: true
+								})}
+								{@render row({
+									title: t('settings.downloads.ffmpeg'),
+									badge: tools?.ffmpeg_present ? t('settings.downloads.installed') : undefined,
+									desc: tools?.managed === false
+										? t('settings.downloads.ffmpeg_hint_system')
+										: t('settings.downloads.ffmpeg_hint_managed'),
+									control: ffmpegControl,
+									below:
+										installing === 'ffmpeg' && installProgress
+											? installLine
+											: toolsNote
+												? toolsNoteLine
+												: undefined,
+									tall: true
+								})}
+							</div>
+						</section>
+						<section class={GROUP}>
+							<h3 class={LABEL}>{t('settings.sections.download_files')}</h3>
+							<div class={CARD}>
+								{@render row({
+									title: t('settings.downloads.dir'),
+									desc: t('settings.downloads.dir_hint'),
+									below: downloadsDirRow
+								})}
+								{@render row({
+									title: t('settings.downloads.format'),
+									desc: t('settings.downloads.format_hint'),
+									control: dlFormatSelect
+								})}
+								{@render row({
+									title: t('settings.downloads.audio_quality'),
+									desc: t('settings.downloads.audio_quality_hint'),
+									control: dlAudioSelect,
+									tall: true
+								})}
+								{@render row({
+									title: t('settings.downloads.video_quality'),
+									desc: t('settings.downloads.video_quality_hint'),
+									control: dlVideoSelect
+								})}
+								{@render row({
+									title: t('settings.downloads.thumbnail'),
+									desc: t('settings.downloads.thumbnail_hint'),
+									control: dlThumbnailSelect,
+									tall: true
+								})}
+							</div>
+						</section>
+						<section class={GROUP}>
+							<h3 class={LABEL}>{t('settings.sections.download_source')}</h3>
+							<div class={CARD}>
+								{@render row({
+									title: t('settings.downloads.cookies'),
+									desc: t('settings.downloads.cookies_hint'),
+									control: dlCookiesSelect,
+									tall: true
+								})}
+								{#if tools?.managed !== false}
+									{@render row({
+										title: t('settings.downloads.channel'),
+										desc: t('settings.downloads.channel_hint'),
+										control: dlChannelSelect,
+										tall: true
+									})}
+								{/if}
+							</div>
+						</section>
+					{:else if tab === 'import'}
+						{#if pending}
+							<Alert class="mb-5" id="settings-migrate-pending">
+								<HugeiconsIcon icon={Alert02Icon} size={16} strokeWidth={1.8} />
+								<AlertDescription>
+									<p class="font-medium">{t('settings.import.pending_title')}</p>
+									<p>
+										{pendingKind === 'expired'
+											? t('settings.import.pending_expired')
+											: pendingKind === 'retry'
+												? t('settings.import.pending_retry')
+												: t('settings.import.pending_waiting')}
+									</p>
+									<div class="mt-2 flex items-center gap-3">
+										{#if pendingKind}
+											<Button size="sm" disabled={pendingBusy} onclick={retryPending}>
+												{pendingBusy ? t('common.loading') : t('settings.import.pending_retry_now')}
+											</Button>
+										{/if}
+										<Button size="sm" variant="outline" disabled={pendingBusy} onclick={cancelPending}>
+											{t('settings.import.pending_cancel')}
+										</Button>
+									</div>
+									{#if pendingError}
+										<p class="mt-1 text-xs text-destructive">{pendingError}</p>
+									{/if}
+								</AlertDescription>
+							</Alert>
+						{/if}
+						{#if ui.importResult && !(pending && (ui.importResult.status === 'retry' || ui.importResult.status === 'expired'))}
+							{@const r = ui.importResult}
+							<Alert class="mb-5" variant={r.status === 'error' ? 'destructive' : 'default'}>
+								<HugeiconsIcon icon={r.status === 'done' ? DatabaseImportIcon : Alert02Icon} size={16} strokeWidth={1.8} />
+								<AlertDescription>
+									<p>
+										{r.status === 'done'
+											? t('settings.import.result_done', { files: r.files, size: sizeLabel(r.bytes) })
+											: r.status === 'retry'
+												? t('settings.import.result_retry')
+												: r.status === 'expired'
+													? t('settings.import.pending_expired')
+													: t('settings.import.result_error', { error: r.error ?? '' })}
+									</p>
+									{#if r.aside}
+										<p class="mt-1 break-all text-[11px]">{t('settings.import.result_aside', { path: r.aside })}</p>
+									{/if}
+									{#if offerAutostart}
+										<div class="mt-2 flex items-center gap-3">
+											<span class="text-xs">{t('settings.import.autostart_offer')}</span>
+											<Button size="sm" variant="outline" onclick={() => setAutostart(true)}>
+												{t('settings.import.autostart_enable')}
+											</Button>
+										</div>
+									{/if}
+								</AlertDescription>
+							</Alert>
+						{/if}
+						<section class={GROUP} id="settings-limusic">
+							<h3 class={LABEL}>{t('settings.import.limusic_title')}</h3>
+							<div class={CARD}>
+								{@render row({
+									title: sources?.upstream
+										? t('settings.import.detected')
+										: t('settings.import.not_detected'),
+									desc: sources?.upstream
+										? `${sources.upstream.path} · ${sizeLabel(sources.upstream.bytes)} · ${
+												sources.upstream.running
+													? t('settings.import.limusic_open')
+													: t('settings.import.limusic_closed')
+											}`
+										: sourcesError || t('settings.import.limusic_hint'),
+									below: sources?.upstream ? migrateForm : undefined
+								})}
+							</div>
+						</section>
+						<section class={GROUP} id="settings-playlistforge">
+							<h3 class={LABEL}>{t('settings.import.playlistforge_title')}</h3>
+							<!-- Detect, preview, import, summary, PlaylistForge's task. -->
+							<PfPreview />
+						</section>
 					{:else if tab === 'about'}
 						<div
 							class="mb-7 rounded-xl border bg-gradient-to-br from-primary/8 to-transparent px-4 py-4"
 						>
 							<div class="flex items-center gap-2">
-								<span class="font-heading text-lg font-bold">Limusic</span>
+								<span class="font-heading text-lg font-bold">{APP_NAME}</span>
 								{#if version}
 									<span
 										class="rounded-full bg-primary/12 px-2 py-0.5 text-[11px] font-semibold text-primary"
@@ -978,19 +1574,15 @@
 							<p class="mt-1.5 max-w-prose text-xs leading-relaxed text-muted-foreground">
 								{t('settings.about.description')}
 							</p>
+							<p class="mt-1 text-[11px] text-muted-foreground">
+								{t('settings.about.based_on', { upstream: UPSTREAM_VERSION })}
+							</p>
+							{#if portable && install}
+								<p class="mt-1 text-[11px] break-all text-muted-foreground">
+									{t('settings.about.portable', { path: install.data_dir })}
+								</p>
+							{/if}
 						</div>
-
-						<section class={GROUP}>
-							<h3 class={LABEL}>{t('settings.sections.support')}</h3>
-							<div class={CARD}>
-								{@render row({
-									title: t('settings.about.kofi'),
-									desc: t('settings.about.kofi_hint'),
-									control: kofiButton,
-									tall: true
-								})}
-							</div>
-						</section>
 
 						<section class={GROUP}>
 							<h3 class={LABEL}>{t('settings.sections.updates')}</h3>
@@ -1094,13 +1686,44 @@
 	/>
 {/snippet}
 
+{#snippet migrateForm()}
+	<div class="flex flex-col gap-3">
+		<label class="flex cursor-pointer items-center gap-2 text-sm">
+			<input type="checkbox" class="size-4 accent-primary" bind:checked={includeWebview} disabled={migrating} />
+			{t('settings.import.include_webview')}
+		</label>
+		<p class="max-w-prose text-xs leading-relaxed text-muted-foreground">
+			{t('settings.import.migrate_warning')}
+		</p>
+		<div class="flex items-center gap-3">
+			<Button
+				size="sm"
+				onclick={migrateUpstream}
+				disabled={migrating || sources?.upstream?.running === true}
+			>
+				{migrating ? t('common.loading') : t('settings.import.migrate')}
+			</Button>
+			{#if sources?.upstream?.running}
+				<span class="text-xs text-muted-foreground">{t('settings.import.limusic_running')}</span>
+			{/if}
+		</div>
+		{#if migrateError}
+			<p class="text-xs text-destructive">{migrateError}</p>
+		{/if}
+	</div>
+{/snippet}
+
 {#snippet historySwitch()}<Switch checked={historyOn} onCheckedChange={setHistory} />{/snippet}
 {#snippet traySwitch()}<Switch checked={trayOn} onCheckedChange={setTray} />{/snippet}
 {#snippet trackNotificationsSwitch()}<Switch
 		checked={trackNotificationsOn}
 		onCheckedChange={setTrackNotifications}
 	/>{/snippet}
-{#snippet autostartSwitch()}<Switch checked={autostartOn} onCheckedChange={setAutostart} />{/snippet}
+{#snippet autostartSwitch()}<Switch
+		checked={autostartOn && !portable}
+		disabled={portable}
+		onCheckedChange={setAutostart}
+	/>{/snippet}
 {#snippet startMinimizedSwitch()}<Switch checked={startMinimizedOn} onCheckedChange={setStartMinimized} />{/snippet}
 {#snippet systemTitlebarSwitch()}<Switch
 		checked={systemTitlebarOn}
@@ -1498,6 +2121,190 @@
 	</Button>
 {/snippet}
 
+{#snippet backupsDirRow()}
+	<div class="flex items-center gap-2">
+		<span
+			class="min-w-0 flex-1 truncate rounded-lg bg-muted/60 px-3 py-1.5 font-mono text-xs"
+			title={backups?.dir}
+		>
+			{backups?.dir ?? ''}
+		</span>
+		<Button variant="outline" size="sm" class="shrink-0" onclick={pickBackupsDir}>
+			{t('settings.data.backups_dir_pick')}
+		</Button>
+		{#if backups && (backups.dir !== backups.default_dir || backups.rejected)}
+			<Button variant="ghost" size="sm" class="shrink-0" onclick={resetBackupsDir}>
+				{t('common.reset')}
+			</Button>
+		{/if}
+	</div>
+	{#if backups?.rejected}
+		<p class="mt-1.5 text-xs text-destructive">{t('settings.data.backups_dir_rejected')}</p>
+	{/if}
+{/snippet}
+
+{#snippet backupsKeepInput()}
+	<form
+		onsubmit={(e) => {
+			e.preventDefault();
+			saveKeep();
+		}}
+	>
+		<Input
+			class="w-20 text-right"
+			inputmode="numeric"
+			aria-label={t('settings.data.backups_keep')}
+			bind:value={keepInput}
+			onblur={saveKeep}
+		/>
+	</form>
+{/snippet}
+
+{#snippet backupsButtons()}
+	<div class="flex items-center gap-2">
+		<Button variant="outline" size="sm" onclick={openBackups}>{t('settings.data.backups_open')}</Button>
+		<Button size="sm" onclick={exportBackups} disabled={backupsBusy}>
+			{backupsBusy ? t('settings.data.backups_exporting') : t('settings.data.backups_export')}
+		</Button>
+	</div>
+{/snippet}
+
+{#snippet backupsNoteLine()}
+	{#if backupsNote}
+		<p class="text-xs {backupsNote.error ? 'text-destructive' : 'text-muted-foreground'}">
+			{backupsNote.message}
+		</p>
+	{/if}
+{/snippet}
+
+{#snippet toolButton(tool: api.ToolsInstallProgress['tool'], present: boolean)}
+	<Button
+		size="sm"
+		variant={present ? 'outline' : 'default'}
+		disabled={installing !== null || !tools}
+		onclick={() => installTool(tool)}
+	>
+		{installing === tool
+			? t('settings.downloads.installing')
+			: present
+				? t('settings.downloads.update')
+				: t('settings.downloads.install')}
+	</Button>
+{/snippet}
+
+{#snippet systemToolState(present: boolean)}
+	<span class="text-xs text-muted-foreground">
+		{present ? t('settings.downloads.installed') : t('settings.downloads.not_found')}
+	</span>
+{/snippet}
+
+{#snippet ytdlpControl()}
+	{#if tools?.managed === false}
+		{@render systemToolState(!!tools.ytdlp_version)}
+	{:else}
+		{@render toolButton('yt-dlp', !!tools?.ytdlp_version)}
+	{/if}
+{/snippet}
+
+{#snippet ffmpegControl()}
+	{#if tools?.managed === false}
+		{@render systemToolState(tools.ffmpeg_present)}
+	{:else}
+		{@render toolButton('ffmpeg', !!tools?.ffmpeg_present)}
+	{/if}
+{/snippet}
+
+{#snippet installLine()}
+	{#if installProgress}
+		<div class="space-y-1.5">
+			{#if installProgress.stage === 'downloading' && installProgress.total}
+				<div class="h-1.5 overflow-hidden rounded-full bg-muted">
+					<div
+						class="h-full rounded-full bg-primary transition-[width]"
+						style="width: {Math.min(100, (installProgress.received / installProgress.total) * 100)}%"
+					></div>
+				</div>
+			{/if}
+			<p class="text-xs text-muted-foreground">{stageLabel(installProgress)}</p>
+		</div>
+	{/if}
+{/snippet}
+
+{#snippet toolsNoteLine()}
+	{#if toolsNote}
+		<p class="text-xs {toolsNote.error ? 'text-destructive' : 'text-muted-foreground'}">
+			{toolsNote.message}
+		</p>
+	{/if}
+{/snippet}
+
+{#snippet downloadsDirRow()}
+	<div class="flex items-center gap-2">
+		<span
+			class="min-w-0 flex-1 truncate rounded-lg bg-muted/60 px-3 py-1.5 font-mono text-xs"
+			title={dlInfo?.dir}
+		>
+			{dlInfo?.dir ?? ''}
+		</span>
+		<Button variant="outline" size="sm" class="shrink-0" onclick={pickDownloadsDir}>
+			{t('settings.downloads.dir_pick')}
+		</Button>
+		<Button variant="outline" size="sm" class="shrink-0" onclick={openDownloads}>
+			{t('settings.downloads.open')}
+		</Button>
+		{#if dlInfo && dlInfo.dir !== dlInfo.default_dir}
+			<Button variant="ghost" size="sm" class="shrink-0" onclick={resetDownloadsDir}>
+				{t('common.reset')}
+			</Button>
+		{/if}
+	</div>
+	{#if dlNote}
+		<p class="mt-2 text-xs {dlNote.error ? 'text-destructive' : 'text-muted-foreground'}">
+			{dlNote.message}
+		</p>
+	{/if}
+{/snippet}
+
+{#snippet dlSelect(o: DlSelect, label: string)}
+	{@const value = o.options.includes(settings[o.key]) ? settings[o.key] : o.fallback}
+	<Select.Root type="single" {value} onValueChange={(v) => setDlOption(o.key, v)}>
+		<Select.Trigger class="w-44 shrink-0" aria-label={label}>
+			<span class="flex-1 text-left">{dlLabel(o.prefix, value)}</span>
+		</Select.Trigger>
+		<Select.Content>
+			{#each o.options as option (option)}
+				<Select.Item value={option} label={dlLabel(o.prefix, option)}>
+					{dlLabel(o.prefix, option)}
+				</Select.Item>
+			{/each}
+		</Select.Content>
+	</Select.Root>
+{/snippet}
+
+{#snippet dlFormatSelect()}
+	{@render dlSelect(DL_SELECTS.format, t('settings.downloads.format'))}
+{/snippet}
+
+{#snippet dlAudioSelect()}
+	{@render dlSelect(DL_SELECTS.audio, t('settings.downloads.audio_quality'))}
+{/snippet}
+
+{#snippet dlVideoSelect()}
+	{@render dlSelect(DL_SELECTS.video, t('settings.downloads.video_quality'))}
+{/snippet}
+
+{#snippet dlThumbnailSelect()}
+	{@render dlSelect(DL_SELECTS.thumbnail, t('settings.downloads.thumbnail'))}
+{/snippet}
+
+{#snippet dlCookiesSelect()}
+	{@render dlSelect(DL_SELECTS.cookies, t('settings.downloads.cookies'))}
+{/snippet}
+
+{#snippet dlChannelSelect()}
+	{@render dlSelect(DL_SELECTS.channel, t('settings.downloads.channel'))}
+{/snippet}
+
 {#snippet copyDiagButton()}
 	<Button variant="secondary" size="sm" onclick={copyDiagnostics} disabled={diagState === 'busy'}>
 		{diagState === 'copied' ? t('settings.about.diagnostics_copied') : t('settings.about.copy')}
@@ -1512,13 +2319,6 @@
 
 {#snippet reportButton()}
 	<Button size="sm" onclick={openBugForm}>{t('settings.about.report_issue_button')}</Button>
-{/snippet}
-
-{#snippet kofiButton()}
-	<Button variant="secondary" size="sm" onclick={() => api.openExternal('https://ko-fi.com/simohypers')}>
-		<HugeiconsIcon icon={Coffee02Icon} size={15} strokeWidth={1.8} />
-		{t('settings.about.kofi_button')}
-	</Button>
 {/snippet}
 
 {#snippet diagAlert()}

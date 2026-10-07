@@ -1,13 +1,13 @@
 # Sign-in sessions: where the data lives
 
-Everything below is per-OS under Tauri's app-data dir for identifier `com.limusic.desktop`
+Everything below is per-OS under Tauri's app-data dir for identifier `com.limusicforge.desktop`
 (`tauri.conf.json`), created in `lib.rs` via `app.path().app_data_dir()`:
 
 | OS | Directory |
 |---|---|
-| Windows | `%APPDATA%\com.limusic.desktop\` |
-| Linux | `~/.local/share/com.limusic.desktop/` |
-| macOS | `~/Library/Application Support/com.limusic.desktop/` |
+| Windows | `%APPDATA%\com.limusicforge.desktop\` |
+| Linux | `~/.local/share/com.limusicforge.desktop/` |
+| macOS | `~/Library/Application Support/com.limusicforge.desktop/` |
 
 ## 1. SQLite: `limusic.sqlite`
 
@@ -48,12 +48,12 @@ Databases from before multi-account are migrated once on open (`Db::open`): the 
 The sign-in webview (`src-tauri/src/session.rs`) is persistent (non-incognito) on purpose. Its
 cookies live in the OS webview profile data *next to* the app data dir, not in the SQLite file:
 
-- **Windows (WebView2):** user-data folder under `%LOCALAPPDATA%\com.limusic.desktop\EBWebView\`
-- **Linux (WebKitGTK):** `~/.local/share/com.limusic.desktop/` webkit data (or XDG cache)
-- **macOS (WKWebView):** inside `~/Library/Application Support/com.limusic.desktop/` WebKit data
+- **Windows (WebView2):** user-data folder under `%LOCALAPPDATA%\com.limusicforge.desktop\EBWebView\`
+- **Linux (WebKitGTK):** `~/.local/share/com.limusicforge.desktop/` webkit data (or XDG cache)
+- **macOS (WKWebView):** inside `~/Library/Application Support/com.limusicforge.desktop/` WebKit data
 
 This is why a re-login is one click with no password/paste, and why deleting `limusic.sqlite`
-alone does not sign the webview out of Google. Limusic never reads this store as state:
+alone does not sign the webview out of Google. LiMusic Forge never reads this store as state:
 `session.rs` copies the youtube-domain cookies out of it into a `Cookie` header and stores that
 copy in SQLite.
 

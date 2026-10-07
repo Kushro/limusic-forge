@@ -17,8 +17,15 @@ use zbus::blocking::Connection;
 use zbus::zvariant::DynamicType;
 use zbus::Message;
 
-/// The installed `limusic.desktop`, which is how the desktop finds a name and icon to show.
-const APP_ID: &str = "limusic";
+/// The installed `.desktop` file's basename, which is how the desktop finds a name and icon to show.
+///
+/// Tauri's Linux bundler (deb, rpm, AppImage) names it after `productName`, not the binary:
+/// `usr/share/applications/<productName>.desktop` (upstream shipped `limusic.desktop` from
+/// productName "limusic" while the binary was `limusic-app`). Its `Exec`/`Icon` use
+/// `mainBinaryName` instead. So with productName "LiMusic Forge" the file is
+/// `LiMusic Forge.desktop`, and the id is [`crate::brand::APP_NAME`], which
+/// `brand_identity_is_forge` pins to productName.
+const APP_ID: &str = crate::brand::APP_NAME;
 const REASON: &str = "Playing music";
 
 /// On both, the interface is named like the bus name.

@@ -1,8 +1,9 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "limusic",
-  "version": "1.2.0-rc.2",
-  "identifier": "com.limusic.desktop",
+  "productName": "LiMusic Forge",
+  "mainBinaryName": "limusic-forge",
+  "version": "1.2.0-forge.1",
+  "identifier": "com.limusicforge.desktop",
   "build": {
     "frontendDist": "../ui/build",
     "devUrl": "http://localhost:5183",
@@ -12,7 +13,8 @@
   "app": {
     "windows": [
       {
-        "title": "Limusic",
+        "title": "LiMusic Forge",
+        "create": false,
         "width": 1200,
         "height": 800,
         "minWidth": 900,
@@ -37,6 +39,8 @@
   "bundle": {
     "active": true,
     "category": "Music",
+    "publisher": "Kushro",
+    "copyright": "© SimoHypers and contributors; LiMusic Forge © Kushro — GPL-3.0",
     "targets": ["deb", "rpm", "appimage"],
     "createUpdaterArtifacts": true,
     "icon": [
@@ -63,9 +67,9 @@
   "plugins": {
     "updater": {
       "endpoints": [
-        "https://github.com/SimoHypers/limusic/releases/latest/download/latest.json"
+        "https://github.com/Kushro/limusic-forge/releases/latest/download/latest.json"
       ],
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDk0MENDMzA1NUFGMDI0NTQKUldSVUpQQmFCY01NbENPbW9XOTRvVU9YQ2lCQytOU2RyeDhHNFhkWHlNc1dITkFmbkd1ZTBlM1gK",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDlBNEFDNDlCNEQzQzJGRDMKUldUVEx6eE5tOFJLbWx0MS8rSlBNMzJqME9SUyswVjhVTi9hbk0yWnBJL2ZQcGJPZjlpMThuL0kK",
       "windows": {
         "installMode": "passive"
       }

@@ -57,6 +57,19 @@
 		isPublic = privacy === 'PUBLIC';
 	});
 
+	// The privacy the last Data API sync read (`playlist_sync.privacy`), shown read-only: it tells
+	// unlisted apart, which the switch (InnerTube's public/private) cannot. Writing it through the
+	// Data API is left to the job queue's playlist edits; this only says what YouTube had.
+	let syncedPrivacy = $state<api.PlaylistPrivacy | null>(null);
+	$effect(() => {
+		if (!open || api.isLocalPlaylist(id)) return;
+		const playlist = id;
+		api
+			.playlistSyncInfo()
+			.then((info) => (syncedPrivacy = info[playlist]?.privacy ?? null))
+			.catch(() => (syncedPrivacy = null));
+	});
+
 	const preview = $derived(thumb(cover ?? fallback, 400));
 	// Kept on this machine (#251): nobody else can see it, so there is no visibility to set, and the
 	// artwork has no account to upload to.
@@ -194,6 +207,13 @@
 					</div>
 					<Switch bind:checked={isPublic} aria-label={t('a11y.public_playlist')} />
 				</div>
+				{#if syncedPrivacy}
+					<p class="-mt-2 px-3 text-xs text-muted-foreground" title={t('dialogs.edit_playlist.synced_privacy_hint')}>
+						{t('dialogs.edit_playlist.synced_privacy', {
+							privacy: t(`dialogs.edit_playlist.privacy_${syncedPrivacy}`)
+						})}
+					</p>
+				{/if}
 			{/if}
 			<p class="text-xs text-muted-foreground">
 				{local

@@ -7,11 +7,13 @@ use innertube::{
     AlbumPage, ArtistPage, BrowseItem, HistoryGroup, HomePage, MoodSection, PlaylistContinuation,
     PlaylistPage, PlaylistSort, Rating, SearchResults, SearchSuggestions, SongItem,
 };
+use serde_json::{json, Value};
 use tauri::{Emitter, Manager, State};
 
 use crate::blocked::BlockedArtist;
 use crate::playlist_tools::journal::{self, Named, OpRecord, Restore, Summary};
-use crate::playlist_tools::{self, build, dedup, everywhere, export, merge, rows, split, transfer};
+use crate::playlist_tools::monitor::{self, SyncSummary};
+use crate::playlist_tools::{build, dedup, everywhere, export, merge, rows, split, transfer};
 use crate::state::{
     is_local_playlist, AppState, LOCAL_PLAYLIST_PREFIX, ON_REPEAT_ID, ON_REPEAT_LIMIT,
     ON_REPEAT_WINDOW_SECS,
@@ -224,7 +226,7 @@ pub async fn get_queue(state: St<'_>) -> Result<serde_json::Value, String> {
 /// `visitor_data`) and internal blobs (`queue_json`, `queue_index`, `queue_position`) never cross
 /// into the webview: they'd otherwise ship the login credential to the renderer on every open, and
 /// the webview can't overwrite them either.
-const UI_SETTINGS: [&str; 30] = [
+const UI_SETTINGS: &[&str] = &[
     "volume",
     "proxy",
     "quality",
@@ -255,7 +257,107 @@ const UI_SETTINGS: [&str; 30] = [
     "locale",
     "drop_mode",
     "drop_dupes",
+    // The first-run import prompt's answer and the sources it covered (D8, onboarding.ts).
+    "onboarding_import_prompted",
+    // Hours between playlist syncs: 0 (off), 1, 3, 6, 12 or 24 (monitor_interval_secs).
+    "monitor_interval_hours",
+    // Snapshot backups (backups.rs): the folder, and how many each playlist keeps. PF's keys.
+    "monitor.backups_dir",
+    "retention_keep_last",
+    // The Library's playlists tab: `default|title|count|synced` (`:desc` reverses) and `grid|list`
+    // (plsort.ts).
+    "library_playlists_sort",
+    "library_playlists_view",
+    // Tools ▸ Extract into a new playlist: `build` (one undoable build, the default) or
+    // `create_transfer` (make the playlist, then copy or move into it).
+    "tools.extract_new_mode",
+    // Downloads (download/settings.rs): PF's keys, plus where the cookies come from
+    // (`session|none`) and which yt-dlp builds to install (`stable|nightly`).
+    "downloads.dir",
+    "downloads.default_format",
+    "downloads.audio_quality",
+    "downloads.video_quality",
+    "downloads.thumbnail_mode",
+    "downloads.cookies",
+    "downloads.ytdlp_channel",
+    // The job queue (jobs/): which engine writes playlists (`auto|ytdata|innertube`), whether
+    // InnerTube writes are queued too (`unified|ytdata_only`), the day's Data API budget, the
+    // priority a new job gets, the local echo's window (seconds; 0 off, -1 always) and whether a
+    // headless run advances the queue.
+    "playlist_engine",
+    "job_queue_mode",
+    "budget.safety_margin_percent",
+    "budget.backup_reserve_units",
+    "budget.opportunistic_mode",
+    "budget.backup_runs_per_day",
+    "budget.daily_units",
+    "jobs.default_job_priority",
+    "jobs.local_echo_max_age_s",
+    "jobs.advance_jobs_headless",
 ];
+
+/// What a setting accepts. Keys without a rule take any string, as every key did before.
+#[derive(Debug, Clone)]
+enum SettingRule {
+    OneOf(&'static [&'static str]),
+    /// A whole number in the range.
+    Int(std::ops::RangeInclusive<i64>),
+    /// `true` or `false`.
+    Bool,
+    /// One of the local echo slider's positions (`jobs::local_echo::EchoWindow::SLIDER`).
+    EchoSlider,
+}
+
+/// Per-key validation for [`set_setting`]: a value its reader would misread (an engine it does not
+/// know, a margin of 400 %) is refused with a message, instead of stored and silently ignored.
+fn setting_rule(key: &str) -> Option<SettingRule> {
+    use crate::jobs::budget as b;
+    use crate::jobs::engine as e;
+    use SettingRule::{Bool, EchoSlider, Int, OneOf};
+    Some(match key {
+        "playlist_engine" => OneOf(&e::PLAYLIST_ENGINE_VALUES),
+        "job_queue_mode" => OneOf(&e::JOB_QUEUE_MODE_VALUES),
+        "budget.daily_units" => Int(b::DAILY_UNITS_RANGE),
+        "budget.safety_margin_percent" => Int(b::SAFETY_MARGIN_PERCENT_RANGE),
+        "budget.backup_reserve_units" => Int(b::BACKUP_RESERVE_UNITS_RANGE),
+        "budget.backup_runs_per_day" => Int(b::BACKUP_RUNS_PER_DAY_RANGE),
+        "budget.opportunistic_mode" => Bool,
+        "jobs.default_job_priority" => Int(crate::jobs::PRIORITY_HIGH..=crate::jobs::PRIORITY_LOW),
+        "jobs.local_echo_max_age_s" => EchoSlider,
+        "jobs.advance_jobs_headless" => Bool,
+        "drop_mode" => OneOf(&["ask", "copy", "move"]),
+        "drop_dupes" => OneOf(&["skip", "allow", "consolidate"]),
+        "tools.extract_new_mode" => OneOf(&["build", "create_transfer"]),
+        _ => return None,
+    })
+}
+
+/// The local echo slider's positions as `jobs.local_echo_max_age_s` stores them.
+fn echo_slider_values() -> Vec<String> {
+    crate::jobs::local_echo::EchoWindow::SLIDER.iter().map(|w| w.to_setting_value()).collect()
+}
+
+pub(crate) fn validate_setting(key: &str, value: &str) -> Result<(), String> {
+    let Some(rule) = setting_rule(key) else { return Ok(()) };
+    let ok = match &rule {
+        SettingRule::OneOf(allowed) => allowed.contains(&value),
+        SettingRule::Int(range) => value.parse::<i64>().is_ok_and(|n| range.contains(&n)),
+        SettingRule::Bool => matches!(value, "true" | "false"),
+        SettingRule::EchoSlider => echo_slider_values().iter().any(|v| v == value),
+    };
+    if ok {
+        return Ok(());
+    }
+    let expected = match rule {
+        SettingRule::OneOf(allowed) => format!("one of {}", allowed.join(", ")),
+        SettingRule::Int(range) => {
+            format!("a whole number from {} to {}", range.start(), range.end())
+        }
+        SettingRule::Bool => "true or false".to_string(),
+        SettingRule::EchoSlider => format!("one of {}", echo_slider_values().join(", ")),
+    };
+    Err(format!("invalid value {value:?} for {key}: expected {expected}"))
+}
 
 /// Resolve the music video for `video_id` and hand back a `limusicvideo://` URL the player view
 /// can put in a `<video src>`. `None` when YouTube has no usable video stream for it, which is the
@@ -369,7 +471,17 @@ pub async fn get_settings(state: St<'_>) -> Result<serde_json::Value, String> {
         .collect();
     map.insert("native_chrome".into(), native_chrome(&state.db).into());
     map.insert("native_video".into(), crate::state::native_video().to_string().into());
+    // Whether this build has a Discord application id (D4): without one the Discord tab and the
+    // titlebar toggle say so and stay disabled.
+    map.insert("discord_available".into(), crate::discord::available().to_string().into());
     Ok(serde_json::Value::Object(map))
+}
+
+/// Why the database's schema upgrade failed at startup, or `None`. The app runs at the old
+/// schema then (the monitor, backups and downloads may not work); the UI warns about it once.
+#[tauri::command]
+pub fn db_migration_error(state: St<'_>) -> Option<String> {
+    state.db.migration_error()
 }
 
 #[tauri::command]
@@ -382,11 +494,17 @@ pub async fn set_setting(
     if !UI_SETTINGS.contains(&key.as_str()) {
         return Err(format!("unknown setting: {key}"));
     }
+    validate_setting(&key, &value)?;
     // Registers/removes the login autostart entry on toggle; the OS persists it from there, and
     // startup repoints an existing entry at the running binary (lib.rs). Before the write, so a
     // failure leaves the setting as it was. A dev build would register itself, and at login its
     // window needs a vite server that isn't running.
     if key == "autostart" {
+        // A portable copy installs nothing, and a login entry pointing into a folder that moves
+        // (or a stick that is not plugged in) would be worse than none. The UI greys the toggle.
+        if crate::paths::is_portable() {
+            return Err("portable".into());
+        }
         if tauri::is_dev() {
             return Err(
                 "autostart: a dev build can't register itself, use an installed build".into()
@@ -452,6 +570,10 @@ pub async fn set_setting(
     // songs never played. Songs whose source was picked by hand keep it.
     if key == "lyrics_providers" {
         state.db.clear_lyrics_cache();
+    }
+    // The daily units and the margin decide when the quota reads as used up.
+    if key.starts_with("budget.") {
+        crate::ytdata_status::announce(&state).await;
     }
     // Hand the frame back to the compositor (or take it again). macOS is not on this path: its
     // titlebar style is fixed at window creation, so the setting is hidden there.
@@ -1154,9 +1276,16 @@ pub(crate) fn editable_playlist<'a>(
 /// membership of this list is the only way a result can draw its heart filled. Not shown in the
 /// "saved in" chip, though: the thumbs-up already says it (the UI filters it out there).
 pub(crate) const LIKED_MUSIC_ID: &str = "VLLM";
-/// How long the membership index is trusted before a re-crawl. Adds and removes made in this app
-/// patch it as they happen, so this window only ever covers edits made somewhere else.
-const PLAYLIST_INDEX_TTL_SECS: i64 = 6 * 3600;
+/// When the index was last rebuilt by a full crawl (unix seconds). The key changes whenever the
+/// index learns to hold something new, so an install with a fresh stamp re-crawls once: `_v2` when
+/// Liked Music joined it, `_v3` when each track's metadata did (the "in your playlists" view and
+/// the monitor read it).
+pub(crate) const PLAYLIST_INDEX_STAMP: &str = "playlist_index_synced_at_v3";
+/// How often the index is re-crawled by itself, in hours (`monitor_interval_hours`): the choices
+/// the UI offers, 0 being never. Adds and removes made in this app patch the index as they happen,
+/// so the interval only ever covers edits made somewhere else.
+const MONITOR_INTERVALS: [i64; 6] = [0, 1, 3, 6, 12, 24];
+const MONITOR_INTERVAL_DEFAULT: i64 = 6;
 /// Continuation pages per playlist. YouTube hands back 100 tracks a page, so this covers 5000 of
 /// them. ponytail: a hard stop, not paging state. A playlist past it marks its first 5000 tracks
 /// and no more, which beats one pathological list turning a sync into hundreds of requests.
@@ -1169,102 +1298,1137 @@ pub fn playlist_index(state: St<'_>) -> std::collections::HashMap<String, Vec<St
     state.db.playlist_memberships()
 }
 
+/// The re-crawl interval in seconds, `None` when it is off. Anything the UI would not have written
+/// reads as the default.
+fn monitor_interval_secs(db: &crate::db::Db) -> Option<i64> {
+    let hours = db
+        .get_setting("monitor_interval_hours")
+        .and_then(|h| h.trim().parse::<i64>().ok())
+        .filter(|h| MONITOR_INTERVALS.contains(h))
+        .unwrap_or(MONITOR_INTERVAL_DEFAULT);
+    (hours > 0).then_some(hours * 3600)
+}
+
+/// Whether a sync nobody asked for (launch, sign-in, the scheduler) should crawl now. An index that
+/// was never built always should, interval off or not: the "saved" marks have nothing else to go
+/// on. After that, only once the interval has passed, and never with it off.
+pub(crate) fn playlist_index_due(db: &crate::db::Db, now: i64) -> bool {
+    let Some(at) = db.get_setting(PLAYLIST_INDEX_STAMP).and_then(|at| at.parse::<i64>().ok())
+    else {
+        return true;
+    };
+    monitor_interval_secs(db).is_some_and(|every| now >= at + every)
+}
+
+/// When the last full sync was tried (unix seconds), and how many failed in a row before now: what
+/// keeps a sync that cannot run (offline, an expired cookie) from being retried every minute.
+pub(crate) const MONITOR_LAST_ATTEMPT: &str = "monitor_last_attempt_at";
+pub(crate) const MONITOR_FAILURES: &str = "monitor_failures";
+
+fn monitor_failures(db: &crate::db::Db) -> u32 {
+    db.get_setting(MONITOR_FAILURES).and_then(|n| n.trim().parse().ok()).unwrap_or(0)
+}
+
+/// Write a full sync's attempt down: a success clears the failures, a failure adds one.
+fn note_sync_attempt(db: &crate::db::Db, at: i64, ok: bool) {
+    db.set_setting(MONITOR_LAST_ATTEMPT, &at.to_string());
+    let failures = if ok { 0 } else { monitor_failures(db).saturating_add(1) };
+    db.set_setting(MONITOR_FAILURES, &failures.to_string());
+}
+
+/// Whether the scheduler may try again after failed syncs ([`monitor::retry_due`]). Someone
+/// asking for a sync does not wait for this.
+pub(crate) fn monitor_retry_due(db: &crate::db::Db, now: i64) -> bool {
+    let last = db.get_setting(MONITOR_LAST_ATTEMPT).and_then(|at| at.parse::<i64>().ok());
+    monitor::retry_due(now, last, monitor_failures(db), monitor_interval_secs(db))
+}
+
+/// The `monitor_runs.trigger` for what the UI sent: the scheduler's and headless runs say so, and
+/// anything else is a person in the UI.
+fn sync_trigger(trigger: Option<&str>) -> &'static str {
+    match trigger {
+        Some("scheduler") => "scheduler",
+        Some("headless") => "headless",
+        _ => "manual_ui",
+    }
+}
+
+/// How one playlist's read went.
+enum PlaylistRead {
+    /// Someone else's playlist you merely saved: not indexed, not watched.
+    NotYours,
+    /// Its first page could not be read.
+    Failed,
+    Read {
+        complete: bool,
+        counts: monitor::Counts,
+    },
+}
+
+/// Read one playlist to the end (or the page cap) and write it down: index rows, snapshot,
+/// alerts, sync record ([`monitor::record`]). The reader is the Data API when the run has one
+/// (`data`, [`crate::ytdata_sync::prepare`]) and it covers this playlist, which also gives each
+/// track's date added and the playlist's privacy; InnerTube otherwise, and whenever the Data API
+/// read fails.
+async fn sync_one(
+    state: &Arc<AppState>,
+    client: &innertube::YouTubeClient,
+    playlist_id: &str,
+    title: Option<&str>,
+    account_id: Option<&str>,
+    data: Option<&crate::ytdata_sync::DataApiRun>,
+) -> PlaylistRead {
+    if let Some(read) = sync_one_data_api(state, data, playlist_id, account_id).await {
+        return read;
+    }
+    let Ok(page) = state.it.playlist(client, playlist_id, None).await else {
+        return PlaylistRead::Failed;
+    };
+    // A collaborative playlist reads `owned: false` (YouTube drops the editable header on it) but
+    // is one you add to and remove from, so the membership index has to cover it too. Liked Music
+    // is exempt: YouTube sends it without the editable header, so it reads `owned: false` even
+    // though it is yours.
+    if playlist_id != LIKED_MUSIC_ID && !page.owned && !page.collaborative {
+        return PlaylistRead::NotYours;
+    }
+    let title = page.title.clone().or_else(|| title.map(str::to_owned));
+    let listed = page.subtitle.as_deref().and_then(monitor::header_track_count);
+    let mut songs: Vec<SongItem> = page.items;
+    let mut token = page.continuation;
+    // Read to the end, not cut short by a failed page or the page cap: only then may the monitor
+    // read a track missing from it as removed.
+    let mut complete = token.is_none();
+    for _ in 0..PLAYLIST_INDEX_MAX_PAGES {
+        let Some(next) = token.take() else {
+            complete = true;
+            break;
+        };
+        let Ok(more) = state.it.playlist_continuation(client, &next).await else { break };
+        songs.extend(more.items);
+        token = more.continuation;
+    }
+    complete = complete || token.is_none();
+    let read = monitor::Read {
+        playlist_id,
+        title: title.as_deref(),
+        account_id,
+        songs: &songs,
+        complete,
+        // Liked Music changes every time you like or unlike something anywhere: not news.
+        watch: playlist_id != LIKED_MUSIC_ID,
+        at: now_secs(),
+        listed,
+        added_at: None,
+        privacy: None,
+        reasons: None,
+    };
+    // An empty read after one that held rows is doubted, and counts as cut short.
+    let complete = monitor::read_complete(&state.db, &read);
+    let counts = monitor::record(&state.db, &read);
+    PlaylistRead::Read { complete, counts }
+}
+
+/// [`sync_one`] through the Data API. `None` when the run has no Data API, it does not cover this
+/// playlist (not one of the channel's: Liked Music, someone else's collaborative one), or the read
+/// failed; the caller then reads it through InnerTube.
+async fn sync_one_data_api(
+    state: &Arc<AppState>,
+    data: Option<&crate::ytdata_sync::DataApiRun>,
+    playlist_id: &str,
+    account_id: Option<&str>,
+) -> Option<PlaylistRead> {
+    let run = data?;
+    let playlist = run.covers(playlist_id)?;
+    let known = state.db.playlist_songs(playlist_id);
+    let got = match run.read(playlist, &known).await {
+        Ok(got) => got,
+        Err(e) => {
+            run.failed(&e);
+            tracing::info!(error = %e, playlist_id, "Data API read failed, reading via InnerTube");
+            return None;
+        }
+    };
+    let read = monitor::Read {
+        playlist_id,
+        title: Some(got.title.as_str()),
+        account_id,
+        songs: &got.songs,
+        complete: got.complete,
+        watch: true,
+        at: now_secs(),
+        listed: Some(got.listed),
+        added_at: Some(&got.added_at),
+        privacy: Some(got.privacy.as_str()),
+        reasons: Some(&got.reasons),
+    };
+    let complete = monitor::read_complete(&state.db, &read);
+    let counts = monitor::record(&state.db, &read);
+    Some(PlaylistRead::Read { complete, counts })
+}
+
+/// The run's Data API, when it reads through it: the reader choice for a run of `scope`, and
+/// what goes in its `detail_json` under `reader`. Scheduled and headless runs are the day's backup
+/// and may spend its reserve.
+async fn data_api_run(
+    state: &Arc<AppState>,
+    scope: crate::ytdata_sync::Scope<'_>,
+    trigger: &str,
+) -> (Option<crate::ytdata_sync::DataApiRun>, Value) {
+    let backup_run = matches!(trigger, "scheduler" | "headless");
+    crate::ytdata_sync::prepare(state, scope, backup_run).await
+}
+
+/// After a run: what it spent goes on the summary (and so on `monitor_runs.units_spent`), the
+/// quota widget hears of it, and the status is sent again, since the run may have marked the API
+/// disabled or out of quota, or cleared that.
+async fn finish_data_api_run(
+    state: &Arc<AppState>,
+    data: Option<&crate::ytdata_sync::DataApiRun>,
+    summary: &mut SyncSummary,
+    reader: &mut Value,
+) {
+    let Some(run) = data else { return };
+    summary.units_spent = run.units();
+    *reader = run.detail();
+    if summary.units_spent > 0 {
+        let _ = state.app.emit("quota-changed", ());
+    }
+    crate::ytdata_status::announce(state).await;
+}
+
+/// Log a finished run in `monitor_runs`. `playlists_failed` is every playlist not read to the
+/// end; `detail` tells the unreadable ones from the cut-short ones. A scheduler failure right
+/// after another folds into that one's row (`detail.repeats`, [`monitor::fold_failure`]) rather
+/// than logging a row per retry.
+fn record_run(state: &AppState, summary: &SyncSummary, started: i64, outcome: &str, detail: Value) {
+    let run = crate::db::MonitorRun {
+        id: 0,
+        started_at: started,
+        finished_at: now_secs(),
+        trigger: summary.trigger.clone(),
+        outcome: outcome.to_owned(),
+        playlists_ok: i64::from(summary.complete),
+        playlists_failed: i64::from(summary.playlists.saturating_sub(summary.complete)),
+        alerts_new: i64::from(summary.alerts_new),
+        units_spent: summary.units_spent,
+        detail_json: detail.to_string(),
+    };
+    let prev = state.db.monitor_runs(1).into_iter().next();
+    if let Some((id, detail)) = monitor::fold_failure(prev.as_ref(), &run) {
+        if let Err(e) = state.db.update_monitor_run_repeat(id, run.finished_at, &detail) {
+            tracing::warn!(error = %e, "could not log a monitor run");
+        }
+        return;
+    }
+    if let Err(e) = state.db.record_monitor_run(&run) {
+        tracing::warn!(error = %e, "could not log a monitor run");
+    }
+}
+
+/// Another run holds the monitor: log the attempt as `lock_busy` and answer `busy`.
+fn monitor_busy(state: &AppState, trigger: &str) -> String {
+    let now = now_secs();
+    record_run(state, &SyncSummary::new(trigger, now), now, "lock_busy", json!({}));
+    "busy".into()
+}
+
+/// Tell the UI a run finished: the index to re-read, and the alerts badge.
+fn announce_sync(state: &AppState, summary: &SyncSummary) {
+    let _ = state.app.emit("playlist-index-synced", summary);
+    let unseen = state.db.unseen_alert_count();
+    let _ = state.app.emit("alerts-changed", json!({ "unseen": unseen }));
+}
+
+/// The end of a monitor run: back up the newest snapshot of each playlist it read unless that file
+/// is already there, then prune the database and the backups folder to `retention_keep_last`
+/// (backups.rs). Off the async workers; a failure costs the backup, never the run.
+async fn back_up_run(state: &Arc<AppState>, playlist_ids: Vec<String>) {
+    let st = state.clone();
+    let data = crate::paths::data_dir(&state.app);
+    let done = tauri::async_runtime::spawn_blocking(move || {
+        let dir = crate::backups::backups_dir(&st.db, &data);
+        let keep = crate::backups::keep_last(&st.db);
+        crate::backups::export_and_prune(&st.db, &dir, keep, &playlist_ids, true)
+    })
+    .await;
+    if let Err(e) = done {
+        tracing::warn!(error = %e, "snapshot backups did not run");
+    }
+}
+
+/// Where the backups go, where they go by default, how many each playlist keeps, and whether the
+/// folder picked was turned down for being another app's (`rejected`; the default is used then).
+#[tauri::command]
+pub fn backups_info(state: St<'_>) -> Value {
+    let data = crate::paths::data_dir(&state.app);
+    json!({
+        "dir": crate::backups::backups_dir(&state.db, &data).to_string_lossy(),
+        "default_dir": crate::backups::default_dir(&data).to_string_lossy(),
+        "keep": crate::backups::keep_last(&state.db),
+        "rejected": crate::backups::dir_rejected(&state.db),
+    })
+}
+
+/// Back up the newest snapshot of every playlist that has one now (synced or not: a forget or a
+/// sign-out keeps the snapshots), rewriting its file, then prune as a monitor run does. Answers
+/// `{ written, pruned_files, pruned_rows }`; `Err("busy")` while a sync runs, which would be
+/// writing the same snapshots.
+#[tauri::command]
+pub async fn export_backups_now(state: St<'_>) -> Result<crate::backups::Outcome, String> {
+    let Some(_running) = state.begin_monitor_run() else {
+        return Err("busy".into());
+    };
+    let st = state.inner().clone();
+    let data = crate::paths::data_dir(&state.app);
+    tauri::async_runtime::spawn_blocking(move || {
+        let dir = crate::backups::backups_dir(&st.db, &data);
+        let keep = crate::backups::keep_last(&st.db);
+        // Synced playlists, and any other with snapshots kept (forgotten, or from before a
+        // sign-out): their history outlives the sync record, so its backups do too.
+        let mut ids: Vec<String> = st.db.playlist_syncs().into_keys().collect();
+        ids.extend(st.db.snapshot_playlist_ids());
+        ids.sort();
+        ids.dedup();
+        crate::backups::export_and_prune(&st.db, &dir, keep, &ids, false)
+    })
+    .await
+    .map_err(|e| e.to_string())
+}
+
+/// Open the backups folder in the file manager, creating it if it is not there yet.
+#[tauri::command]
+pub fn open_backups_dir(state: St<'_>) -> Result<(), String> {
+    let data = crate::paths::data_dir(&state.app);
+    crate::backups::open_dir(&crate::backups::backups_dir(&state.db, &data))
+}
+
+// --- downloads (download/) -----------------------------------------------------------------------
+
+type Downloads<'a> = State<'a, Arc<crate::download::runner::Runner>>;
+
+/// yt-dlp's version (`None`: missing or broken), whether ffmpeg is there, and whether the app
+/// manages them (Windows) or they come from PATH.
+#[tauri::command]
+pub async fn download_tools_status(
+    state: St<'_>,
+) -> Result<crate::download::tools::ToolsStatus, String> {
+    let data = crate::paths::data_dir(&state.app);
+    Ok(crate::download::tools::status(&data).await)
+}
+
+fn install_progress(
+    app: &tauri::AppHandle,
+) -> impl Fn(crate::download::tools::InstallProgress) + Send + Sync {
+    let app = app.clone();
+    move |p| {
+        let _ = app.emit("tools-install-progress", p);
+    }
+}
+
+/// Install or update yt-dlp from the `downloads.ytdlp_channel` releases, checked against the
+/// release's own `SHA2-256SUMS`. Answers the installed version. `Err("busy")` while another
+/// install runs, `Err("not_managed")` off Windows, `Err("checksum_mismatch")` when the bytes do
+/// not match. Progress goes out as `tools-install-progress`.
+#[tauri::command]
+pub async fn install_ytdlp(state: St<'_>, downloads: Downloads<'_>) -> Result<String, String> {
+    let Some(_installing) = downloads.begin_install() else { return Err("busy".into()) };
+    let data = crate::paths::data_dir(&state.app);
+    let repo = crate::download::settings::ytdlp_channel(&state.db).repo();
+    let progress = install_progress(&state.app);
+    let version = crate::download::tools::install_ytdlp(&data, repo, &progress).await?;
+    // A queue that was waiting for yt-dlp can go now.
+    downloads.nudge();
+    Ok(version)
+}
+
+/// Install or update ffmpeg (and ffprobe) from yt-dlp's FFmpeg-Builds, checked against the
+/// release's `checksums.sha256`. Errors as [`install_ytdlp`].
+#[tauri::command]
+pub async fn install_ffmpeg(state: St<'_>, downloads: Downloads<'_>) -> Result<(), String> {
+    let Some(_installing) = downloads.begin_install() else { return Err("busy".into()) };
+    let data = crate::paths::data_dir(&state.app);
+    let progress = install_progress(&state.app);
+    crate::download::tools::install_ffmpeg(&data, &progress).await
+}
+
+/// The download folder in use and the default one (`downloads.dir` empty).
+#[tauri::command]
+pub fn downloads_info(state: St<'_>) -> Value {
+    let data = crate::paths::data_dir(&state.app);
+    json!({
+        "dir": crate::download::settings::downloads_dir(&state.db, &data).to_string_lossy(),
+        "default_dir": crate::download::settings::default_dir(&data).to_string_lossy(),
+    })
+}
+
+/// Open the download folder in the file manager, creating it if it is not there yet.
+#[tauri::command]
+pub fn open_downloads_dir(state: St<'_>) -> Result<(), String> {
+    let data = crate::paths::data_dir(&state.app);
+    crate::backups::open_dir(&crate::download::settings::downloads_dir(&state.db, &data))
+}
+
+/// One song to download, with what the `videos` table keeps about it. A `SongItem` from the UI
+/// deserializes into this as it is.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct DownloadSong {
+    pub video_id: String,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub artists: Option<String>,
+    #[serde(default)]
+    pub duration: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+pub struct EnqueueResult {
+    /// New rows, and errored, missing or (with `redownload`) downloaded ones queued again.
+    pub queued: u32,
+    /// Already queued, running or downloaded: left as they were.
+    pub already: u32,
+    /// Not a YouTube video id (`^[A-Za-z0-9_-]{11}$`): dropped, never queued nor passed to
+    /// yt-dlp. Local songs are skipped without being counted here.
+    pub invalid: u32,
+}
+
+/// Queue `songs` in `format` (`audio`/`video`; the `downloads.default_format` setting when
+/// absent), with today's quality, cover and folder settings. Local files are skipped.
+/// `redownload` queues downloaded ones again. `Err("bad_format")` for any other format.
+#[tauri::command]
+pub async fn download_enqueue(
+    state: St<'_>,
+    downloads: Downloads<'_>,
+    songs: Vec<DownloadSong>,
+    format: Option<String>,
+    redownload: Option<bool>,
+) -> Result<EnqueueResult, String> {
+    use crate::download::settings;
+    let format = match format.as_deref() {
+        None => settings::default_format(&state.db),
+        Some(f) => settings::Format::parse(f).ok_or("bad_format")?,
+    };
+    let data = crate::paths::data_dir(&state.app);
+    let dest = settings::downloads_dir(&state.db, &data).to_string_lossy().into_owned();
+    let quality = settings::requested_quality(&state.db, format);
+    let thumbnail_mode = settings::thumbnail_mode(&state.db).as_str();
+    let now = crate::db::now_secs();
+
+    let mut result = EnqueueResult::default();
+    let mut ids = Vec::new();
+    for song in &songs {
+        if crate::local::is_local_song(&song.video_id) {
+            continue;
+        }
+        if !crate::download::ytdlp_args::is_valid_video_id(&song.video_id) {
+            result.invalid += 1;
+            continue;
+        }
+        let duration_s = song.duration.as_deref().and_then(crate::backups::duration_secs);
+        let request = crate::db::NewDownload {
+            video: crate::db::VideoMeta {
+                video_id: &song.video_id,
+                title: song.title.as_deref().filter(|t| !t.is_empty()),
+                channel: song.artists.as_deref().filter(|a| !a.is_empty()),
+                duration_s,
+            },
+            format: format.as_str(),
+            requested_quality: quality,
+            thumbnail_mode,
+            dest_dir: &dest,
+            redownload: redownload.unwrap_or(false),
+        };
+        match state.db.enqueue_download(&request, now).map_err(|e| e.to_string())? {
+            crate::db::EnqueueOutcome::Already => result.already += 1,
+            _ => {
+                result.queued += 1;
+                ids.push(song.video_id.clone());
+            }
+        }
+    }
+    if !ids.is_empty() {
+        crate::download::runner::emit_changed(&state.app, ids, None);
+        downloads.nudge();
+    }
+    Ok(result)
+}
+
+/// Stop the download that is running; its row goes (the file yt-dlp had started stays for a
+/// later resume). `false` when nothing runs.
+#[tauri::command]
+pub fn download_cancel(downloads: Downloads<'_>) -> bool {
+    downloads.cancel_active()
+}
+
+/// An errored, missing or downloaded row back into the queue, at the back. `false` for one
+/// already queued or running, or no row at all.
+#[tauri::command]
+pub fn download_retry(
+    state: St<'_>,
+    downloads: Downloads<'_>,
+    video_id: String,
+    format: String,
+) -> bool {
+    let requeued = state.db.requeue_download(&video_id, &format, crate::db::now_secs());
+    if requeued {
+        crate::download::runner::emit_changed(&state.app, vec![video_id], None);
+        downloads.nudge();
+    }
+    requeued
+}
+
+/// Forget a download: its row, and the run if it is the one running. Never the file.
+#[tauri::command]
+pub fn download_remove(
+    state: St<'_>,
+    downloads: Downloads<'_>,
+    video_id: String,
+    format: String,
+) -> bool {
+    // The runner drops the row of the run it stops.
+    if downloads.is_active(&video_id, &format) && downloads.cancel_active() {
+        return true;
+    }
+    let removed = state.db.delete_download(&video_id, &format);
+    if removed {
+        crate::download::runner::emit_changed(&state.app, vec![video_id], None);
+    }
+    removed
+}
+
+/// The download running now, as the last `download-progress` said; `None` when idle.
+#[tauri::command]
+pub fn download_active(downloads: Downloads<'_>) -> Option<crate::download::runner::Progress> {
+    downloads.active()
+}
+
+/// Every download row of these videos, grouped by video, after checking the files are still
+/// there (a moved file is found by its `[id]` marker; a deleted one goes `missing`).
+#[tauri::command]
+pub async fn downloads_for(
+    state: St<'_>,
+    video_ids: Vec<String>,
+) -> Result<std::collections::HashMap<String, Vec<crate::db::DownloadRow>>, String> {
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::download::verify::verify_for_video_ids(&db, &video_ids, crate::db::now_secs())
+    })
+    .await
+    .map_err(|e| e.to_string())
+}
+
+/// The newest downloads (50 by default), by completion or, until then, queueing date.
+#[tauri::command]
+pub fn downloads_recent(state: St<'_>, limit: Option<u32>) -> Vec<crate::db::DownloadRow> {
+    state.db.recent_downloads(limit.unwrap_or(50).clamp(1, 1000) as usize)
+}
+
+/// The whole crawl: every playlist you own, then the index pruned to them, the stamp, the summary
+/// (`playlist_index_last_summary`) and a `monitor_runs` row. `Err("busy")` while another run
+/// holds the monitor, `Err("empty_library")` when YouTube answered with no playlists at all.
+pub(crate) async fn sync_all(state: &Arc<AppState>, trigger: &str) -> Result<SyncSummary, String> {
+    let Some(_running) = state.begin_monitor_run() else {
+        return Err(monitor_busy(state, trigger));
+    };
+    let started = now_secs();
+    let mut summary = SyncSummary::new(trigger, started);
+    let client = match metadata_client(state) {
+        Ok(client) => client,
+        Err(e) => return Err(sync_failed(state, &summary, started, e)),
+    };
+    let library = match state.it.library_playlists(client).await {
+        Ok(library) => library,
+        Err(e) => return Err(sync_failed(state, &summary, started, e.to_string())),
+    };
+    // A degraded response that parses as an empty library would otherwise wipe every mark and
+    // then call the wipe fresh for a whole interval. Nothing to index is nothing to trust: keep
+    // what is stored and try again later (the scheduler backing off, `monitor_retry_due`).
+    if library.is_empty() {
+        return Err(sync_failed(state, &summary, started, "empty_library".into()));
+    }
+    let account = state.db.get_setting("active_account");
+    let playlists: Vec<_> = library.into_iter().filter(|p| p.id != ON_REPEAT_ID).collect();
+    let total = playlists.len();
+    let mut indexed: Vec<String> = Vec::new();
+    let mut failed_ids: Vec<String> = Vec::new();
+    let (data, mut reader) = data_api_run(state, crate::ytdata_sync::Scope::All, trigger).await;
+    let run = data.as_ref();
+    for (done, item) in playlists.into_iter().enumerate() {
+        let progress = json!({ "done": done, "total": total, "current": item.title });
+        let _ = state.app.emit("playlist-sync-progress", progress);
+        let title = Some(item.title.as_str());
+        let read = sync_one(state, client, &item.id, title, account.as_deref(), run).await;
+        match read {
+            PlaylistRead::NotYours => continue,
+            // One playlist failing (a deleted id, a hiccup) must not abandon the rest of the
+            // crawl, and must not drop what is already indexed for it either: leaving it out of
+            // `indexed` would have `retain_playlists` forget the tracks we do know about.
+            PlaylistRead::Failed => {
+                summary.failed += 1;
+                failed_ids.push(item.id.clone());
+            }
+            PlaylistRead::Read { complete, counts } => {
+                summary.complete += u32::from(complete);
+                summary.add(counts);
+            }
+        }
+        summary.playlists += 1;
+        indexed.push(item.id);
+    }
+    let _ = state.app.emit(
+        "playlist-sync-progress",
+        json!({ "done": total, "total": total, "current": Value::Null }),
+    );
+    state.db.retain_playlists(&indexed);
+    finish_data_api_run(state, data.as_ref(), &mut summary, &mut reader).await;
+    back_up_run(state, indexed).await;
+    state.db.set_setting(PLAYLIST_INDEX_STAMP, &now_secs().to_string());
+    note_sync_attempt(&state.db, started, summary.outcome() != "failed");
+    monitor::save_summary(&state.db, &summary);
+    let short = summary.playlists - summary.complete - summary.failed;
+    let detail =
+        json!({ "scope": "all", "failed": failed_ids, "incomplete": short, "reader": reader });
+    record_run(state, &summary, started, summary.outcome(), detail);
+    announce_sync(state, &summary);
+    Ok(summary)
+}
+
+/// A full sync that could not run at all: log the run as `failed`, count the failure for the
+/// scheduler's back-off, and answer the error.
+fn sync_failed(state: &AppState, summary: &SyncSummary, started: i64, error: String) -> String {
+    record_run(state, summary, started, "failed", json!({ "error": error }));
+    note_sync_attempt(&state.db, started, false);
+    error
+}
+
+/// The scheduler's tick (lib.rs, once a minute): a full sync with trigger `scheduler` when one is
+/// due, nothing otherwise. A run already in flight is no attempt, so it logs no `lock_busy`. After
+/// a failure it waits out the back-off first (`monitor_retry_due`), so a sync that cannot run is
+/// not retried, and logged, every minute.
+pub(crate) async fn scheduled_sync(state: &Arc<AppState>) {
+    if !state.it.is_logged_in() || state.monitor_running() {
+        return;
+    }
+    let now = now_secs();
+    if !playlist_index_due(&state.db, now) || !monitor_retry_due(&state.db, now) {
+        return;
+    }
+    if let Err(e) = sync_all(state, "scheduler").await {
+        tracing::info!(error = %e, "scheduled playlist sync did not run");
+    }
+}
+
 /// Rebuild that index by walking the playlists you own, then answer with it.
 ///
 /// Nothing else knows playlist membership: the library browse gives cards, a playlist browse gives
 /// one list's tracks, and InnerTube's per-video add-to-playlist dialog would be a request per row.
-/// So the crawl is the price, and it is paid at most once every `PLAYLIST_INDEX_TTL_SECS`, on a
-/// launch or a sign-in. Playlists you merely saved are skipped: they are someone else's, so "you
-/// saved this song to it" would be a lie, and their long mixes would double the walk.
+/// So the crawl is the price, and it is paid at most once per `monitor_interval_hours`, on a
+/// launch, a sign-in or the scheduler's tick, unless `force` asks for it now. Playlists you merely
+/// saved are skipped: they are someone else's, so "you saved this song to it" would be a lie, and
+/// their long mixes would double the walk. Each playlist read to the end is also compared with its
+/// last snapshot, which is what files the monitor's alerts (playlist_tools::monitor).
+///
+/// `trigger` is `manual_ui` (the default), `scheduler` or `headless`, for `monitor_runs`. Answers
+/// `Err("busy")` while another sync runs.
 #[tauri::command]
 pub async fn sync_playlist_index(
     state: St<'_>,
+    force: Option<bool>,
+    trigger: Option<String>,
 ) -> Result<std::collections::HashMap<String, Vec<String>>, String> {
     if !state.it.is_logged_in() {
         // What is left is the playlists on this machine, which no account owns.
         state.db.clear_playlist_index();
         return Ok(state.db.playlist_memberships());
     }
-    let fresh_until = state
-        .db
-        // The key changes whenever the index learns to hold something new, so an install with a
-        // fresh stamp re-crawls once: `_v2` when Liked Music joined it, `_v3` when each track's
-        // metadata did (the "in your playlists" view and the monitor read it).
-        .get_setting("playlist_index_synced_at_v3")
-        .and_then(|at| at.parse::<i64>().ok())
-        .map(|at| at + PLAYLIST_INDEX_TTL_SECS);
-    if fresh_until.is_some_and(|until| now_secs() < until) {
+    let trigger = sync_trigger(trigger.as_deref());
+    let now = now_secs();
+    // Unasked-for (`scheduler`: a launch, a sign-in) waits out the scheduler's back-off too, except
+    // with automatic checks off: then nothing else retries a failed first build, so each launch
+    // still gets one try, as before the back-off.
+    let backing_off = trigger == "scheduler"
+        && monitor_interval_secs(&state.db).is_some()
+        && !monitor_retry_due(&state.db, now);
+    if !force.unwrap_or(false) && (!playlist_index_due(&state.db, now) || backing_off) {
         return Ok(state.db.playlist_memberships());
     }
-    let client = metadata_client(&state)?;
-    let library = state.it.library_playlists(client).await.map_err(|e| e.to_string())?;
-    // A degraded response that parses as an empty library would otherwise wipe every mark and
-    // then call the wipe fresh for six hours. Nothing to index is nothing to trust: keep what is
-    // stored and try again on the next launch.
-    if library.is_empty() {
-        return Ok(state.db.playlist_memberships());
+    match sync_all(&state, trigger).await {
+        Ok(_) => {}
+        // Logged already; what is stored stands.
+        Err(e) if e == "empty_library" => {}
+        Err(e) => return Err(e),
     }
-    let mut indexed: Vec<String> = Vec::new();
-    for item in library {
-        if item.id == ON_REPEAT_ID {
-            continue;
+    Ok(state.db.playlist_memberships())
+}
+
+/// Sync one playlist now, whatever the interval says: its index rows, snapshot and alerts, as the
+/// full crawl would. The rest of the index is left alone (no pruning), and so are the crawl's
+/// stamp and stored summary. Answers what this one read found; `Err("busy")` while another sync
+/// runs.
+#[tauri::command]
+pub async fn sync_playlist(state: St<'_>, playlist_id: String) -> Result<SyncSummary, String> {
+    if playlist_id == ON_REPEAT_ID || is_local_playlist(&playlist_id) {
+        return Err("This playlist is on this device, so there is nothing to sync.".into());
+    }
+    let client = require_login(&state)?;
+    let Some(_running) = state.begin_monitor_run() else {
+        return Err(monitor_busy(&state, "manual_ui"));
+    };
+    let started = now_secs();
+    let mut summary = SyncSummary::new("manual_ui", started);
+    let account = state.db.get_setting("active_account");
+    let progress = json!({ "done": 0, "total": 1, "current": playlist_id });
+    let _ = state.app.emit("playlist-sync-progress", progress);
+    let scope = crate::ytdata_sync::Scope::One(&playlist_id);
+    let (data, mut reader) = data_api_run(&state, scope, "manual_ui").await;
+    match sync_one(&state, client, &playlist_id, None, account.as_deref(), data.as_ref()).await {
+        PlaylistRead::NotYours => {}
+        PlaylistRead::Failed => {
+            summary.playlists = 1;
+            summary.failed = 1;
         }
-        // One playlist failing (a deleted id, a hiccup) must not abandon the rest of the crawl,
-        // and must not drop what is already indexed for it either: leaving it out of `indexed`
-        // would have `retain_playlists` forget the tracks we do know about.
-        let Ok(page) = state.it.playlist(client, &item.id, None).await else {
-            indexed.push(item.id);
-            continue;
+        PlaylistRead::Read { complete, counts } => {
+            summary.playlists = 1;
+            summary.complete = u32::from(complete);
+            summary.add(counts);
+        }
+    }
+    let _ = state
+        .app
+        .emit("playlist-sync-progress", json!({ "done": 1, "total": 1, "current": Value::Null }));
+    finish_data_api_run(&state, data.as_ref(), &mut summary, &mut reader).await;
+    back_up_run(&state, vec![playlist_id.clone()]).await;
+    let detail = json!({ "scope": playlist_id, "reader": reader });
+    record_run(&state, &summary, started, summary.outcome(), detail);
+    announce_sync(&state, &summary);
+    if summary.failed > 0 {
+        return Err("unreadable".into());
+    }
+    Ok(summary)
+}
+
+/// The last full sync's summary ("+N −N ~N" and the rest), `None` before the first.
+#[tauri::command]
+pub fn last_sync_summary(state: St<'_>) -> Option<SyncSummary> {
+    monitor::last_summary(&state.db)
+}
+
+/// Playlist id → its last complete sync (`synced_at`, `item_count`, `added`, `removed`, `moved`):
+/// the Library's "2 h ago · +3 −1 ~2" line and its sort by count or by sync. SQLite only.
+#[tauri::command]
+pub fn playlist_sync_info(
+    state: St<'_>,
+) -> std::collections::HashMap<String, crate::db::PlaylistSync> {
+    state.db.playlist_syncs()
+}
+
+/// `videoId` → the earliest date it was added to one of your playlists, as the Data API reported
+/// it (epoch seconds). Tracks only InnerTube has read are absent: the "In your playlists" view
+/// falls back to their first-seen date. SQLite only.
+#[tauri::command]
+pub fn playlist_added_dates(state: St<'_>) -> std::collections::HashMap<String, i64> {
+    state.db.playlist_added_dates()
+}
+
+/// Whether the YouTube Data API can be used now, and why not ([`crate::ytdata_status`]). States
+/// and counters only: no token or secret ever reaches the webview. Changes arrive as
+/// `ytdata-status-changed`.
+#[tauri::command]
+pub async fn ytdata_status(state: St<'_>) -> Result<crate::ytdata_status::YtDataStatus, String> {
+    Ok(crate::ytdata_status::current(&state).await)
+}
+
+// --- Settings ▸ YouTube Data API ---------------------------------------------------------------
+// The imported client secret, the channels connected through OAuth, the budget. Only the masked
+// client id, channel metadata and states cross into the webview: never a token, never the client
+// secret. The authorization opens in the system browser, never in the webview.
+
+/// Sent once a connection started by [`ytdata_connect_start`] ends, however it ends.
+const CONNECT_FINISHED_EVENT: &str = "ytdata-connect-finished";
+/// How long the browser has to come back to the loopback before the attempt gives up.
+const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+
+/// The connection in progress: its number and its cancel flag. Starting another cancels it.
+type Connecting = Option<(u64, Arc<std::sync::atomic::AtomicBool>)>;
+static CONNECTING: std::sync::Mutex<Connecting> = std::sync::Mutex::new(None);
+static CONNECT_ATTEMPTS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn connecting() -> std::sync::MutexGuard<'static, Connecting> {
+    CONNECTING.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ClientSecretInfo {
+    masked_client_id: String,
+}
+
+/// An import failure in words. serde's message can quote a piece of the file, so a file that is
+/// not JSON gets a fixed sentence instead.
+fn import_error(e: &ytdata::error::Error) -> String {
+    match e {
+        ytdata::error::Error::Serde(_) => {
+            "That file is not a client_secret.json: it is not valid JSON.".to_string()
+        }
+        other => other.to_string(),
+    }
+}
+
+/// Validates the `client_secret.json` the user picked and copies it to the data folder
+/// (`ytdata_secrets::client_secret_path`). Answers only its masked client id.
+#[tauri::command]
+pub async fn ytdata_import_client_secret(
+    state: St<'_>,
+    jobs: Jobs<'_>,
+    path: String,
+) -> Result<ClientSecretInfo, String> {
+    let dest = crate::ytdata_secrets::client_secret_path(&state.app);
+    let dir = dest.parent().map(std::path::Path::to_path_buf).ok_or("no data folder")?;
+    let source = std::path::PathBuf::from(path);
+    let parsed = tokio::task::spawn_blocking(move || ytdata::client_secret::import(&source, &dir))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| import_error(&e))?;
+    let info = ClientSecretInfo { masked_client_id: parsed.masked_client_id() };
+    if let Some(manager) = jobs.account_manager() {
+        manager.set_client_secret(parsed);
+    }
+    tracing::info!("ytdata: client_secret.json imported");
+    crate::ytdata_status::announce(&state).await;
+    Ok(info)
+}
+
+/// The imported client secret's masked client id, or `None` before one is imported.
+#[tauri::command]
+pub async fn ytdata_client_secret_info(
+    state: St<'_>,
+    jobs: Jobs<'_>,
+) -> Result<Option<ClientSecretInfo>, String> {
+    let secret = jobs.account_manager().and_then(|m| m.client_secret()).or_else(|| {
+        let path = crate::ytdata_secrets::client_secret_path(&state.app);
+        path.parent().and_then(ytdata::client_secret::load_existing)
+    });
+    Ok(secret.map(|s| ClientSecretInfo { masked_client_id: s.masked_client_id() }))
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct ConnectStarted {
+    /// Google's consent page, already opened in the system browser; shown so it can be copied
+    /// when no browser opened. Carries the client id, PKCE challenge and state, no secret.
+    authorize_url: String,
+    /// Which attempt this is: [`CONNECT_FINISHED_EVENT`] names it.
+    attempt: u64,
+}
+
+/// How a connection ended, as [`CONNECT_FINISHED_EVENT`] carries it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+struct ConnectFinished {
+    attempt: u64,
+    ok: bool,
+    /// `cancelled`, `timed_out` or `failed` when not ok.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    code: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    channel_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    title: Option<String>,
+}
+
+impl ConnectFinished {
+    fn failed(attempt: u64, e: &ytdata::error::Error) -> Self {
+        use ytdata::error::{AuthError, Error};
+        let (code, error) = match e {
+            Error::Auth(AuthError::Cancelled) => ("cancelled", None),
+            Error::Auth(AuthError::TimedOut) => ("timed_out", Some(e.to_string())),
+            _ => ("failed", Some(e.to_string())),
         };
-        // A collaborative playlist reads `owned: false` (YouTube drops the editable header on it)
-        // but is one you add to and remove from, so the membership index has to cover it too.
-        // Liked Music is exempt: YouTube sends it without the editable header, so it reads
-        // `owned: false` even though it is yours.
-        if item.id != LIKED_MUSIC_ID && !page.owned && !page.collaborative {
-            continue;
-        }
-        let mut songs: Vec<SongItem> = page.items;
-        let mut token = page.continuation;
-        // Read to the end, not cut short by a failed page or the page cap: only then may the
-        // monitor read a track missing from it as gone.
-        let mut complete = token.is_none();
-        for _ in 0..PLAYLIST_INDEX_MAX_PAGES {
-            let Some(next) = token.take() else {
-                complete = true;
-                break;
-            };
-            let Ok(more) = state.it.playlist_continuation(client, &next).await else { break };
-            songs.extend(more.items);
-            token = more.continuation;
-        }
-        complete = complete || token.is_none();
-        // Liked Music changes every time you like or unlike something anywhere: not news.
-        if complete && item.id != LIKED_MUSIC_ID {
-            let before = state.db.playlist_songs(&item.id);
-            for c in playlist_tools::monitor::diff(&before, &songs) {
-                let json = c.song.and_then(|s| serde_json::to_string(&s).ok());
-                state.db.add_playlist_alert(
-                    &item.id,
-                    &c.video_id,
-                    c.kind,
-                    json.as_deref(),
-                    now_secs(),
-                );
+        Self { attempt, ok: false, code: Some(code), error, channel_id: None, title: None }
+    }
+}
+
+/// Starts connecting a channel: binds the loopback, opens Google's consent page in the system
+/// browser, and waits in the background (up to five minutes, or until cancelled) for it to come
+/// back. The end arrives as `ytdata-connect-finished` (and `ytdata-status-changed`).
+#[tauri::command]
+pub async fn ytdata_connect_start(state: St<'_>, jobs: Jobs<'_>) -> Result<ConnectStarted, String> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use ytdata::auth::flow::{PendingAuthorization, YOUTUBE_SCOPE};
+    let manager =
+        jobs.account_manager().ok_or("The YouTube Data API is not available in this session.")?;
+    let no_secret = || ytdata::error::AuthError::NoClientSecret.to_string();
+    let secret = manager.client_secret().ok_or_else(no_secret)?;
+    let pending =
+        PendingAuthorization::start(&secret, &[YOUTUBE_SCOPE]).map_err(|e| e.to_string())?;
+    let authorize_url = pending.authorize_url.clone();
+    let attempt = CONNECT_ATTEMPTS.fetch_add(1, Ordering::SeqCst) + 1;
+    let cancel = Arc::new(AtomicBool::new(false));
+    if let Some((_, previous)) = connecting().replace((attempt, cancel.clone())) {
+        previous.store(true, Ordering::SeqCst);
+    }
+    // The system browser: Google refuses sign-in inside embedded webviews, and the app's own
+    // webview must never hold the consent page.
+    if let Err(e) = crate::lastfm::open_browser(&authorize_url) {
+        tracing::warn!(error = %e, "ytdata: could not open the browser for the authorization");
+    }
+    let app_state = state.inner().clone();
+    tauri::async_runtime::spawn(async move {
+        let finished = finish_connect(&app_state, manager, pending, cancel, attempt).await;
+        {
+            let mut slot = connecting();
+            if slot.as_ref().is_some_and(|(n, _)| *n == attempt) {
+                *slot = None;
             }
         }
-        let rows: Vec<(String, String)> = songs
-            .into_iter()
-            .map(|s| {
-                let json = serde_json::to_string(&playlist_row(s.clone())).unwrap_or_default();
-                (s.video_id, json)
-            })
-            .collect();
-        state.db.set_playlist_songs(&item.id, &rows);
-        indexed.push(item.id);
+        if finished.ok {
+            tracing::info!("ytdata: channel connected");
+        } else {
+            tracing::info!(code = ?finished.code, "ytdata: connection ended without a channel");
+        }
+        crate::ytdata_status::announce(&app_state).await;
+        let _ = app_state.app.emit(CONNECT_FINISHED_EVENT, &finished);
+    });
+    Ok(ConnectStarted { authorize_url, attempt })
+}
+
+/// Waits for the browser, then saves the channel ([`save_connected`]) on a blocking thread: the
+/// token store blocks.
+async fn finish_connect(
+    state: &Arc<AppState>,
+    manager: Arc<ytdata::auth::accounts::AccountManager>,
+    pending: ytdata::auth::flow::PendingAuthorization,
+    cancel: Arc<std::sync::atomic::AtomicBool>,
+    attempt: u64,
+) -> ConnectFinished {
+    let tokens = match pending.wait_for_tokens(cancel, CONNECT_TIMEOUT).await {
+        Ok(tokens) => tokens,
+        Err(e) => return ConnectFinished::failed(attempt, &e),
+    };
+    let db = state.db.clone();
+    let active = db.get_setting("active_account");
+    let joined = tokio::task::spawn_blocking(move || {
+        let saving = save_connected(&manager, &db, tokens, active.as_deref(), chrono::Utc::now());
+        tokio::runtime::Handle::current().block_on(saving)
+    })
+    .await;
+    match joined {
+        Ok(Ok(account)) => ConnectFinished {
+            attempt,
+            ok: true,
+            code: None,
+            error: None,
+            channel_id: Some(account.channel_id),
+            title: Some(account.title),
+        },
+        Ok(Err(e)) => ConnectFinished::failed(attempt, &e),
+        Err(e) => ConnectFinished::failed(attempt, &ytdata_io(e)),
     }
-    state.db.retain_playlists(&indexed);
-    state.db.set_setting("playlist_index_synced_at_v3", &now_secs().to_string());
-    Ok(state.db.playlist_memberships())
+}
+
+/// Something that went wrong around a Data API call, as the crate's error type.
+fn ytdata_io(e: impl std::fmt::Display) -> ytdata::error::Error {
+    ytdata::error::Error::Io(std::io::Error::other(e.to_string()))
+}
+
+/// Saves a channel the browser just authorized. The account manager names it (`channels.list`),
+/// puts its refresh token in the token store and its row in `ytdata_accounts` (through
+/// `DbAccountsRepo`, so the manager's own list stays in step with the table). Then the call's unit
+/// goes to the ledger and the channel is linked to the signed-in cookie account when that one has
+/// none yet. A Data API refusal is filed with `ytdata_status` (an API turned off shows as such).
+/// The token store blocks: call this off the async runtime.
+async fn save_connected(
+    manager: &ytdata::auth::accounts::AccountManager,
+    db: &crate::db::Db,
+    tokens: ytdata::auth::flow::AuthorizedTokens,
+    active: Option<&str>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<crate::ytdata_accounts::YtDataAccount, ytdata::error::Error> {
+    let account = match manager.add_account(tokens).await {
+        Ok(account) => account,
+        Err(e) => {
+            crate::ytdata_status::note_error(db, &e, now);
+            return Err(e);
+        }
+    };
+    crate::ytdata_status::note_success(db);
+    let (channels_list, channel) = (ytdata::quota::endpoint::CHANNELS_LIST, &account.channel_id);
+    if let Err(e) = crate::quota::record(db, channels_list, Some(channel.as_str()), None, now) {
+        tracing::warn!(error = %e, "ytdata: could not record the channels.list unit");
+    }
+    link_if_unpaired(db, &account.channel_id, active).map_err(ytdata_io)?;
+    crate::ytdata_accounts::get(db, &account.channel_id)
+        .map_err(ytdata_io)?
+        .ok_or_else(|| ytdata_io("the connected channel was not saved"))
+}
+
+/// Links `channel_id` to the cookie account `active` when neither is linked to anything yet.
+/// Answers whether it linked.
+fn link_if_unpaired(
+    db: &crate::db::Db,
+    channel_id: &str,
+    active: Option<&str>,
+) -> rusqlite::Result<bool> {
+    let Some(active) = active.filter(|a| !a.is_empty()) else { return Ok(false) };
+    let accounts = crate::ytdata_accounts::list(db)?;
+    let taken = accounts.iter().any(|a| a.linked_account.as_deref() == Some(active));
+    match accounts.iter().find(|a| a.channel_id == channel_id) {
+        Some(a) if a.linked_account.is_none() && !taken => {
+            crate::ytdata_accounts::set_linked_account(db, channel_id, Some(active))
+        }
+        _ => Ok(false),
+    }
+}
+
+/// Pairs `channel_id` with the cookie account `account` (or unpairs it with `None`). A cookie
+/// account has one channel at most: whichever was linked to it before is unlinked. Answers
+/// whether the channel exists.
+fn link_account(
+    db: &crate::db::Db,
+    channel_id: &str,
+    account: Option<&str>,
+) -> rusqlite::Result<bool> {
+    let accounts = crate::ytdata_accounts::list(db)?;
+    if !accounts.iter().any(|a| a.channel_id == channel_id) {
+        return Ok(false);
+    }
+    if let Some(account) = account {
+        let others = accounts.iter().filter(|a| a.channel_id != channel_id);
+        for other in others.filter(|a| a.linked_account.as_deref() == Some(account)) {
+            crate::ytdata_accounts::set_linked_account(db, &other.channel_id, None)?;
+        }
+    }
+    crate::ytdata_accounts::set_linked_account(db, channel_id, account)
+}
+
+/// Gives up on the connection in progress, if any. Its end still arrives as the event.
+#[tauri::command]
+pub fn ytdata_connect_cancel() {
+    if let Some((_, cancel)) = connecting().take() {
+        cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// A connected channel as the settings list it. No token, ever.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct YtDataAccountView {
+    channel_id: String,
+    title: String,
+    thumb: Option<String>,
+    /// `connected` or `reauth_required`.
+    status: ytdata::auth::accounts::AccountStatus,
+    /// The cookie account (`accounts.id`) it is paired with.
+    linked_account: Option<String>,
+    /// Epoch seconds.
+    added_at: i64,
+}
+
+#[tauri::command]
+pub fn ytdata_accounts(state: St<'_>) -> Result<Vec<YtDataAccountView>, String> {
+    let rows = crate::ytdata_accounts::list(&state.db).map_err(db_err)?;
+    Ok(rows
+        .into_iter()
+        .map(|a| YtDataAccountView {
+            channel_id: a.channel_id,
+            title: a.title,
+            thumb: a.thumb,
+            status: a.status,
+            linked_account: a.linked_account,
+            added_at: a.added_at,
+        })
+        .collect())
+}
+
+/// Disconnects a channel: revokes its refresh token with Google (best effort), deletes it from the
+/// token store and removes its row. Its jobs stay, unowned (`ON DELETE SET NULL`); its playlists
+/// and ledger rows are not touched.
+#[tauri::command]
+pub async fn ytdata_disconnect(
+    state: St<'_>,
+    jobs: Jobs<'_>,
+    channel_id: String,
+) -> Result<(), String> {
+    ytdata::auth::store::validate_account_id(&channel_id).map_err(|e| e.to_string())?;
+    let manager = jobs.account_manager();
+    let store = crate::ytdata_secrets::token_store(&state.app);
+    let db = state.db.clone();
+    let id = channel_id.clone();
+    tokio::task::spawn_blocking(move || -> Result<(), String> {
+        match manager {
+            Some(m) if m.account(&id).is_some() => {
+                let removing = m.revoke_and_remove_account(&id);
+                tokio::runtime::Handle::current().block_on(removing).map_err(|e| e.to_string())?;
+            }
+            // The manager never knew it (no manager this session): the token still goes.
+            _ => {
+                if let Err(e) = store.delete(&id) {
+                    tracing::warn!(error = %e, "ytdata: could not delete a stored token");
+                }
+            }
+        }
+        crate::ytdata_accounts::remove(&db, &id).map_err(db_err)?;
+        Ok(())
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    tracing::info!("ytdata: channel disconnected");
+    crate::ytdata_status::announce(&state).await;
+    let _ = state.app.emit("jobs-changed", json!({}));
+    Ok(())
+}
+
+/// Pairs a connected channel with a cookie account (`accounts.id`), or unpairs it with `null`:
+/// the Data API acts as that channel while that account is signed in.
+#[tauri::command]
+pub async fn ytdata_link_account(
+    state: St<'_>,
+    channel_id: String,
+    account: Option<String>,
+) -> Result<(), String> {
+    let account = account.filter(|a| !a.is_empty());
+    if let Some(account) = &account {
+        if !state.db.list_accounts().iter().any(|a| &a.id == account) {
+            return Err("That account is not signed in on this computer.".into());
+        }
+    }
+    if !link_account(&state.db, &channel_id, account.as_deref()).map_err(db_err)? {
+        return Err("That channel is not connected.".into());
+    }
+    crate::ytdata_status::announce(&state).await;
+    Ok(())
+}
+
+/// The budget's settings as they read, and today's partition of the quota. The settings are
+/// written with `set_setting`, which validates them.
+#[tauri::command]
+pub async fn budget_get(state: St<'_>) -> Result<crate::jobs::budget::Snapshot, String> {
+    crate::jobs::budget::snapshot(&state.db, chrono::Utc::now()).map_err(db_err)
+}
+
+/// Alerts neither seen nor dismissed: the badge's number before any `alerts-changed` arrives.
+#[tauri::command]
+pub fn unseen_alert_count(state: St<'_>) -> u32 {
+    state.db.unseen_alert_count()
+}
+
+/// The monitor page's cards: `{ playlists, items, unavailable, duplicates_estimate }`.
+#[tauri::command]
+pub fn monitor_stats(state: St<'_>) -> crate::db::MonitorStats {
+    state.db.monitor_stats()
+}
+
+/// The newest monitor runs, newest first: 20 unless `limit` says otherwise (at most 500).
+#[tauri::command]
+pub fn monitor_runs(state: St<'_>, limit: Option<u32>) -> Vec<crate::db::MonitorRun> {
+    state.db.monitor_runs(limit.unwrap_or(20).min(500) as usize)
+}
+
+/// Every alert filed over the last `days` days (14 unless said, at most 366), oldest first, as
+/// `{ at, kind }`. Raw rows rather than per-day sums: a day is the viewer's local day, which the
+/// page knows and this does not.
+#[tauri::command]
+pub fn alerts_by_day(state: St<'_>, days: Option<u32>) -> Vec<crate::db::AlertStamp> {
+    let days = i64::from(days.unwrap_or(14).clamp(1, 366));
+    state.db.alerts_since(now_secs() - days * 86_400)
 }
 
 /// `false` means the playlist already had the track and YouTube added nothing — not an error, but
@@ -1625,6 +2789,8 @@ pub async fn reorder_playlist(
     if moved == 0 {
         return Ok(None);
     }
+    // Your order, not news: the next sync compares against it and files no `moved` for it.
+    monitor::after_reorder(&state.db, &playlist_id, &before, &order, now_secs());
     journal::announce(&state, std::slice::from_ref(&playlist_id));
     let summary =
         Summary { playlists: vec![Named { id: playlist_id.clone(), title }], count: moved };
@@ -1634,15 +2800,39 @@ pub async fn reorder_playlist(
 /// Take rows out of a playlist, undoably. Each row comes with the handle of the row after it that
 /// stays (`before`), which is where an undo puts it back. `kind` names it in the history: a plain
 /// removal, or the duplicate finder's.
+///
+/// With the job queue on (`jobs::engine`), an account playlist's removal runs as a job, on
+/// InnerTube or the Data API; this waits for it to settle and answers its journal entry, or
+/// `None` while it still waits its turn. `engine` overrides `playlist_engine` for this call.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn remove_tracks(
     state: St<'_>,
+    jobs: Jobs<'_>,
     playlist_id: String,
     title: String,
     rows: Vec<Restore>,
     kind: Option<String>,
+    engine: Option<String>,
 ) -> Result<Option<OpRecord>, String> {
     let kind = if kind.as_deref() == Some("dedupe") { "dedupe" } else { "remove" };
+    let est = crate::jobs::planner::estimate_remove_units(rows.len(), rows.len());
+    let touched = [playlist_id.as_str()];
+    if let Some(q) = queue_target(&state, &jobs, &touched, est, engine.as_deref()) {
+        let occurrences = if q.engine == crate::jobs::engine::Engine::Ytdata {
+            let picked: Vec<SongItem> = rows.iter().map(|r| r.song.clone()).collect();
+            let current = rows::read_all(&state, &playlist_id).await.unwrap_or_default();
+            crate::jobs::planner::occurrences(&current, &picked)
+        } else {
+            Vec::new()
+        };
+        let named = Named { id: playlist_id.clone(), title };
+        let Some(new) = dedup::removal_job(&named, &rows, kind, &occurrences, &q) else {
+            return Ok(None);
+        };
+        let job = enqueue_and_wait(&state, &jobs, &new).await?;
+        return Ok(job_op(&state, job.as_ref()).await);
+    }
     let songs: Vec<SongItem> = rows.iter().map(|r| r.song.clone()).collect();
     rows::remove_rows(&state, &playlist_id, &songs, &|| false).await?;
     journal::announce(&state, std::slice::from_ref(&playlist_id));
@@ -1674,10 +2864,17 @@ pub async fn find_duplicates(
 
 /// Copy or move tracks into another playlist: a drop on a sidebar playlist, or "Move to…".
 /// `source` is the playlist they came from (`None` for a list that isn't one, which can only copy).
+///
+/// With the job queue on (`jobs::engine`), a write to account playlists runs as a job: on
+/// InnerTube in `unified` mode, or on the Data API when that is the engine (a move then copies,
+/// verifies the copies landed, and only then deletes). This waits for the job to settle and
+/// answers what it did, with `job_id` set; the counts are zero while it still waits its turn.
+/// `engine` overrides `playlist_engine` for this call.
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn transfer_tracks(
     state: St<'_>,
+    jobs: Jobs<'_>,
     source: Option<String>,
     source_title: Option<String>,
     target: String,
@@ -1685,6 +2882,7 @@ pub async fn transfer_tracks(
     rows: Vec<Restore>,
     mode: transfer::Mode,
     duplicates: transfer::Duplicates,
+    engine: Option<String>,
 ) -> Result<transfer::Transferred, String> {
     let req = transfer::Request {
         source: source.map(|id| Named { id, title: source_title.unwrap_or_default() }),
@@ -1693,7 +2891,205 @@ pub async fn transfer_tracks(
         mode,
         duplicates,
     };
-    transfer::run(&state, req).await
+    let moving = transfer::is_move(&req);
+    let mut touched = vec![req.target.id.as_str()];
+    if let (true, Some(source)) = (moving, &req.source) {
+        touched.push(source.id.as_str());
+    }
+    let est = crate::jobs::planner::estimate_transfer_units(req.rows.len(), moving);
+    let Some(q) = queue_target(&state, &jobs, &touched, est, engine.as_deref()) else {
+        return transfer::run(&state, req).await;
+    };
+    let index = state.db.playlist_memberships();
+    let (known, add) = transfer::split_known(&req.rows, &req.target.id, req.duplicates, &index);
+    let occurrences = match (&req.source, q.engine) {
+        (Some(source), crate::jobs::engine::Engine::Ytdata) if moving => {
+            let picked: Vec<SongItem> = req.rows.iter().map(|r| r.song.clone()).collect();
+            let current = rows::read_all(&state, &source.id).await.unwrap_or_default();
+            crate::jobs::planner::occurrences(&current, &picked)
+        }
+        _ => Vec::new(),
+    };
+    let Some(new) = transfer::queued_job(&req, &known, &add, &occurrences, &q) else {
+        // Everything was already there: nothing to write.
+        let mut nothing = transfer::from_job(0, &[], known.len());
+        nothing.job_id = None;
+        return Ok(nothing);
+    };
+    let job = enqueue_and_wait(&state, &jobs, &new).await?;
+    let Some(job) = job else { return Err("The queued job is gone.".into()) };
+    let op = job_op(&state, Some(&job)).await;
+    let items = crate::jobs::repo::list_job_items(&state.db, job.id).map_err(db_err)?;
+    let mut done = transfer::from_job(job.id, &items, known.len());
+    done.op = op;
+    Ok(done)
+}
+
+// --- job queue dispatch (jobs/) ------------------------------------------------------------------
+// The playlist tools' writes to account playlists go through the queue when `jobs::engine` says
+// so, keeping their commands' signatures: the command queues, waits for the job to settle, and
+// answers from it. Local playlists never queue.
+
+type Jobs<'a> = State<'a, Arc<crate::jobs::JobsState>>;
+
+/// How long a command waits for its job before answering "still queued".
+const QUEUED_WAIT: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// Where a write to `playlists` goes: `Some` to queue it (engine, channel, account, priority),
+/// `None` to run it directly as before (a local playlist, or InnerTube with the Data-API-only
+/// queue). See `jobs::engine::resolve_engine`.
+fn queue_target(
+    state: &Arc<AppState>,
+    jobs: &crate::jobs::JobsState,
+    playlists: &[&str],
+    est_units: i64,
+    override_: Option<&str>,
+) -> Option<crate::jobs::engine::QueueTarget> {
+    use crate::jobs::engine::{self, Engine, QueueMode, QueueTarget};
+    let r = route(state, jobs, playlists, est_units, override_)?;
+    let db = &state.db;
+    let priority = engine::default_job_priority(db);
+    match r.engine {
+        Engine::Ytdata => Some(QueueTarget {
+            engine: r.engine,
+            channel_id: r.channel_id,
+            account: r.account,
+            priority,
+        }),
+        Engine::Innertube if engine::queue_mode(db) == QueueMode::Unified => {
+            Some(QueueTarget { engine: r.engine, channel_id: None, account: r.account, priority })
+        }
+        Engine::Innertube => None,
+    }
+}
+
+/// Which engine a write to `playlists` would run on now, and what decided it. `None` for a write
+/// that touches a playlist on this computer (those never queue and cost no quota).
+struct Route {
+    engine: crate::jobs::engine::Engine,
+    /// The Data API's state for these playlists: `not_configured` when one of them is not a
+    /// playlist the Data API can address (Liked Music, an album).
+    state: crate::jobs::engine::DataApiState,
+    channel_id: Option<String>,
+    account: Option<String>,
+    available: i64,
+}
+
+fn route(
+    state: &Arc<AppState>,
+    jobs: &crate::jobs::JobsState,
+    playlists: &[&str],
+    est_units: i64,
+    override_: Option<&str>,
+) -> Option<Route> {
+    use crate::jobs::engine::{self, DataApiState, EngineSetting};
+    if playlists.iter().any(|id| is_local_playlist(id)) {
+        return None;
+    }
+    let db = &state.db;
+    let now = chrono::Utc::now();
+    let account = db.get_setting("active_account");
+    let addressable =
+        playlists.iter().all(|id| crate::jobs::planner::ytdata_playlist_id(id).is_some());
+    let ctx = engine::data_api_state(db, jobs.client_secret_present(), account.as_deref(), now);
+    let status = if addressable { ctx.state } else { DataApiState::NotConfigured };
+    let available = crate::jobs::budget::available_for_jobs_now(db, now).unwrap_or(0);
+    let chosen = engine::resolve_engine(
+        engine::playlist_engine(db),
+        override_.and_then(EngineSetting::parse),
+        status,
+        est_units,
+        available,
+    );
+    Some(Route { engine: chosen, state: status, channel_id: ctx.channel_id, account, available })
+}
+
+/// What a copy, move or removal would cost on the Data API, what jobs may still spend today, and
+/// the engine it would run on with `params.engine` as the operation's choice (`auto`, `ytdata`,
+/// `innertube`; none = the `playlist_engine` setting). `engine` is `None` for a write that touches
+/// a playlist on this computer. For the confirmation's "≈ N u of M available".
+#[derive(serde::Deserialize)]
+pub struct EstimateParams {
+    #[serde(default)]
+    rows: usize,
+    /// Every playlist the write touches: the target, and the source too for a move.
+    #[serde(default)]
+    playlists: Vec<String>,
+    /// How long the playlist a removal reads is, when the caller knows.
+    #[serde(default)]
+    playlist_len: Option<usize>,
+    #[serde(default)]
+    engine: Option<String>,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct OpEstimate {
+    units: i64,
+    available: i64,
+    engine: Option<crate::jobs::engine::Engine>,
+    state: crate::jobs::engine::DataApiState,
+}
+
+#[tauri::command]
+pub async fn estimate_op(
+    state: St<'_>,
+    jobs: Jobs<'_>,
+    kind: String,
+    params: EstimateParams,
+) -> Result<OpEstimate, String> {
+    use crate::jobs::engine::{estimate_units, DataApiState, OpKind};
+    let op = OpKind::parse(&kind).ok_or_else(|| format!("unknown operation: {kind}"))?;
+    let units = estimate_units(op, params.rows, params.playlist_len);
+    let touched: Vec<&str> = params.playlists.iter().map(String::as_str).collect();
+    let Some(r) = route(&state, &jobs, &touched, units, params.engine.as_deref()) else {
+        // A playlist on this computer: nothing to spend.
+        let available = crate::jobs::budget::available_for_jobs_now(&state.db, chrono::Utc::now());
+        let state = DataApiState::NotConfigured;
+        return Ok(OpEstimate { units: 0, available: available.unwrap_or(0), engine: None, state });
+    };
+    Ok(OpEstimate { units, available: r.available, engine: Some(r.engine), state: r.state })
+}
+
+/// Queues `new`, wakes the runner, and waits for the job to settle (or [`QUEUED_WAIT`]).
+async fn enqueue_and_wait(
+    state: &Arc<AppState>,
+    jobs: &crate::jobs::JobsState,
+    new: &crate::jobs::NewJob,
+) -> Result<Option<crate::jobs::Job>, String> {
+    let job_id =
+        crate::jobs::repo::insert_job(&state.db, new, chrono::Utc::now()).map_err(db_err)?;
+    {
+        use tauri::Emitter;
+        let _ = state.app.emit("jobs-changed", json!({ "job_id": job_id }));
+    }
+    jobs.nudge();
+    Ok(jobs.wait_settled(&state.db, job_id, QUEUED_WAIT).await)
+}
+
+/// The journal entry a settled job left (`jobs::control::on_job_finished`). The runner writes it
+/// just after the job's status, so a job that ended without one yet gets a moment for it.
+async fn job_op(state: &Arc<AppState>, job: Option<&crate::jobs::Job>) -> Option<OpRecord> {
+    let id = job?.id;
+    for _ in 0..20 {
+        let job = crate::jobs::repo::get_job(&state.db, id).ok().flatten()?;
+        if let Some(op) = job.params.get("op_id").and_then(Value::as_i64) {
+            return journal::get(state, op);
+        }
+        let items = crate::jobs::repo::list_job_items(&state.db, id).unwrap_or_default();
+        if !job.status.is_terminal() || !crate::jobs::control::should_journal(&job, &items) {
+            return None;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    None
+}
+
+/// Every row of a playlist, in its order, each with its handle (`set_video_id`) when it is yours to
+/// edit: an account playlist is read page by page. What Tools ▸ Extract filters and Tools ▸ Reorder
+/// rearranges, which both need the whole list and the rows' handles.
+#[tauri::command]
+pub async fn playlist_rows(state: St<'_>, playlist_id: String) -> Result<Vec<SongItem>, String> {
+    rows::read_all(&state, &playlist_id).await
 }
 
 /// A split, worked out but not written: the whole playlist and which rows go into which part.
@@ -1738,8 +3134,10 @@ pub async fn merge_preview(
     Ok(merge::merge(&lists, how, dedupe, &skip))
 }
 
-/// Write a split or a merge (`playlist_tools::build`): new playlists, or one existing playlist
-/// appended to. Progress arrives as `playlist-op-progress`; `cancel_playlist_build` stops it.
+/// Write a split, a merge or an extract (`playlist_tools::build`): new playlists, or one existing
+/// playlist appended to. `mode` only means something to an extract from one playlist: a move takes
+/// the rows out of it once they are in (copy when left out). Progress arrives as
+/// `playlist-op-progress`; `cancel_playlist_build` stops it.
 #[tauri::command]
 pub async fn build_playlists(
     state: St<'_>,
@@ -1747,9 +3145,10 @@ pub async fn build_playlists(
     sources: Vec<Named>,
     lists: Vec<build::NewList>,
     dest: build::Dest,
+    mode: Option<transfer::Mode>,
 ) -> Result<build::Built, String> {
-    let kind = if kind == "merge" { "merge" } else { "split" };
-    build::run(&state, kind, sources, lists, dest).await
+    let kind = build::journal_kind(&kind);
+    build::run(&state, kind, sources, lists, dest, mode.unwrap_or(transfer::Mode::Copy)).await
 }
 
 #[tauri::command]
@@ -1791,30 +3190,178 @@ pub async fn keep_only_in(
     everywhere::keep_only_in(&state, songs, target, titles).await
 }
 
-/// A track that left one of your playlists, or turned unavailable in it, since the sync before.
+/// A change the monitor found in one of your playlists since the sync before: a track added,
+/// removed, moved, turned unavailable or restored (playlist_tools::monitor).
 #[derive(serde::Serialize)]
 pub struct PlaylistAlert {
+    id: i64,
     playlist_id: String,
     video_id: String,
     kind: String,
     song: Option<SongItem>,
     at: i64,
+    seen: bool,
+    /// The positions a `moved` row went between (0-based), where known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    from: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    to: Option<i64>,
+    /// Dismissed from Library ▸ In your playlists. Only ever true with `all`.
+    dismissed: bool,
 }
 
-#[tauri::command]
-pub fn playlist_alerts(state: St<'_>) -> Vec<PlaylistAlert> {
-    state
-        .db
-        .playlist_alerts()
-        .into_iter()
-        .map(|(playlist_id, video_id, kind, json, at)| PlaylistAlert {
-            playlist_id,
-            video_id,
-            kind,
-            song: json.and_then(|j| serde_json::from_str(&j).ok()),
-            at,
+/// `rows` (newest first) as the UI gets them. Without `all`: the ones not dismissed, one per
+/// playlist, track and kind, the newest standing for its repeats. With it: every row, as filed.
+fn alerts_of(rows: Vec<crate::db::AlertRow>, all: bool) -> Vec<PlaylistAlert> {
+    let mut shown = std::collections::HashSet::new();
+    rows.into_iter()
+        .filter(|a| {
+            all || (!a.dismissed
+                && shown.insert((a.playlist_id.clone(), a.video_id.clone(), a.kind.clone())))
+        })
+        .map(|a| PlaylistAlert {
+            id: a.id,
+            playlist_id: a.playlist_id,
+            video_id: a.video_id,
+            kind: a.kind,
+            song: a.song_json.and_then(|j| serde_json::from_str(&j).ok()),
+            at: a.at,
+            seen: a.seen,
+            from: a.from_pos,
+            to: a.to_pos,
+            dismissed: a.dismissed,
         })
         .collect()
+}
+
+/// The monitor's alerts, newest first. By default the ones not dismissed, one per playlist, track
+/// and kind: a repeated event files a row each time, but here the newest stands for the rest, and
+/// dismissing it dismisses them all (`dismiss_playlist_alert`). `all` is the alerts page: every
+/// row ever filed, repeats and dismissed ones included. With `all` the page loads them in pages:
+/// at most `limit` rows, older than the `before` cursor (`[at, id]` of the last row it has).
+/// Without `all` both are ignored.
+#[tauri::command]
+pub fn playlist_alerts(
+    state: St<'_>,
+    all: Option<bool>,
+    limit: Option<u32>,
+    before: Option<(i64, i64)>,
+) -> Vec<PlaylistAlert> {
+    let all = all.unwrap_or(false);
+    if all && (limit.is_some() || before.is_some()) {
+        return alerts_of(state.db.alert_rows_page(true, limit, before), true);
+    }
+    alerts_of(state.db.alert_rows(all), all)
+}
+
+/// Mark these alerts seen, or every one with no `ids`. Answers the unseen count after, which the
+/// `alerts-changed` event carries too (the sidebar badge).
+#[tauri::command]
+pub fn mark_alerts_seen(state: St<'_>, ids: Option<Vec<i64>>) -> u32 {
+    state.db.mark_alerts_seen(ids.as_deref());
+    let unseen = state.db.unseen_alert_count();
+    let _ = state.app.emit("alerts-changed", json!({ "unseen": unseen }));
+    unseen
+}
+
+/// One change between two snapshots of a playlist ([`monitor::Change`], as the UI reads it).
+#[derive(Debug, serde::Serialize)]
+pub struct TimelineChange {
+    video_id: String,
+    kind: &'static str,
+    song: Option<SongItem>,
+    /// Where the row was in the older snapshot (0-based), and where it is in the newer one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    from: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    to: Option<usize>,
+}
+
+/// One snapshot of a playlist and what changed since the one before it.
+#[derive(Debug, serde::Serialize)]
+pub struct TimelineEntry {
+    snapshot_id: i64,
+    taken_at: i64,
+    item_count: i64,
+    title: Option<String>,
+    /// The oldest snapshot kept: nothing before it to compare with, so no changes.
+    baseline: bool,
+    added: u32,
+    removed: u32,
+    moved: u32,
+    unavailable: u32,
+    restored: u32,
+    changes: Vec<TimelineChange>,
+}
+
+/// A snapshot row as the song [`monitor::diff`] compares against.
+fn snap_song(i: &crate::db::SnapItem) -> SongItem {
+    SongItem {
+        video_id: i.v.clone(),
+        set_video_id: i.s.clone(),
+        title: i.t.clone(),
+        artists: i.a.clone(),
+        duration: i.d.clone(),
+        unavailable: i.u,
+        thumbnail: i.th.clone(),
+        ..Default::default()
+    }
+}
+
+/// `snaps` newest first (as [`crate::db::Db::snapshots`] answers them), each with the changes
+/// from the snapshot right after it in the list, the older one: the same comparison a sync makes.
+fn timeline(snaps: &[crate::db::Snapshot]) -> Vec<TimelineEntry> {
+    snaps
+        .iter()
+        .enumerate()
+        .map(|(i, snap)| {
+            let changes = match snaps.get(i + 1) {
+                Some(older) => {
+                    let now: Vec<SongItem> = snap.items.iter().map(snap_song).collect();
+                    monitor::diff(&older.items, &now)
+                }
+                None => Vec::new(),
+            };
+            let mut entry = TimelineEntry {
+                snapshot_id: snap.id,
+                taken_at: snap.taken_at,
+                item_count: snap.item_count,
+                title: snap.title.clone(),
+                baseline: i + 1 == snaps.len(),
+                added: 0,
+                removed: 0,
+                moved: 0,
+                unavailable: 0,
+                restored: 0,
+                changes: Vec::with_capacity(changes.len()),
+            };
+            for c in changes {
+                let n = match c.kind {
+                    monitor::Kind::Added => &mut entry.added,
+                    monitor::Kind::Removed => &mut entry.removed,
+                    monitor::Kind::Moved => &mut entry.moved,
+                    monitor::Kind::Unavailable => &mut entry.unavailable,
+                    monitor::Kind::Restored => &mut entry.restored,
+                };
+                *n += 1;
+                entry.changes.push(TimelineChange {
+                    video_id: c.video_id,
+                    kind: c.kind.as_str(),
+                    song: c.song,
+                    from: c.from,
+                    to: c.to,
+                });
+            }
+            entry
+        })
+        .collect()
+}
+
+/// A playlist's history: every snapshot kept of it, newest first, each with what changed since
+/// the one before (PlaylistForge's timeline). Empty for a playlist never synced.
+#[tauri::command]
+pub fn playlist_timeline(state: St<'_>, playlist_id: String) -> Vec<TimelineEntry> {
+    timeline(&state.db.snapshots(&playlist_id))
 }
 
 #[tauri::command]
@@ -2295,6 +3842,21 @@ pub struct ReleaseNote {
     body: String,
 }
 
+/// Whether a version (or a `v`-prefixed tag) is a prerelease (D1): its suffix (what follows the
+/// first `-`, build metadata after `+` ignored) starts with `rc`, `beta` or `alpha`,
+/// case-insensitive. The fork's own `-forge.N` suffix marks a stable release, so `1.2.0-forge.1`
+/// is not one while `1.3.0-rc.1` is. Cut release candidates as `1.3.0-rc.N`, never
+/// `1.2.0-forge.2-rc.1`: that one is stable by this rule and orders after `1.2.0-forge.2`. The
+/// UI's twin is `isPrerelease` in ui/src/lib/version.ts; keep both rules identical.
+pub(crate) fn is_prerelease(version: &str) -> bool {
+    let core = version.split('+').next().unwrap_or_default();
+    let Some((_, pre)) = core.split_once('-') else {
+        return false;
+    };
+    let pre = pre.to_ascii_lowercase();
+    ["rc", "beta", "alpha"].iter().any(|p| pre.starts_with(p))
+}
+
 /// What's new, read straight from the GitHub releases API so the release description is the only
 /// place the changelog is written. Cached for the process: the list only changes when a release
 /// is cut, and unauthenticated GitHub allows 60 requests an hour.
@@ -2310,11 +3872,13 @@ pub async fn release_notes() -> Result<Vec<ReleaseNote>, String> {
         published_at: Option<String>,
         body: Option<String>,
         draft: bool,
-        prerelease: bool,
     }
     let releases: Vec<GhRelease> = crate::http::client()
-        .get("https://api.github.com/repos/SimoHypers/limusic/releases?per_page=20")
-        .header("User-Agent", concat!("Limusic/", env!("CARGO_PKG_VERSION")))
+        .get(format!(
+            "https://api.github.com/repos/{}/releases?per_page=20",
+            crate::brand::REPO_SLUG
+        ))
+        .header("User-Agent", concat!("LiMusicForge/", env!("CARGO_PKG_VERSION")))
         .header("Accept", "application/vnd.github+json")
         .timeout(std::time::Duration::from_secs(15))
         .send()
@@ -2325,9 +3889,10 @@ pub async fn release_notes() -> Result<Vec<ReleaseNote>, String> {
         .json()
         .await
         .map_err(|e| e.to_string())?;
+    // By version, not GitHub's flag: a `-forge.N` release is the fork's stable line (`is_prerelease`).
     let notes: Vec<ReleaseNote> = releases
         .into_iter()
-        .filter(|r| !r.draft && !r.prerelease)
+        .filter(|r| !r.draft && !is_prerelease(&r.tag_name))
         .map(|r| ReleaseNote {
             version: r.tag_name.trim_start_matches('v').to_string(),
             date: r
@@ -2345,13 +3910,25 @@ pub async fn release_notes() -> Result<Vec<ReleaseNote>, String> {
 /// Tauri's Linux updater knows one trick: rewrite an AppImage in place. It takes the path from
 /// `Env::appimage` and, when that is unset, falls back to `current_exe()` and writes the downloaded
 /// AppImage bytes over whatever it finds there. On the `.rpm` and on distro packages (the AUR's
-/// `limusic-bin`) that is a package-manager-owned `/usr/bin/limusic-app`: it fails on permissions
+/// `limusic-bin`) that is a package-manager-owned `/usr/bin/limusic-forge`: it fails on permissions
 /// rather than doing damage, but offering the button at all is a lie. Those users update through
 /// their package manager, so the UI shows them a download link instead.
 ///
 /// Reads the same `Env::appimage` the updater plugin decides on, so the two cannot disagree.
+///
+/// A build whose `plugins.updater.pubkey` is empty (the fork until its signing key exists, see
+/// docs/RELEASING-FORK.md) can verify nothing it downloads, so it never self-updates either: the UI
+/// falls back to the same download link.
 #[tauri::command]
 pub fn can_self_update(app: tauri::AppHandle) -> bool {
+    if !updater_pubkey_configured(app.config().plugins.0.get("updater")) {
+        return false;
+    }
+    // The updater would run the NSIS installer, which installs a second, non-portable copy
+    // instead of replacing this one. A portable user downloads the new zip.
+    if crate::paths::is_portable() {
+        return false;
+    }
     #[cfg(target_os = "linux")]
     {
         use tauri::Manager;
@@ -2366,11 +3943,135 @@ pub fn can_self_update(app: tauri::AppHandle) -> bool {
     }
 }
 
+/// How this copy keeps its data, for Settings ▸ About.
+#[derive(serde::Serialize)]
+pub struct InstallInfo {
+    pub portable: bool,
+    pub data_dir: String,
+}
+
+/// Portable or installed, and where the data lives (paths.rs).
+#[tauri::command]
+pub fn install_info(app: tauri::AppHandle) -> InstallInfo {
+    InstallInfo {
+        portable: crate::paths::is_portable(),
+        data_dir: crate::paths::data_dir(&app).to_string_lossy().into_owned(),
+    }
+}
+
+/// Upstream LiMusic's data as Settings ▸ Import & migrate shows it.
+#[derive(serde::Serialize)]
+pub struct UpstreamSource {
+    pub path: String,
+    pub bytes: u64,
+    pub running: bool,
+}
+
+/// What there is to import on this machine. Detection only: nothing is opened.
+#[derive(serde::Serialize)]
+pub struct ImportSources {
+    pub upstream: Option<UpstreamSource>,
+    /// PlaylistForge's `forge.db`, when present. Its importer comes later.
+    pub playlistforge: Option<String>,
+}
+
+#[tauri::command]
+pub async fn import_sources() -> Result<ImportSources, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        use crate::migrate_upstream as mu;
+        let upstream = mu::locate().map_err(|e| e.to_string())?.map(|up| {
+            let mut bytes = mu::tree_size(&up.roaming);
+            if let Some(local) = &up.local {
+                bytes += mu::tree_size(&local.join("EBWebView"));
+            }
+            UpstreamSource {
+                path: up.roaming.to_string_lossy().into_owned(),
+                bytes,
+                running: mu::upstream_running(),
+            }
+        });
+        let playlistforge = mu::playlistforge_db().map(|p| p.to_string_lossy().into_owned());
+        Ok(ImportSources { upstream, playlistforge })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Phase 1 of the upstream migration: leave the marker and restart, so phase 2 runs before
+/// anything holds the database or the webview profile (migrate_upstream.rs).
+#[tauri::command]
+pub fn migrate_upstream_request(
+    app: tauri::AppHandle,
+    state: St<'_>,
+    include_webview: bool,
+) -> Result<(), String> {
+    use crate::migrate_upstream as mu;
+    if mu::locate().map_err(|e| e.to_string())?.is_none() {
+        return Err("no LiMusic data on this machine".into());
+    }
+    if mu::upstream_running() {
+        return Err("upstream_running".into());
+    }
+    // Phase 2 resolves the directory without an AppHandle; both answers have to agree, or the
+    // marker would be left where the next launch never looks.
+    let data = crate::paths::data_dir(&app);
+    if crate::paths::data_dir_early().as_deref() != Some(data.as_path()) {
+        return Err(format!("data directory mismatch: {}", data.display()));
+    }
+    // Also how "Retry now" restarts a pending migration: a fresh marker, with a new window.
+    let pending = mu::Pending {
+        include_webview,
+        prompted: state.db.get_setting(mu::PROMPTED_KEY),
+        requested_at: mu::now_secs(),
+        last_status: None,
+    };
+    mu::write_pending(&data, &pending).map_err(|e| e.to_string())?;
+    app.restart()
+}
+
+/// The migration marker still waiting, if any: when it was asked for, whether it is past its
+/// window (phase 2 no longer acts on it) and what phase 2 last made of it (`retry`, `expired`).
+#[tauri::command]
+pub fn migrate_upstream_pending(
+    app: tauri::AppHandle,
+) -> Option<crate::migrate_upstream::PendingInfo> {
+    use crate::migrate_upstream as mu;
+    mu::pending_info(&crate::paths::data_dir(&app), mu::now_secs())
+}
+
+/// Drop the pending migration: removes `<data>/migrate-upstream.pending` only (and its
+/// `retry`/`expired` result). Nothing else is touched.
+#[tauri::command]
+pub fn migrate_upstream_cancel(app: tauri::AppHandle) -> Result<(), String> {
+    let data = crate::paths::data_dir(&app);
+    crate::migrate_upstream::cancel_pending(&data).map(|_| ()).map_err(|e| e.to_string())
+}
+
+/// What the last migration did, read once. Says whether upstream starts at login, so the UI can
+/// offer the same for this app (upstream's own entry is never touched).
+#[tauri::command]
+pub fn migrate_upstream_result(app: tauri::AppHandle) -> Option<crate::migrate_upstream::Report> {
+    let mut report = crate::migrate_upstream::take_result(&crate::paths::data_dir(&app))?;
+    report.prompted = None;
+    if report.status == "done" {
+        report.upstream_autostart = crate::migrate_upstream::upstream_autostart();
+    }
+    Some(report)
+}
+
+/// Whether the updater plugin's config (`plugins.updater` in tauri.conf.json) carries a public key.
+fn updater_pubkey_configured(updater: Option<&serde_json::Value>) -> bool {
+    updater
+        .and_then(|u| u.get("pubkey"))
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|k| !k.trim().is_empty())
+}
+
 /// The beta channel's manifest. `beta` is a permanent prerelease holding nothing but this file, and
 /// the release workflows move it to the newest release candidate, or to the newest release once that
 /// is ahead, so the URL never changes.
 const BETA_MANIFEST: &str =
-    "https://github.com/SimoHypers/limusic/releases/download/beta/latest.json";
+    "https://github.com/Kushro/limusic-forge/releases/download/beta/latest.json";
 
 /// What the updater plugin's own `check` command returns, so the UI can wrap it in the plugin's
 /// `Update` class and install it the usual way.
@@ -2566,9 +4267,605 @@ pub fn theater_fullscreen(window: tauri::WebviewWindow, on: bool) -> Result<(), 
     }
 }
 
+// --- jobs page ---
+// The queue and its history (`jobs::control`), today's quota and its last two weeks. Every control
+// writes the job's row, then announces it (`jobs-changed`) and wakes the runner, which picks the
+// change up on its next step.
+
+fn jobs_changed(state: &AppState, jobs: &crate::jobs::JobsState, job_id: i64) {
+    let _ = state.app.emit("jobs-changed", json!({ "job_id": job_id }));
+    jobs.nudge();
+}
+
+/// The jobs page's list: `active` (the default; in the order the runner takes them), `history`
+/// (ended, newest first, `limit` of them, 100 unless said) or `all`.
+#[tauri::command]
+pub async fn jobs_list(
+    state: St<'_>,
+    filter: Option<crate::jobs::control::ListFilter>,
+    limit: Option<u32>,
+) -> Result<Vec<crate::jobs::control::JobView>, String> {
+    let limit = limit.map(|n| i64::from(n.clamp(1, 1000)));
+    crate::jobs::control::list(&state.db, filter.unwrap_or_default(), limit).map_err(db_err)
+}
+
+/// One job with its items (state and error of each) and what reverting it would take. `null` for
+/// a job that no longer exists.
+#[tauri::command]
+pub async fn job_detail(
+    state: St<'_>,
+    id: i64,
+) -> Result<Option<crate::jobs::control::JobDetail>, String> {
+    crate::jobs::control::detail(&state.db, id).map_err(db_err)
+}
+
+#[tauri::command]
+pub async fn job_pause(state: St<'_>, jobs: Jobs<'_>, id: i64) -> Result<(), String> {
+    crate::jobs::control::pause(&state.db, id).map_err(db_err)?;
+    jobs_changed(&state, &jobs, id);
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn job_resume(state: St<'_>, jobs: Jobs<'_>, id: i64) -> Result<(), String> {
+    crate::jobs::control::resume(&state.db, id).map_err(db_err)?;
+    jobs_changed(&state, &jobs, id);
+    Ok(())
+}
+
+/// Cancels a job; with `revert`, what it already did is undone too (a SYSTEM job the runner queues
+/// on its next step). On a job that already ended, `revert` is the same request: an undo.
+#[tauri::command]
+pub async fn job_cancel(
+    state: St<'_>,
+    jobs: Jobs<'_>,
+    id: i64,
+    revert: bool,
+) -> Result<(), String> {
+    crate::jobs::control::cancel(&state.db, id, revert, chrono::Utc::now()).map_err(db_err)?;
+    jobs_changed(&state, &jobs, id);
+    Ok(())
+}
+
+/// Puts the job's failed items back in the queue (an ended job with them runs again). Answers how
+/// many items were retried.
+#[tauri::command]
+pub async fn job_retry_failed(state: St<'_>, jobs: Jobs<'_>, id: i64) -> Result<usize, String> {
+    let n =
+        crate::jobs::control::retry_failed(&state.db, id, chrono::Utc::now()).map_err(db_err)?;
+    jobs_changed(&state, &jobs, id);
+    Ok(n)
+}
+
+/// HIGH (1), NORMAL (2) or LOW (3); anything else is clamped to those.
+#[tauri::command]
+pub async fn job_set_priority(
+    state: St<'_>,
+    jobs: Jobs<'_>,
+    id: i64,
+    priority: i64,
+) -> Result<(), String> {
+    crate::jobs::control::set_priority(&state.db, id, priority).map_err(db_err)?;
+    jobs_changed(&state, &jobs, id);
+    Ok(())
+}
+
+/// The queue dragged into a new order: `ids` as wanted. Jobs keep their priority level; within a
+/// level they run in this order. Answers how many jobs moved.
+#[tauri::command]
+pub async fn jobs_reorder(state: St<'_>, jobs: Jobs<'_>, ids: Vec<i64>) -> Result<usize, String> {
+    let n = crate::jobs::control::reorder(&state.db, &ids).map_err(db_err)?;
+    jobs_changed(&state, &jobs, 0);
+    Ok(n)
+}
+
+/// Today's Data API spend, the daily quota, the next reset and the spend by endpoint.
+#[tauri::command]
+pub async fn quota_today(state: St<'_>) -> Result<crate::quota::QuotaToday, String> {
+    crate::quota::today(&state.db, chrono::Utc::now()).map_err(db_err)
+}
+
+/// Units spent per Pacific day over the last `days` days (14 unless said, at most 90), oldest
+/// first, today last.
+#[tauri::command]
+pub async fn quota_history(
+    state: St<'_>,
+    days: Option<u32>,
+) -> Result<Vec<crate::quota::DailyUsage>, String> {
+    let days = i64::from(days.unwrap_or(14).clamp(1, 90));
+    crate::quota::daily_history(&state.db, chrono::Utc::now(), days).map_err(db_err)
+}
+
+/// Today's quota split the way the budget bar draws it (`jobs::control::budget_partition`).
+#[tauri::command]
+pub async fn budget_partition(
+    state: St<'_>,
+) -> Result<crate::jobs::control::BudgetPartition, String> {
+    crate::jobs::control::budget_partition(&state.db, chrono::Utc::now()).map_err(db_err)
+}
+
+// --- headless monitor and Windows task ---
+
+/// The Windows scheduled task that runs `--monitor --all` once a day (wintask.rs): whether it is
+/// registered, when it runs next, the time in `monitor.schedule_time`, and whether it still runs
+/// this exe (a portable copy that moved). `supported: false` off Windows.
+#[tauri::command]
+pub async fn wintask_status(state: St<'_>) -> Result<crate::wintask::WinTaskStatus, String> {
+    let time = crate::wintask::schedule_time(&state.db);
+    tauri::async_runtime::spawn_blocking(move || crate::wintask::status(time))
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Register (or re-register) the task to run this exe daily at `time` (`HH:MM`, local), and keep
+/// the time in `monitor.schedule_time`. `Err("bad_time")` for anything but `H:MM`/`HH:MM`,
+/// `Err("unsupported")` off Windows; otherwise `schtasks`' own message.
+#[tauri::command]
+pub async fn wintask_register(
+    state: St<'_>,
+    time: String,
+) -> Result<crate::wintask::WinTaskStatus, String> {
+    let time = crate::wintask::normalize_time(&time).ok_or("bad_time")?;
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let at = time.clone();
+    tauri::async_runtime::spawn_blocking(move || crate::wintask::register(&exe, &at))
+        .await
+        .map_err(|e| e.to_string())??;
+    state.db.set_setting(crate::wintask::SCHEDULE_TIME_KEY, &time);
+    tauri::async_runtime::spawn_blocking(move || crate::wintask::status(time))
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Remove the task; not being registered is no error. Only "LiMusic Forge Monitor", never
+/// PlaylistForge's. The time setting stays, for registering again.
+#[tauri::command]
+pub async fn wintask_unregister(state: St<'_>) -> Result<crate::wintask::WinTaskStatus, String> {
+    tauri::async_runtime::spawn_blocking(crate::wintask::unregister)
+        .await
+        .map_err(|e| e.to_string())??;
+    let time = crate::wintask::schedule_time(&state.db);
+    tauri::async_runtime::spawn_blocking(move || crate::wintask::status(time))
+        .await
+        .map_err(|e| e.to_string())
+}
+
+// --- PlaylistForge import ---
+// Settings ▸ Import & migrate ▸ PlaylistForge (pf_import/): detect, preview, apply, the Data API
+// tokens (only with consent) and PlaylistForge's scheduled task (only once confirmed). Nothing here
+// writes under PlaylistForge's folder or its keyring service, and no token or client secret
+// reaches the webview: only counts, names and short codes.
+
+/// What Settings shows before anything is read.
+#[derive(Debug, serde::Serialize)]
+pub struct PfDetect {
+    /// PlaylistForge's folder, when it holds a database.
+    path: Option<String>,
+    found: bool,
+    /// PlaylistForge is open: it has to be closed before its database is copied (D35).
+    running: bool,
+    /// Its database's schema version, read off a copy (not while it runs).
+    user_version: Option<i64>,
+    /// Newer than this importer knows (D34).
+    too_new: bool,
+    /// "PlaylistForge Monitor" is registered; `None` off Windows or when Windows did not answer.
+    task: Option<bool>,
+    /// Why the copy could not be read (`PfImportError::code`).
+    error: Option<&'static str>,
+}
+
+/// PlaylistForge's folder: the one picked (absolute only), or `%APPDATA%\PlaylistForge`.
+fn pf_dir(path: Option<String>) -> Result<std::path::PathBuf, String> {
+    match path.map(|p| p.trim().to_owned()).filter(|p| !p.is_empty()) {
+        Some(p) => {
+            let p = std::path::PathBuf::from(p);
+            if p.is_absolute() {
+                Ok(p)
+            } else {
+                Err("not_found".into())
+            }
+        }
+        None => crate::pf_import::pf_default_dir().map_err(|e| e.code().to_string()),
+    }
+}
+
+/// `set_setting`'s gate, for a setting the import brings: a key the UI may write, with a value
+/// its per-key rule accepts.
+pub(crate) fn pf_settable(key: &str, value: &str) -> Result<(), String> {
+    if !UI_SETTINGS.contains(&key) {
+        return Err(format!("unknown setting: {key}"));
+    }
+    validate_setting(key, value)
+}
+
+/// The Data API's account manager reads its channels once, at startup: hand it a fresh copy after
+/// the import added channels or tokens, as `lib.rs` builds it.
+fn pf_reload_ytdata(state: &AppState, jobs: &crate::jobs::JobsState) {
+    let store = crate::ytdata_secrets::token_store(&state.app);
+    let repo = Arc::new(crate::ytdata_accounts::DbAccountsRepo::new(state.db.clone()));
+    match ytdata::auth::accounts::AccountManager::new(store, repo) {
+        Ok(manager) => {
+            let data_dir = crate::paths::data_dir(&state.app);
+            if let Some(secret) = ytdata::client_secret::load_existing(&data_dir) {
+                manager.set_client_secret(secret);
+            }
+            jobs.set_account_manager(Some(Arc::new(manager)));
+        }
+        Err(e) => tracing::warn!(error = %e, "pf import: Data API account manager not reloaded"),
+    }
+}
+
+/// Whether PlaylistForge is installed here, open, which schema, and whether its task is there.
+#[tauri::command]
+pub async fn pf_detect(state: St<'_>) -> Result<PfDetect, String> {
+    let data_dir = crate::paths::data_dir(&state.app);
+    tauri::async_runtime::spawn_blocking(move || {
+        use crate::pf_import::{self as pf, PfImportError};
+        let dir = pf::pf_default_dir().map_err(|e| e.code().to_string())?;
+        let found = dir.join(pf::PF_DB_FILE).is_file();
+        let running = pf::pf_running();
+        let mut out = PfDetect {
+            path: found.then(|| dir.to_string_lossy().into_owned()),
+            found,
+            running,
+            user_version: None,
+            too_new: false,
+            task: pf::task::exists(),
+            error: None,
+        };
+        if found && !running {
+            pf::reader::sweep_stale(&data_dir);
+            match pf::reader::stage(&dir, &data_dir) {
+                Ok(staged) => {
+                    out.user_version = Some(staged.user_version());
+                    let _ = staged.finish();
+                }
+                Err(e) => {
+                    if let PfImportError::TooNew { found, .. } = &e {
+                        out.user_version = Some(*found);
+                        out.too_new = true;
+                    }
+                    out.error = Some(e.code());
+                }
+            }
+        }
+        Ok(out)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Read PlaylistForge (a copy of its database) and say what an import would bring: counts, the
+/// playlists with D36's verdict, the accounts and how they pair. `pf_running` while it is open.
+#[tauri::command]
+pub async fn pf_preview(
+    state: St<'_>,
+    path: Option<String>,
+) -> Result<crate::pf_import::apply::Preview, String> {
+    let dir = pf_dir(path)?;
+    if crate::pf_import::pf_running() {
+        return Err("pf_running".into());
+    }
+    let data_dir = crate::paths::data_dir(&state.app);
+    let secret = crate::ytdata_secrets::client_secret_path(&state.app);
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        use crate::pf_import::{apply, reader};
+        reader::sweep_stale(&data_dir);
+        let data = reader::read_all(&dir, &data_dir, chrono::Utc::now())
+            .map_err(|e| e.code().to_string())?;
+        let forge_client = ytdata::client_secret::ClientSecretFile::load(&secret)
+            .ok()
+            .map(|c| c.installed.client_id);
+        Ok(apply::preview(&db, &data, forge_client.as_deref()))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct PfApplyResult {
+    report: crate::pf_import::apply::Report,
+    /// The account playlists went to the import queue (`import-progress` follows them).
+    import_started: bool,
+    /// Why they did not (`busy`, `cooldown:<until>`).
+    import_error: Option<String>,
+}
+
+/// Import the user's selection. Progress arrives as `pf-import-progress`
+/// (`{ step, done, total }`); the account playlists, if any, are then created through the
+/// Spotify import's paced writer, followed by its own `import-progress`.
+#[tauri::command]
+pub async fn pf_import_apply(
+    state: St<'_>,
+    jobs: Jobs<'_>,
+    selection: crate::pf_import::apply::Selection,
+) -> Result<PfApplyResult, String> {
+    let dir = pf_dir(selection.path.clone())?;
+    if crate::pf_import::pf_running() {
+        return Err("pf_running".into());
+    }
+    let data_dir = crate::paths::data_dir(&state.app);
+    let secret_dest = crate::ytdata_secrets::client_secret_path(&state.app);
+    let db = state.db.clone();
+    let app = state.app.clone();
+    let mut report = tauri::async_runtime::spawn_blocking(move || {
+        use crate::pf_import::{apply, reader};
+        let progress = |step: &'static str, done: usize, total: usize| {
+            let _ = app
+                .emit("pf-import-progress", json!({ "step": step, "done": done, "total": total }));
+        };
+        progress("read", 0, 1);
+        reader::sweep_stale(&data_dir);
+        let data = reader::read_all(&dir, &data_dir, chrono::Utc::now())
+            .map_err(|e| e.code().to_string())?;
+        let forbidden = crate::backups::forbidden_roots();
+        let ctx = apply::ApplyCtx {
+            now: chrono::Utc::now(),
+            validate: &pf_settable,
+            forbidden: &forbidden,
+            client_secret_dest: Some(secret_dest.as_path()),
+            progress: &progress,
+        };
+        apply::apply(&db, &data, &selection, &ctx).map_err(|e| e.code().to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+
+    let mut import_started = false;
+    let mut import_error = None;
+    if !report.account_lists.is_empty() {
+        let lists = std::mem::take(&mut report.account_lists);
+        match crate::import::start_known(state.inner(), lists, false) {
+            Ok(_) => {
+                import_started = true;
+                let ids = std::mem::take(&mut report.account_list_ids);
+                if let Err(e) = crate::pf_import::apply::mark_account_lists(&state.db, &ids) {
+                    tracing::warn!(error = %e, "pf import: queued playlists not remembered");
+                }
+            }
+            Err(e) => import_error = Some(e),
+        }
+    }
+    pf_reload_ytdata(&state, &jobs);
+    if report.jobs > 0 {
+        jobs.nudge();
+    }
+    let _ = state.app.emit("jobs-changed", json!({}));
+    let _ = state.app.emit("quota-changed", ());
+    let unseen = state.db.unseen_alert_count();
+    let _ = state.app.emit("alerts-changed", json!({ "unseen": unseen }));
+    crate::ytdata_status::announce(&state).await;
+    tracing::info!(
+        indexed = report.playlists_indexed,
+        local = report.local_created,
+        jobs = report.jobs,
+        "pf import applied"
+    );
+    Ok(PfApplyResult { report, import_started, import_error })
+}
+
+/// Bring PlaylistForge's Data API refresh tokens for `channel_ids` into Forge's own store. Only
+/// with `consent` (the user ticked the box); otherwise `consent_required` and nothing is read.
+/// When Forge has no OAuth client yet, PlaylistForge's comes too: a token only works with the
+/// client that minted it.
+#[tauri::command]
+pub async fn pf_import_credentials(
+    state: St<'_>,
+    jobs: Jobs<'_>,
+    channel_ids: Vec<String>,
+    consent: bool,
+    path: Option<String>,
+) -> Result<Vec<crate::pf_import::apply::TokenOutcome>, String> {
+    if !consent {
+        return Err("consent_required".into());
+    }
+    let dir = pf_dir(path)?;
+    let secret_dest = crate::ytdata_secrets::client_secret_path(&state.app);
+    let forge_store = crate::ytdata_secrets::token_store(&state.app);
+    let db = state.db.clone();
+    let outcomes = tauri::async_runtime::spawn_blocking(move || {
+        use crate::pf_import::{apply, credentials, reader};
+        let files = reader::read_files(&dir);
+        if !secret_dest.exists() {
+            if let Some(secret) = &files.client_secret {
+                if let Some(parent) = secret_dest.parent() {
+                    std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+                }
+                std::fs::write(&secret_dest, &secret.raw).map_err(|e| e.to_string())?;
+            }
+        }
+        let forge_client = ytdata::client_secret::ClientSecretFile::load(&secret_dest)
+            .ok()
+            .map(|c| c.installed.client_id);
+        let pf_store = credentials::pf_token_store();
+        apply::import_tokens(
+            &db,
+            &files,
+            &pf_store,
+            forge_store.as_ref(),
+            &channel_ids,
+            forge_client.as_deref(),
+            true,
+            crate::db::now_secs(),
+        )
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    pf_reload_ytdata(&state, &jobs);
+    for o in outcomes.iter().filter(|o| o.outcome == "imported") {
+        if let Err(e) =
+            crate::jobs::control::resume_waiting_auth_for_account(&state.db, &o.channel_id)
+        {
+            tracing::warn!(error = %e, "pf import: waiting jobs not resumed");
+        }
+    }
+    jobs.nudge();
+    let _ = state.app.emit("jobs-changed", json!({}));
+    crate::ytdata_status::announce(&state).await;
+    Ok(outcomes)
+}
+
+/// Remove PlaylistForge's "PlaylistForge Monitor" task (D35), only after the user confirmed it in
+/// the UI (`confirmed`): `schtasks /delete /tn "PlaylistForge Monitor" /f`, nothing else.
+#[tauri::command]
+pub async fn pf_unregister_task(confirmed: bool) -> Result<(), String> {
+    if !confirmed {
+        return Err("confirmation_required".into());
+    }
+    tauri::async_runtime::spawn_blocking(crate::pf_import::task::unregister)
+        .await
+        .map_err(|e| e.to_string())?
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn alert_row(id: i64, video: &str, kind: &str, dismissed: bool) -> crate::db::AlertRow {
+        crate::db::AlertRow {
+            id,
+            playlist_id: "VLPL1".into(),
+            video_id: video.into(),
+            kind: kind.into(),
+            song_json: None,
+            at: 1000 - id,
+            from_pos: None,
+            to_pos: None,
+            seen: false,
+            dismissed,
+        }
+    }
+
+    #[test]
+    fn alerts_collapse_repeats_unless_the_page_asks_for_all() {
+        // Newest first, as `alert_rows` answers: b removed twice, a dismissed once.
+        let rows = || {
+            vec![
+                alert_row(1, "b", "removed", false),
+                alert_row(2, "b", "removed", false),
+                alert_row(3, "b", "added", false),
+                alert_row(4, "a", "unavailable", true),
+            ]
+        };
+        let ids = |v: Vec<PlaylistAlert>| v.into_iter().map(|a| a.id).collect::<Vec<_>>();
+        assert_eq!(ids(alerts_of(rows(), false)), [1, 3]);
+        assert_eq!(ids(alerts_of(rows(), true)), [1, 2, 3, 4]);
+        let all = alerts_of(rows(), true);
+        assert!(all[3].dismissed && !all[0].dismissed);
+    }
+
+    #[test]
+    fn timeline_diffs_each_snapshot_against_the_one_before() {
+        let db = crate::db::Db::open(std::path::Path::new(":memory:")).unwrap();
+        let row = |v: &str, s: &str| SongItem {
+            video_id: v.into(),
+            title: v.to_uppercase(),
+            set_video_id: Some(s.into()),
+            ..Default::default()
+        };
+        let read = |songs: &[SongItem], at: i64| {
+            monitor::record(
+                &db,
+                &monitor::Read {
+                    playlist_id: "VLPL1",
+                    title: Some("Mix"),
+                    account_id: None,
+                    songs,
+                    complete: true,
+                    watch: true,
+                    at,
+                    listed: None,
+                    added_at: None,
+                    privacy: None,
+                    reasons: None,
+                },
+            );
+        };
+        assert!(timeline(&db.snapshots("VLPL1")).is_empty(), "never synced: no history");
+        read(&[row("a", "1"), row("b", "2"), row("c", "3")], 100);
+        // c to the top, b gone, d new.
+        read(&[row("c", "3"), row("a", "1"), row("d", "4")], 200);
+        // The same content again files no snapshot, so no entry.
+        read(&[row("c", "3"), row("a", "1"), row("d", "4")], 250);
+        // d turns unavailable.
+        let grey = SongItem { unavailable: true, ..row("d", "4") };
+        read(&[row("c", "3"), row("a", "1"), grey], 300);
+
+        let got = timeline(&db.snapshots("VLPL1"));
+        let at: Vec<i64> = got.iter().map(|e| e.taken_at).collect();
+        assert_eq!(at, [300, 200, 100], "newest first");
+        assert!(got[2].baseline && !got[1].baseline && !got[0].baseline);
+        assert!(got[2].changes.is_empty());
+        assert_eq!(got[2].item_count, 3);
+
+        let mid = &got[1];
+        assert_eq!((mid.added, mid.removed, mid.moved), (1, 1, 1));
+        let kinds: Vec<(&str, &str, Option<usize>, Option<usize>)> =
+            mid.changes.iter().map(|c| (c.video_id.as_str(), c.kind, c.from, c.to)).collect();
+        assert_eq!(
+            kinds,
+            [
+                ("b", "removed", Some(1), None),
+                ("d", "added", None, Some(2)),
+                ("c", "moved", Some(2), Some(0))
+            ]
+        );
+        assert_eq!(mid.changes[0].song.as_ref().map(|s| s.title.as_str()), Some("B"));
+
+        let last = &got[0];
+        assert_eq!((last.unavailable, last.added, last.removed, last.moved), (1, 0, 0, 0));
+        assert_eq!(last.changes[0].kind, "unavailable");
+        assert_eq!(last.title.as_deref(), Some("Mix"));
+
+        // What the UI reads: kinds as strings, positions only where known.
+        let json = serde_json::to_value(&got[1]).unwrap();
+        assert_eq!(json["changes"][0]["kind"], "removed");
+        assert!(json["changes"][0].get("to").is_none());
+        assert_eq!(json["snapshot_id"], got[1].snapshot_id);
+    }
+
+    /// D1: the fork's `-forge.N` releases are stable; only rc/beta/alpha are prereleases.
+    #[test]
+    fn prerelease_is_rc_beta_or_alpha_never_forge() {
+        // `-forge.2-rc.1` is stable by D1 (only the suffix's start counts): RCs are `x.y.z-rc.N`.
+        for stable in [
+            "1.2.0",
+            "v1.2.0",
+            "1.2.0-forge.1",
+            "v1.2.0-forge.12",
+            "1.2.0-forge.1+build.5",
+            "1.2.0-forge.2-rc.1",
+        ] {
+            assert!(!is_prerelease(stable), "{stable} is stable");
+        }
+        for pre in ["1.2.0-rc.2", "v1.3.0-beta.1", "1.3.0-alpha", "1.2.0-RC.1", "1.3.0-rc.1+b.2"] {
+            assert!(is_prerelease(pre), "{pre} is a prerelease");
+        }
+    }
+
+    #[test]
+    fn prerelease_self_update_needs_a_pubkey() {
+        let cfg = |v: serde_json::Value| updater_pubkey_configured(Some(&v));
+        assert!(!updater_pubkey_configured(None));
+        assert!(!cfg(serde_json::json!({ "pubkey": "" })));
+        assert!(!cfg(serde_json::json!({ "pubkey": "  " })));
+        assert!(!cfg(serde_json::json!({ "endpoints": [] })));
+        assert!(cfg(serde_json::json!({ "pubkey": "not-empty" })));
+    }
+
+    /// The shipped config: the fork's feed, and no key until the owner generates one.
+    #[test]
+    fn prerelease_updater_config_points_at_the_fork() {
+        let conf: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.conf.json")).expect("tauri.conf.json");
+        let updater = &conf["plugins"]["updater"];
+        assert_eq!(
+            updater["endpoints"][0],
+            "https://github.com/Kushro/limusic-forge/releases/latest/download/latest.json"
+        );
+        assert!(updater["pubkey"].is_string());
+    }
 
     #[test]
     fn on_repeat_rows_shed_the_queue_slot_they_were_played_from() {
@@ -2632,5 +4929,312 @@ mod tests {
         // Guards the scan itself: a moved ui/src or a renamed call would otherwise pass vacuously.
         assert!(seen.iter().any(|k| k == "drop_mode"), "scan found no setSetting calls");
         assert!(seen.iter().any(|k| k == "drop_dupes"));
+    }
+
+    /// The Downloads tab writes its selects through a computed key, which the scan above skips.
+    #[test]
+    fn ui_settings_allow_every_download_setting() {
+        for key in crate::download::settings::KEYS {
+            assert!(UI_SETTINGS.contains(&key), "{key}");
+        }
+    }
+
+    /// `set_setting`'s per-key rules: each refuses what its reader would misread, with the key
+    /// and what it wanted in the message; a key without a rule takes anything, as before.
+    #[test]
+    fn set_setting_validates_values_per_key() {
+        let accepted = [
+            ("playlist_engine", "auto"),
+            ("playlist_engine", "ytdata"),
+            ("playlist_engine", "innertube"),
+            ("job_queue_mode", "unified"),
+            ("job_queue_mode", "ytdata_only"),
+            ("budget.daily_units", "1"),
+            ("budget.daily_units", "1000000"),
+            ("budget.safety_margin_percent", "0"),
+            ("budget.safety_margin_percent", "50"),
+            ("budget.backup_reserve_units", "0"),
+            ("budget.backup_reserve_units", "2500"),
+            ("budget.backup_runs_per_day", "0"),
+            ("budget.backup_runs_per_day", "24"),
+            ("budget.opportunistic_mode", "true"),
+            ("budget.opportunistic_mode", "false"),
+            ("jobs.default_job_priority", "1"),
+            ("jobs.default_job_priority", "3"),
+            ("jobs.local_echo_max_age_s", "0"),
+            ("jobs.local_echo_max_age_s", "900"),
+            ("jobs.local_echo_max_age_s", "3600"),
+            ("jobs.local_echo_max_age_s", "86400"),
+            ("jobs.local_echo_max_age_s", "-1"),
+            ("jobs.advance_jobs_headless", "true"),
+            ("drop_mode", "ask"),
+            ("drop_dupes", "consolidate"),
+            ("tools.extract_new_mode", "create_transfer"),
+            // No rule: anything goes.
+            ("proxy", "socks5://whatever"),
+            ("volume", "not even a number"),
+        ];
+        for (key, value) in accepted {
+            assert_eq!(validate_setting(key, value), Ok(()), "{key} = {value:?}");
+        }
+        let refused = [
+            ("playlist_engine", "Auto"),
+            ("playlist_engine", ""),
+            ("playlist_engine", "data_api"),
+            ("job_queue_mode", "both"),
+            ("budget.daily_units", "0"),
+            ("budget.daily_units", "1000001"),
+            ("budget.daily_units", "10k"),
+            ("budget.daily_units", "1e4"),
+            ("budget.safety_margin_percent", "51"),
+            ("budget.safety_margin_percent", "-1"),
+            ("budget.safety_margin_percent", "3.5"),
+            ("budget.backup_reserve_units", "-500"),
+            ("budget.backup_runs_per_day", "25"),
+            ("budget.opportunistic_mode", "yes"),
+            ("budget.opportunistic_mode", "1"),
+            ("jobs.default_job_priority", "0"),
+            ("jobs.default_job_priority", "4"),
+            ("jobs.local_echo_max_age_s", "60"),
+            ("jobs.local_echo_max_age_s", "-3600"),
+            ("jobs.local_echo_max_age_s", "always"),
+            ("jobs.advance_jobs_headless", "on"),
+            ("drop_mode", "drop"),
+            ("drop_dupes", "keep"),
+            ("tools.extract_new_mode", "create"),
+        ];
+        for (key, value) in refused {
+            let err = validate_setting(key, value).expect_err(&format!("{key} = {value:?}"));
+            assert!(err.contains(key) && err.contains("expected"), "{err}");
+        }
+        let err = validate_setting("budget.daily_units", "0").unwrap_err();
+        assert!(err.contains("a whole number from 1 to 1000000"), "{err}");
+        let err = validate_setting("jobs.local_echo_max_age_s", "60").unwrap_err();
+        assert!(err.contains("0, 900, 1800, 3600, 10800, 43200, 86400, -1"), "{err}");
+    }
+
+    /// A rule for a key the UI cannot write would never run.
+    #[test]
+    fn every_validated_setting_is_one_the_ui_may_write() {
+        let keys = [
+            "playlist_engine",
+            "job_queue_mode",
+            "budget.daily_units",
+            "budget.safety_margin_percent",
+            "budget.backup_reserve_units",
+            "budget.backup_runs_per_day",
+            "budget.opportunistic_mode",
+            "jobs.default_job_priority",
+            "jobs.local_echo_max_age_s",
+            "jobs.advance_jobs_headless",
+            "drop_mode",
+            "drop_dupes",
+            "tools.extract_new_mode",
+        ];
+        for key in keys {
+            assert!(setting_rule(key).is_some(), "{key} has no rule");
+            assert!(UI_SETTINGS.contains(&key), "{key}");
+        }
+    }
+
+    /// A loopback server that answers every request with `body` (HTTP 200, JSON), for as many
+    /// requests as `times`. Answers its base URL.
+    fn fake_api(body: &'static str, times: usize) -> String {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            for stream in listener.incoming().take(times) {
+                let Ok(mut stream) = stream else { continue };
+                let mut request = Vec::new();
+                let mut buf = [0u8; 1024];
+                while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match stream.read(&mut buf) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => request.extend_from_slice(&buf[..n]),
+                    }
+                }
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                     Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes());
+            }
+        });
+        base
+    }
+
+    const CHANNEL_ONE: &str = r#"{"items": [{"id": "UCfakeChannelOne", "snippet": {
+        "title": "Channel One",
+        "thumbnails": {"default": {"url": "https://yt3.example/1.jpg"}}}}]}"#;
+    const CHANNEL_TWO: &str = r#"{"items": [{"id": "UCfakeChannelTwo", "snippet": {
+        "title": "Channel Two", "thumbnails": {}}}]}"#;
+
+    fn fake_tokens(refresh: &str) -> ytdata::auth::flow::AuthorizedTokens {
+        ytdata::auth::flow::AuthorizedTokens {
+            access_token: "FAKE-access-token".into(),
+            refresh_token: refresh.into(),
+            expires_at: std::time::Instant::now() + std::time::Duration::from_secs(3600),
+        }
+    }
+
+    fn manager_for(
+        db: &Arc<crate::db::Db>,
+        store: Arc<ytdata::auth::store::InMemoryTokenStore>,
+        base_url: String,
+    ) -> ytdata::auth::accounts::AccountManager {
+        let repo = Arc::new(crate::ytdata_accounts::DbAccountsRepo::new(db.clone()));
+        let client = ytdata::client::YouTubeClient::new().unwrap().with_base_url(base_url);
+        ytdata::auth::accounts::AccountManager::new(store, repo).unwrap().with_yt_client(client)
+    }
+
+    async fn connect(
+        manager: &ytdata::auth::accounts::AccountManager,
+        db: &crate::db::Db,
+        refresh: &str,
+        active: Option<&str>,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> crate::ytdata_accounts::YtDataAccount {
+        save_connected(manager, db, fake_tokens(refresh), active, now).await.unwrap()
+    }
+
+    /// The part of connecting that is the app's: the refresh token lands in the token store, the
+    /// channel in `ytdata_accounts` (and in the manager's own list), the `channels.list` unit in
+    /// the ledger, and the channel is linked to the signed-in cookie account only while that one
+    /// has none.
+    #[tokio::test]
+    async fn a_connected_channel_is_stored_counted_and_linked_once() {
+        use ytdata::auth::accounts::AccountStatus;
+        use ytdata::auth::store::TokenStore;
+        let db = Arc::new(crate::db::Db::open(std::path::Path::new(":memory:")).unwrap());
+        let store = Arc::new(ytdata::auth::store::InMemoryTokenStore::default());
+        let now = chrono::DateTime::parse_from_rfc3339("2026-07-15T19:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+
+        let one = manager_for(&db, store.clone(), fake_api(CHANNEL_ONE, 1));
+        let saved = connect(&one, &db, "FAKE-refresh-1", Some("ga1"), now).await;
+        assert_eq!(saved.channel_id, "UCfakeChannelOne");
+        assert_eq!(saved.title, "Channel One");
+        assert_eq!(saved.thumb.as_deref(), Some("https://yt3.example/1.jpg"));
+        assert_eq!(saved.status, AccountStatus::Connected);
+        assert_eq!(saved.linked_account.as_deref(), Some("ga1"), "ga1 had no channel");
+        assert_eq!(store.load("UCfakeChannelOne").unwrap().as_deref(), Some("FAKE-refresh-1"));
+        assert!(one.account("UCfakeChannelOne").is_some(), "the manager knows it too");
+        assert_eq!(crate::quota::spent_today(&db, now).unwrap(), 1, "one channels.list");
+
+        // A second channel while ga1 already has one: stored, not linked.
+        let two = manager_for(&db, store.clone(), fake_api(CHANNEL_TWO, 1));
+        let saved = connect(&two, &db, "FAKE-refresh-2", Some("ga1"), now).await;
+        assert_eq!(saved.linked_account, None);
+        assert_eq!(store.load("UCfakeChannelTwo").unwrap().as_deref(), Some("FAKE-refresh-2"));
+        let rows = crate::ytdata_accounts::list(&db).unwrap();
+        assert_eq!(rows.len(), 2, "the second manager's save kept the first row");
+
+        // Reconnecting the first one (a new refresh token) keeps its link and its date.
+        let again = manager_for(&db, store.clone(), fake_api(CHANNEL_ONE, 1));
+        let saved = connect(&again, &db, "FAKE-refresh-3", None, now).await;
+        assert_eq!(saved.linked_account.as_deref(), Some("ga1"));
+        assert_eq!(store.load("UCfakeChannelOne").unwrap().as_deref(), Some("FAKE-refresh-3"));
+        assert_eq!(crate::ytdata_accounts::list(&db).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn linking_keeps_one_channel_per_cookie_account() {
+        use crate::ytdata_accounts as ya;
+        let db = crate::db::Db::open(std::path::Path::new(":memory:")).unwrap();
+        ya::upsert(&db, "UC1", "One", None, 1).unwrap();
+        ya::upsert(&db, "UC2", "Two", None, 2).unwrap();
+        let linked = |id: &str| ya::get(&db, id).unwrap().unwrap().linked_account;
+
+        assert!(!link_if_unpaired(&db, "UC1", None).unwrap(), "nobody signed in");
+        assert!(link_if_unpaired(&db, "UC1", Some("ga1")).unwrap());
+        assert!(!link_if_unpaired(&db, "UC2", Some("ga1")).unwrap(), "ga1 already has UC1");
+        assert!(!link_if_unpaired(&db, "UC1", Some("ga2")).unwrap(), "UC1 is already linked");
+        assert!(!link_if_unpaired(&db, "UC9", Some("ga3")).unwrap(), "not connected");
+
+        assert!(link_account(&db, "UC2", Some("ga1")).unwrap());
+        assert_eq!(linked("UC2").as_deref(), Some("ga1"));
+        assert_eq!(linked("UC1"), None, "the one ga1 had before is unlinked");
+        assert!(link_account(&db, "UC2", None).unwrap());
+        assert_eq!(linked("UC2"), None);
+        assert!(!link_account(&db, "UC9", Some("ga1")).unwrap());
+    }
+
+    #[test]
+    fn a_failed_connection_says_why_without_a_token() {
+        use ytdata::error::AuthError;
+        let cancelled = ConnectFinished::failed(3, &AuthError::Cancelled.into());
+        let json = serde_json::to_value(&cancelled).unwrap();
+        assert_eq!(json, json!({ "attempt": 3, "ok": false, "code": "cancelled" }));
+        let timed_out = ConnectFinished::failed(4, &AuthError::TimedOut.into());
+        assert_eq!(timed_out.code, Some("timed_out"));
+        let failed = ConnectFinished::failed(5, &AuthError::InvalidGrant.into());
+        assert_eq!(failed.code, Some("failed"));
+        assert!(failed.error.unwrap().contains("invalid_grant"));
+        let not_json = serde_json::from_str::<Value>("{ FAKE-file-content").unwrap_err();
+        let msg = import_error(&ytdata::error::Error::Serde(not_json));
+        assert!(!msg.contains("FAKE-file-content"), "{msg}");
+    }
+
+    #[test]
+    fn a_song_item_from_the_ui_deserializes_into_a_download_song() {
+        let song: DownloadSong = serde_json::from_value(json!({
+            "video_id": "abc",
+            "title": "Song",
+            "artists": "Artist",
+            "duration": "3:45",
+            "thumbnail": "https://example.invalid/t.jpg",
+            "album": "Album"
+        }))
+        .unwrap();
+        assert_eq!(song.video_id, "abc");
+        assert_eq!(song.title.as_deref(), Some("Song"));
+        assert_eq!(song.artists.as_deref(), Some("Artist"));
+        assert_eq!(song.duration.as_deref(), Some("3:45"));
+        let bare: DownloadSong = serde_json::from_value(json!({ "video_id": "xyz" })).unwrap();
+        assert_eq!(bare.title, None);
+    }
+
+    #[test]
+    fn the_monitor_interval_decides_when_a_sync_is_due() {
+        let db = crate::db::Db::open(std::path::Path::new(":memory:")).unwrap();
+        // Never built: due, whatever the interval says.
+        db.set_setting("monitor_interval_hours", "0");
+        assert!(playlist_index_due(&db, 0));
+        db.set_setting(PLAYLIST_INDEX_STAMP, "1000");
+        assert!(!playlist_index_due(&db, 1000 + 365 * 86_400), "off means never again");
+        // The default is six hours, and so is anything the UI would not have written.
+        for stored in [None, Some("5"), Some("soon")] {
+            match stored {
+                Some(v) => db.set_setting("monitor_interval_hours", v),
+                None => db.delete_setting("monitor_interval_hours"),
+            }
+            assert!(!playlist_index_due(&db, 1000 + 6 * 3600 - 1), "{stored:?}");
+            assert!(playlist_index_due(&db, 1000 + 6 * 3600), "{stored:?}");
+        }
+        db.set_setting("monitor_interval_hours", "1");
+        assert!(playlist_index_due(&db, 1000 + 3600));
+        assert_eq!(sync_trigger(Some("scheduler")), "scheduler");
+        assert_eq!(sync_trigger(Some("anything")), "manual_ui");
+        assert_eq!(sync_trigger(None), "manual_ui");
+    }
+
+    #[test]
+    fn failed_syncs_back_the_scheduler_off_until_one_succeeds() {
+        let db = crate::db::Db::open(std::path::Path::new(":memory:")).unwrap();
+        assert!(monitor_retry_due(&db, 0), "nothing failed yet");
+        note_sync_attempt(&db, 1000, false);
+        assert!(!monitor_retry_due(&db, 1000 + 60), "not a minute later");
+        assert!(monitor_retry_due(&db, 1000 + 15 * 60));
+        note_sync_attempt(&db, 2000, false);
+        assert!(!monitor_retry_due(&db, 2000 + 15 * 60), "the wait doubles");
+        assert!(monitor_retry_due(&db, 2000 + 30 * 60));
+        note_sync_attempt(&db, 5000, true);
+        assert!(monitor_retry_due(&db, 5001), "a success clears it");
+        db.set_setting("monitor_interval_hours", "0");
+        note_sync_attempt(&db, 6000, false);
+        assert!(!monitor_retry_due(&db, 6000 + 365 * 86_400), "interval off: no retries");
     }
 }

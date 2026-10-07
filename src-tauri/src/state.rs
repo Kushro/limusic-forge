@@ -117,6 +117,20 @@ pub struct AppState {
     /// after the user signed out and putting them back in. Async because it is held across those
     /// awaits, which a std `Mutex` cannot be.
     auth: tokio::sync::Mutex<()>,
+    /// A playlist monitor run (the index crawl, or one playlist's sync) is in flight. One at a
+    /// time: two would diff against the same snapshot and file every change twice. Taken through
+    /// [`Self::begin_monitor_run`], whose guard clears it however the run ends.
+    monitor_busy: AtomicBool,
+}
+
+/// Holds [`AppState`]'s monitor flag for one run and lets it go on drop: on success, on an early
+/// `?`, and when the command's future is dropped mid-crawl.
+pub struct MonitorRunGuard<'a>(&'a AtomicBool);
+
+impl Drop for MonitorRunGuard<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
 }
 
 /// Repeat mode for the queue. Serialized lowercase for the UI + `queue_json`.
@@ -486,7 +500,21 @@ impl AppState {
             last_media_state: std::sync::Mutex::new(None),
             last_queue_fingerprint: AtomicU64::new(0),
             last_persisted_fingerprint: AtomicU64::new(0),
+            monitor_busy: AtomicBool::new(false),
         }
+    }
+
+    /// Claim the playlist monitor for one run, or `None` while another one holds it.
+    pub fn begin_monitor_run(&self) -> Option<MonitorRunGuard<'_>> {
+        self.monitor_busy
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .ok()
+            .map(|_| MonitorRunGuard(&self.monitor_busy))
+    }
+
+    /// Whether a monitor run is in flight right now (the scheduler skips its tick then).
+    pub fn monitor_running(&self) -> bool {
+        self.monitor_busy.load(Ordering::SeqCst)
     }
 
     /// Remember where the loopback video proxy should fetch `id` from.
@@ -906,10 +934,15 @@ impl AppState {
     }
 
     /// The playlist membership index belongs to one account, so a sign-out or a channel switch
-    /// empties it. Its timestamp goes too, or the next sync would think it was still fresh.
+    /// empties it. Its timestamp goes too, or the next sync would think it was still fresh. That
+    /// is the current key (`commands::PLAYLIST_INDEX_STAMP`); the pre-`_v3` one is dropped as well.
     fn forget_playlist_index(&self) {
         self.db.clear_playlist_index();
         self.db.delete_setting("playlist_index_synced_at");
+        self.db.delete_setting(crate::commands::PLAYLIST_INDEX_STAMP);
+        // The last account's failed syncs say nothing about this one's: no back-off carried over.
+        self.db.delete_setting(crate::commands::MONITOR_FAILURES);
+        self.db.delete_setting(crate::commands::MONITOR_LAST_ATTEMPT);
     }
 
     fn restore_auth_transport(&self, cookie: Option<String>, data_sync_id: Option<String>) {

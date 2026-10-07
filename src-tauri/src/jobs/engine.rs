@@ -1,0 +1,365 @@
+//! Which engine runs a playlist write, and whether it goes through the queue.
+//!
+//! - `playlist_engine` = `auto` | `ytdata` | `innertube` (default `auto`). `auto` picks the Data
+//!   API when it is usable for this account and the estimate fits in what jobs may spend today
+//!   ([`super::budget::available_for_jobs_now`]); otherwise InnerTube, which costs no quota.
+//! - `job_queue_mode` = `unified` | `ytdata_only` (default `unified`). Unified: InnerTube writes
+//!   are queued as jobs too, so one queue orders, pauses and undoes everything. Data-API-only: an
+//!   InnerTube write runs right away through `playlist_tools`, paced by `import`'s shared pacer,
+//!   as it did before the queue existed.
+//!
+//! The engine a job was given is kept in its `params_json.engine` (D24).
+
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+
+use super::{Job, ENGINE_KEY, PRIORITY_HIGH, PRIORITY_LOW, PRIORITY_NORMAL};
+use crate::db::Db;
+
+pub const PLAYLIST_ENGINE_KEY: &str = "playlist_engine";
+pub const JOB_QUEUE_MODE_KEY: &str = "job_queue_mode";
+pub const DEFAULT_JOB_PRIORITY_KEY: &str = "jobs.default_job_priority";
+/// Whether a headless `--monitor` run also advances the queue (commit 29 reads it).
+pub const ADVANCE_JOBS_HEADLESS_KEY: &str = "jobs.advance_jobs_headless";
+/// Set by the status reader when Google answered `accessNotConfigured` (commit 26).
+pub const API_DISABLED_KEY: &str = "ytdata.api_disabled_at";
+/// The Pacific date (`YYYY-MM-DD`) on which Google last answered `quotaExceeded` (commit 26).
+pub const QUOTA_EXCEEDED_DAY_KEY: &str = "ytdata.quota_exceeded_day";
+
+/// The engine a job runs on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Engine {
+    Ytdata,
+    Innertube,
+}
+
+impl Engine {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Engine::Ytdata => "ytdata",
+            Engine::Innertube => "innertube",
+        }
+    }
+
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw.trim() {
+            "ytdata" => Some(Engine::Ytdata),
+            "innertube" => Some(Engine::Innertube),
+            _ => None,
+        }
+    }
+}
+
+/// `playlist_engine`, or a per-operation override.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EngineSetting {
+    Auto,
+    Ytdata,
+    Innertube,
+}
+
+impl EngineSetting {
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw.trim() {
+            "auto" => Some(EngineSetting::Auto),
+            "ytdata" => Some(EngineSetting::Ytdata),
+            "innertube" => Some(EngineSetting::Innertube),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueueMode {
+    Unified,
+    YtdataOnly,
+}
+
+/// The Data API's state for one account, in precedence order: the first that applies wins.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DataApiState {
+    NotConfigured,
+    ApiDisabled,
+    NeedsAuth,
+    QuotaExhausted,
+    Ok,
+}
+
+pub fn playlist_engine(db: &Db) -> EngineSetting {
+    db.get_setting(PLAYLIST_ENGINE_KEY)
+        .and_then(|v| EngineSetting::parse(&v))
+        .unwrap_or(EngineSetting::Auto)
+}
+
+pub fn queue_mode(db: &Db) -> QueueMode {
+    match db.get_setting(JOB_QUEUE_MODE_KEY).as_deref().map(str::trim) {
+        Some("ytdata_only") => QueueMode::YtdataOnly,
+        _ => QueueMode::Unified,
+    }
+}
+
+/// The priority a user's job gets: HIGH, NORMAL (default) or LOW. SYSTEM is the app's own.
+pub fn default_job_priority(db: &Db) -> i64 {
+    db.get_setting(DEFAULT_JOB_PRIORITY_KEY)
+        .and_then(|v| v.trim().parse::<i64>().ok())
+        .map(|p| p.clamp(PRIORITY_HIGH, PRIORITY_LOW))
+        .unwrap_or(PRIORITY_NORMAL)
+}
+
+/// Picks the engine. An explicit choice (the operation's override first, then the setting) is
+/// honoured even when the Data API is short of quota or needs reconnecting: the job then waits,
+/// which is what asking for the Data API means. It falls back to InnerTube only when the Data
+/// API cannot run this write at all (`NotConfigured`: no client secret, no channel for this
+/// account, or a playlist it can't address). `auto` takes the Data API only when it is `Ok` and
+/// the estimate fits in `available`.
+pub fn resolve_engine(
+    setting: EngineSetting,
+    override_: Option<EngineSetting>,
+    status: DataApiState,
+    est_units: i64,
+    available: i64,
+) -> Engine {
+    match override_.unwrap_or(setting) {
+        EngineSetting::Innertube => Engine::Innertube,
+        EngineSetting::Ytdata if status == DataApiState::NotConfigured => Engine::Innertube,
+        EngineSetting::Ytdata => Engine::Ytdata,
+        EngineSetting::Auto if status == DataApiState::Ok && est_units <= available => {
+            Engine::Ytdata
+        }
+        EngineSetting::Auto => Engine::Innertube,
+    }
+}
+
+/// The values each setting of this module accepts, for `set_setting`'s validation.
+pub const PLAYLIST_ENGINE_VALUES: [&str; 3] = ["auto", "ytdata", "innertube"];
+pub const JOB_QUEUE_MODE_VALUES: [&str; 2] = ["unified", "ytdata_only"];
+
+/// A playlist write the confirmation dialogs price before it is made (`estimate_op`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OpKind {
+    Copy,
+    Move,
+    /// Taking rows out of a playlist (a plain removal or the duplicate finder's).
+    Remove,
+}
+
+impl OpKind {
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw.trim() {
+            "copy" => Some(OpKind::Copy),
+            "move" => Some(OpKind::Move),
+            "remove" | "dedupe" => Some(OpKind::Remove),
+            _ => None,
+        }
+    }
+}
+
+/// What `kind` on `rows` rows is expected to cost on the Data API, with the same estimates the
+/// dispatch uses to pick the engine (`planner`). `playlist_len` is the length of the playlist a
+/// removal reads to resolve its rows; unknown, it is taken as `rows`.
+pub fn estimate_units(kind: OpKind, rows: usize, playlist_len: Option<usize>) -> i64 {
+    use super::planner::{estimate_remove_units, estimate_transfer_units};
+    match kind {
+        OpKind::Copy => estimate_transfer_units(rows, false),
+        OpKind::Move => estimate_transfer_units(rows, true),
+        OpKind::Remove => estimate_remove_units(rows, playlist_len.unwrap_or(rows).max(rows)),
+    }
+}
+
+/// The engine a stored job runs on: its `params_json.engine`, or for a job written without one
+/// (PlaylistForge's, imported) the Data API when it names a channel.
+pub fn engine_of(job: &Job) -> Engine {
+    match job.params.get(ENGINE_KEY).and_then(|v| v.as_str()).and_then(Engine::parse) {
+        Some(engine) => engine,
+        None if job.account_id.is_some() => Engine::Ytdata,
+        None => Engine::Innertube,
+    }
+}
+
+/// Where a queued operation goes: its engine, the Data API channel it writes as (`None` on
+/// InnerTube), the cookie account that queued it (InnerTube jobs run only as that account), and
+/// its priority.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueueTarget {
+    pub engine: Engine,
+    pub channel_id: Option<String>,
+    pub account: Option<String>,
+    pub priority: i64,
+}
+
+/// The Data API's state for the signed-in account, and the channel it would write as.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DataApiContext {
+    pub state: DataApiState,
+    pub channel_id: Option<String>,
+}
+
+/// Works out [`DataApiContext`] with `ytdata_status`'s rules (one precedence for the warnings,
+/// the monitor and this). The channel is the one linked to `active_account` (the cookie account
+/// signed in now), or the only channel connected when none is linked to anything.
+/// `client_secret_present` comes from the account manager. The budget is the jobs' share
+/// ([`super::budget::available_for_jobs_now`]); the token store is not probed here, since this
+/// runs on every write and blocks no thread: a missing or unreadable token surfaces when the job
+/// runs (`waiting_auth`).
+pub fn data_api_state(
+    db: &Db,
+    client_secret_present: bool,
+    active_account: Option<&str>,
+    now: DateTime<Utc>,
+) -> DataApiContext {
+    use crate::ytdata_status::{resolve, Credential};
+    let quota_left = super::budget::available_for_jobs_now(db, now).map(|n| n > 0).unwrap_or(true);
+    let unprobed = |_: Option<&str>| Credential::Unknown;
+    let resolved = resolve(db, client_secret_present, active_account, quota_left, &unprobed, now);
+    DataApiContext {
+        state: resolved.verdict.state,
+        channel_id: resolved.account.map(|a| a.channel_id),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use DataApiState::{ApiDisabled, NeedsAuth, NotConfigured, QuotaExhausted};
+    const OK: DataApiState = DataApiState::Ok;
+    use Engine::{Innertube as It, Ytdata as Yt};
+    use EngineSetting as S;
+
+    fn dt(s: &str) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc)
+    }
+
+    #[test]
+    fn resolve_engine_table() {
+        // (setting, override, status, estimate, available) -> engine
+        let table = [
+            (S::Auto, None, OK, 100, 8000, Yt),
+            (S::Auto, None, OK, 8000, 8000, Yt),
+            (S::Auto, None, OK, 8001, 8000, It),
+            (S::Auto, None, QuotaExhausted, 50, 8000, It),
+            (S::Auto, None, NeedsAuth, 50, 8000, It),
+            (S::Auto, None, ApiDisabled, 50, 8000, It),
+            (S::Auto, None, NotConfigured, 50, 8000, It),
+            (S::Ytdata, None, OK, 99_999, 0, Yt),
+            (S::Ytdata, None, NeedsAuth, 50, 8000, Yt),
+            (S::Ytdata, None, QuotaExhausted, 50, 0, Yt),
+            (S::Ytdata, None, NotConfigured, 50, 8000, It),
+            (S::Innertube, None, OK, 50, 8000, It),
+            (S::Innertube, Some(S::Ytdata), OK, 50, 8000, Yt),
+            (S::Ytdata, Some(S::Innertube), OK, 50, 8000, It),
+            (S::Ytdata, Some(S::Auto), OK, 9000, 8000, It),
+        ];
+        for (setting, ov, status, est, available, want) in table {
+            assert_eq!(
+                resolve_engine(setting, ov, status, est, available),
+                want,
+                "{setting:?} {ov:?} {status:?} {est}/{available}"
+            );
+        }
+    }
+
+    #[test]
+    fn settings_parse_with_defaults() {
+        let db = Db::open(std::path::Path::new(":memory:")).unwrap();
+        assert_eq!(playlist_engine(&db), S::Auto);
+        assert_eq!(queue_mode(&db), QueueMode::Unified);
+        assert_eq!(default_job_priority(&db), PRIORITY_NORMAL);
+        db.set_setting(PLAYLIST_ENGINE_KEY, "innertube");
+        db.set_setting(JOB_QUEUE_MODE_KEY, "ytdata_only");
+        db.set_setting(DEFAULT_JOB_PRIORITY_KEY, "0");
+        assert_eq!(playlist_engine(&db), S::Innertube);
+        assert_eq!(queue_mode(&db), QueueMode::YtdataOnly);
+        assert_eq!(default_job_priority(&db), PRIORITY_HIGH, "SYSTEM is not the user's");
+        db.set_setting(PLAYLIST_ENGINE_KEY, "bogus");
+        assert_eq!(playlist_engine(&db), S::Auto);
+        assert_eq!(Engine::parse(Engine::Ytdata.as_str()), Some(Engine::Ytdata));
+    }
+
+    #[test]
+    fn estimates_match_the_dispatch_and_kinds_parse() {
+        use crate::jobs::planner::{estimate_remove_units, estimate_transfer_units};
+        assert_eq!(estimate_units(OpKind::Copy, 3, None), 150);
+        assert_eq!(estimate_units(OpKind::Copy, 3, None), estimate_transfer_units(3, false));
+        assert_eq!(estimate_units(OpKind::Move, 3, None), estimate_transfer_units(3, true));
+        assert_eq!(estimate_units(OpKind::Remove, 2, None), estimate_remove_units(2, 2));
+        assert_eq!(estimate_units(OpKind::Remove, 2, Some(120)), estimate_remove_units(2, 120));
+        assert_eq!(
+            estimate_units(OpKind::Remove, 5, Some(1)),
+            estimate_remove_units(5, 5),
+            "a playlist is never shorter than what is taken out of it"
+        );
+        assert_eq!(OpKind::parse("move"), Some(OpKind::Move));
+        assert_eq!(OpKind::parse("dedupe"), Some(OpKind::Remove));
+        assert_eq!(OpKind::parse("split"), None);
+        for v in PLAYLIST_ENGINE_VALUES {
+            assert!(EngineSetting::parse(v).is_some(), "{v}");
+        }
+    }
+
+    #[test]
+    fn data_api_state_follows_its_precedence() {
+        let db = Db::open(std::path::Path::new(":memory:")).unwrap();
+        let now = dt("2026-07-15T19:00:00Z");
+        let state = |secret, active| data_api_state(&db, secret, active, now);
+        assert_eq!(state(true, Some("ga1")).state, NotConfigured, "no channel connected");
+
+        crate::ytdata_accounts::upsert(&db, "UC1", "Me", None, 1).unwrap();
+        assert_eq!(state(false, Some("ga1")).state, NotConfigured, "no client secret");
+        let ctx = state(true, Some("ga1"));
+        assert_eq!((ctx.state, ctx.channel_id.as_deref()), (OK, Some("UC1")), "the only one");
+
+        crate::ytdata_accounts::upsert(&db, "UC2", "Other", None, 2).unwrap();
+        assert_eq!(state(true, Some("ga1")).state, NotConfigured, "two and none linked");
+        crate::ytdata_accounts::set_linked_account(&db, "UC2", Some("ga1")).unwrap();
+        assert_eq!(state(true, Some("ga1")).channel_id.as_deref(), Some("UC2"));
+        assert_eq!(state(true, Some("ga9")).state, NotConfigured, "not this account's");
+
+        db.set_setting(QUOTA_EXCEEDED_DAY_KEY, "2026-07-15");
+        assert_eq!(state(true, Some("ga1")).state, QuotaExhausted);
+        db.set_setting(QUOTA_EXCEEDED_DAY_KEY, "2026-07-14");
+        assert_eq!(state(true, Some("ga1")).state, OK, "yesterday's is over");
+        crate::ytdata_accounts::set_status(
+            &db,
+            "UC2",
+            ytdata::auth::accounts::AccountStatus::ReauthRequired,
+        )
+        .unwrap();
+        assert_eq!(state(true, Some("ga1")).state, NeedsAuth);
+        db.set_setting(API_DISABLED_KEY, "2026-07-15T10:00:00Z");
+        assert_eq!(state(true, Some("ga1")).state, ApiDisabled);
+    }
+
+    #[test]
+    fn a_job_without_an_engine_runs_where_its_account_says() {
+        let job = |params: serde_json::Value, account: Option<&str>| Job {
+            id: 1,
+            account_id: account.map(Into::into),
+            kind: super::super::JobKind::CopyItems,
+            params,
+            status: super::super::JobStatus::Queued,
+            priority: 2,
+            phase: 1,
+            total_phases: 1,
+            created_at: dt("2026-07-15T19:00:00Z"),
+            started_at: None,
+            finished_at: None,
+            resume_at: None,
+            est_units_total: 0,
+            spent_units: 0,
+            total_items: 0,
+            done_items: 0,
+            failed_items: 0,
+            skipped_items: 0,
+            planned_items: 0,
+            retried_items: 0,
+            last_error: None,
+        };
+        let j = job(serde_json::json!({"engine": "innertube"}), Some("UC1"));
+        assert_eq!(engine_of(&j), Engine::Innertube);
+        assert_eq!(engine_of(&job(serde_json::json!({}), Some("UC1"))), Engine::Ytdata);
+        assert_eq!(engine_of(&job(serde_json::json!({}), None)), Engine::Innertube);
+    }
+}

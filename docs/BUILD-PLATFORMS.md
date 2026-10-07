@@ -1,13 +1,13 @@
-# Building Limusic on each platform
+# Building LiMusic Forge on each platform
 
-Limusic is a Tauri 2 app (Rust core + SvelteKit SPA) that dynamically links **libmpv** (mpv API
+LiMusic Forge is a Tauri 2 app (Rust core + SvelteKit SPA) that dynamically links **libmpv** (mpv API
 2.x, i.e. mpv ≥ 0.35). Tauri does **not** cross-compile — build each OS on that OS. The Rust link
 step just emits `cargo:rustc-link-lib=mpv` (via `libmpv2-sys`), so "getting it to build" is really
 "putting libmpv's import library on the linker's search path"; "getting it to run" is "shipping the
 matching shared library next to the app."
 
 Bundle targets are set per platform: `tauri.conf.json` → `deb` + `rpm` + `appimage` (Linux),
-`tauri.windows.conf.json` → `nsis` + `msi`, `tauri.macos.conf.json` → `app` + `dmg`. Tauri
+`tauri.windows.conf.json` → `nsis`, `tauri.macos.conf.json` → `app` + `dmg`. Tauri
 auto-merges the platform file over the base for the current OS.
 
 ## Common prerequisites (all platforms)
@@ -26,7 +26,7 @@ auto-merges the platform file over the base for the current OS.
 sudo dnf install mpv-libs mpv-libs-devel webkit2gtk4.1-devel \
   gcc gcc-c++ make openssl-devel librsvg2-devel   # + standard Tauri build deps
 cd ui && pnpm install && pnpm build
-cargo tauri build            # → target/release/bundle/rpm/limusic-*.rpm (plus a test-only .deb)
+cargo tauri build            # → target/release/bundle/rpm/*.rpm (plus a test-only .deb)
 ```
 
 ### Ubuntu / Debian
@@ -34,7 +34,7 @@ cargo tauri build            # → target/release/bundle/rpm/limusic-*.rpm (plus
 sudo apt install libmpv-dev libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev \
   libssl-dev libdbus-1-dev
 cd ui && pnpm install && pnpm build
-cargo tauri build --bundles deb   # → target/release/bundle/deb/limusic_*.deb
+cargo tauri build --bundles deb   # → target/release/bundle/deb/*.deb
 ```
 
 - libmpv is system-provided (`mpv-libs`), found on the default linker path — no bundling needed.
@@ -53,7 +53,7 @@ cargo tauri build --bundles deb   # → target/release/bundle/deb/limusic_*.deb
   new, add it there by hand. A forgotten entry produces a package that installs cleanly and then
   refuses to start, so the workflow's `Verify the .deb installs and resolves its libraries` step
   installs it on a clean Ubuntu 24.04 and fails on the first unresolved `ldd` line.
-- A freshly bundled AppDir is **not portable** until `scripts/fix-appdir-tls.sh` has run over it —
+- A freshly bundled AppDir is **not portable** until `bash scripts/fix-appdir-tls.sh` has run over it —
   linuxdeploy bundles the host's TLS trust stack (whose CA anchors live outside the bundle) and
   writes a `GIO_EXTRA_MODULES` containing a literal newline and a path into your own `target/` dir,
   which leaves the webview with `GDummyTlsBackend` and no HTTPS anywhere but this machine. CI runs
@@ -93,13 +93,73 @@ cargo tauri build --bundles deb   # → target/release/bundle/deb/limusic_*.deb
 5. **Bundle the DLL:** copy `libmpv-2.dll` into `src-tauri/` (it is listed under
    `tauri.windows.conf.json` → `bundle.resources`, so the installer places it next to the exe).
    It's ~117 MB — gitignored, never commit it.
-6. **Build:**
+6. **Build** (release flags, see "C runtime" below):
    ```powershell
+   $env:RUSTFLAGS = "-L native=C:\path\to\libmpv -C target-feature=+crt-static"
+   $env:STATIC_VCRUNTIME = "false"
    cd ui; pnpm build; cd ..
-   cargo tauri build          # → target/release/bundle/{msi,nsis}/limusic_*.{msi,exe}
+   cargo tauri build          # → target/release/bundle/nsis/*-setup.exe
    ```
 - Media keys use **SMTC** (the volume-flyout media card). souvlaki binds it to the main window
   handle — see the validation checklist below.
+
+### C runtime: fully static
+
+Release builds link the whole MSVC C runtime statically (vcruntime **and** the UCRT), so
+`limusic-forge.exe` imports no `VCRUNTIME140*.dll`, `MSVCP140*.dll` or `api-ms-win-crt-*.dll` and
+starts on a clean Windows without the VC++ redistributable. Two settings do it, and both are
+needed:
+
+- `-C target-feature=+crt-static` in `RUSTFLAGS`. Rust then links `libcmt`/`libvcruntime`/
+  `libucrt`, and the `cc`-built C deps (rquickjs-sys, sqlite) compile with `/MT` to match. The v8
+  prebuilt `rusty_v8.lib` is the same file for both CRTs (it links `libcpmt` under `crt-static`).
+- `STATIC_VCRUNTIME=false`. The Tauri CLI exports `STATIC_VCRUNTIME=true` to the build, and with it
+  tauri-build 2.6.3 does a *hybrid* link (static vcruntime, `/NODEFAULTLIB:libucrt.lib` +
+  `ucrt.lib`), which drags the UCRT back in as `api-ms-win-crt-*` imports.
+
+**Why the flag lives in the workflow's `RUSTFLAGS` and not in `.cargo/config.toml`:** a `RUSTFLAGS`
+environment variable *replaces* every `rustflags` entry from Cargo config files, it does not add to
+them. CI must set `RUSTFLAGS` (for `-L native=…\.libmpv` and rust-lld, before rust-cache so the
+cache key agrees), so a `+crt-static` in the repo config would silently never reach a release.
+The same applies locally whenever `RUSTFLAGS` is set. `windows-release.yml` builds it in the
+"Resolve RUSTFLAGS" step and then fails the job in "Check the exe imports no C runtime DLL" if
+`dumpbin /dependents` still lists a CRT DLL.
+
+**Local recipe** (this machine's layout: Cargo home and the synthesised `mpv.lib` on `E:`). Use a
+separate target dir so the static build does not invalidate the everyday debug one:
+```powershell
+$env:CARGO_HOME       = "E:/.cargo-limusic"
+$env:CARGO_TARGET_DIR = "E:\.cargo-limusic\target-crt"
+$env:STATIC_VCRUNTIME = "false"
+$env:RUSTFLAGS        = "-L native=E:/.cargo-limusic/mpvlib -C target-feature=+crt-static"
+# v8 downloads rusty_v8.lib into each target dir; reuse the one already downloaded to stay offline
+$env:RUSTY_V8_ARCHIVE = "<repo>\target\debug\gn_out\obj\rusty_v8.lib"
+cargo build --release -p limusic-forge
+dumpbin /dependents E:\.cargo-limusic\target-crt\release\limusic-forge.exe   # no CRT DLLs
+```
+Debug and test builds keep the dynamic CRT (plain `-L native=…mpvlib`); that is fine on a dev box.
+
+**Fallback if static ever stops linking** (e.g. a dep ships a `/MD`-only static lib → `LNK2038`
+RuntimeLibrary mismatch): drop `+crt-static` and `STATIC_VCRUNTIME=false`, copy `vcruntime140.dll`,
+`vcruntime140_1.dll` and `msvcp140.dll` from the runner's
+`VC\Redist\MSVC\<ver>\x64\Microsoft.VC143.CRT\` into `src-tauri/`, list them in
+`tauri.windows.conf.json` → `bundle.resources` next to `libmpv-2.dll`, and put them in the portable
+zip. Microsoft allows that app-local deployment; the UCRT itself ships with Windows 10+.
+
+### Installer
+
+`tauri.windows.conf.json` builds **NSIS only**, `installMode: "currentUser"` (no elevation, installs
+under `%LOCALAPPDATA%`), in English and Spanish, with the WebView2 **bootstrapper**
+(`downloadBootstrapper`). The updater downloads that same setup, so it stays small; CI makes a
+separate offline setup in a second pass with
+`--config '{"bundle":{"windows":{"webviewInstallMode":{"type":"offlineInstaller"}}}}'`.
+`windows_bundle_config_is_forge` in `src-tauri/src/lib.rs` pins these keys.
+
+There is **no MSI** while the version carries a prerelease-style suffix (`1.2.0-forge.1`): WiX only
+accepts a numeric suffix. To bring it back once the version is plain `X.Y.Z`, set
+`"targets": ["nsis", "msi"]` in `tauri.windows.conf.json`, update the `targets` assertion in
+`windows_bundle_config_is_forge`, and check that `windows-release.yml` uploads
+`target/release/bundle/msi/*.msi` again.
 
 ---
 
@@ -120,7 +180,7 @@ cargo tauri build --bundles deb   # → target/release/bundle/deb/limusic_*.deb
 4. **Build:**
    ```bash
    cd ui && pnpm build && cd ..
-   cargo tauri build          # → target/release/bundle/{macos,dmg}/limusic.{app,dmg}
+   cargo tauri build          # → target/release/bundle/macos/"LiMusic Forge.app", dmg/*.dmg
    ```
 5. **Bundle the dylibs, all of them.** What comes out of step 4 runs on *your* machine
    only: the binary links `libmpv.2.dylib` by its absolute Homebrew path, and libmpv in turn links
@@ -129,9 +189,9 @@ cargo tauri build --bundles deb   # → target/release/bundle/deb/limusic_*.deb
    `dylibbundler`, which walks the whole thing:
    ```bash
    brew install dylibbundler
-   APP=target/release/bundle/macos/limusic.app
+   APP="target/release/bundle/macos/LiMusic Forge.app"
    # The executable is NOT named after the bundle: productName names the .app, the cargo package
-   # names the binary (limusic-app). Ask the bundle rather than guessing.
+   # names the binary (limusic-forge). Ask the bundle rather than guessing.
    BIN="$APP/Contents/MacOS/$(plutil -extract CFBundleExecutable raw "$APP/Contents/Info.plist")"
    dylibbundler -cd -of -b -x "$BIN" \
      -d "$APP/Contents/Frameworks" -p "@executable_path/../Frameworks" -s "$(brew --prefix)/lib"

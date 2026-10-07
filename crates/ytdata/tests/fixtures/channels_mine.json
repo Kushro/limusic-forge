@@ -1,0 +1,14 @@
+{
+  "items": [
+    {
+      "id": "UCfixtureChannel000000001",
+      "snippet": {
+        "title": "Fixture Channel",
+        "thumbnails": {
+          "default": { "url": "https://yt3.ggpht.com/fixture-default.jpg" },
+          "medium": { "url": "https://yt3.ggpht.com/fixture-medium.jpg" }
+        }
+      }
+    }
+  ]
+}

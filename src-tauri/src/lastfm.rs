@@ -347,9 +347,9 @@ fn emit_state(
 /// and poll `auth.getSession` in the background until they approve (or the poll times out /
 /// is superseded). Resolution arrives via the `lastfm-state` event, not this command.
 pub async fn connect(state: Arc<AppState>) -> Result<(), String> {
-    if API_KEY.is_empty() || API_SECRET.is_empty() {
-        return Err("Last.fm isn't configured in this build — paste an API key into lastfm.rs \
-                    (see https://www.last.fm/api/account/create)."
+    if !configured() {
+        return Err("Last.fm isn't configured in this build: it was compiled without \
+                    LIMUSIC_LASTFM_API_KEY / LIMUSIC_LASTFM_API_SECRET (see docs/RELEASING-FORK.md)."
             .into());
     }
     let gen = state.lastfm.bump_gen();
@@ -410,10 +410,20 @@ pub fn disconnect(state: &AppState) {
     emit_state(&state.app, false, None, None);
 }
 
+/// Whether this build carries Last.fm API credentials (see build.rs and docs/RELEASING-FORK.md).
+pub fn configured() -> bool {
+    !API_KEY.is_empty() && !API_SECRET.is_empty()
+}
+
 pub fn status(state: &AppState) -> serde_json::Value {
     let key = state.db.get_setting("lastfm_session_key").filter(|s| !s.is_empty());
     let username = state.db.get_setting("lastfm_username").filter(|s| !s.is_empty());
-    serde_json::json!({ "connected": key.is_some(), "username": username })
+    status_json(configured(), key.is_some(), username)
+}
+
+/// `status`'s reply: `configured` says whether connecting can work at all in this build.
+fn status_json(configured: bool, connected: bool, username: Option<String>) -> serde_json::Value {
+    serde_json::json!({ "configured": configured, "connected": connected, "username": username })
 }
 
 /// Open a URL in the user's default browser. No opener plugin in the app; three lines cover the
@@ -489,6 +499,20 @@ fn now_secs() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lastfm_status_reports_configured() {
+        let off = status_json(false, false, None);
+        assert_eq!(off["configured"], false);
+        assert_eq!(off["connected"], false);
+        assert!(off["username"].is_null());
+        let on = status_json(true, true, Some("someone".into()));
+        assert_eq!(on["configured"], true);
+        assert_eq!(on["connected"], true);
+        assert_eq!(on["username"], "someone");
+        // `configured` is exactly "both credentials were compiled in".
+        assert_eq!(configured(), !API_KEY.is_empty() && !API_SECRET.is_empty());
+    }
 
     /// The signature is the auth-critical path: params sorted by name, `namevalue` concat, secret
     /// appended, md5 hex. Verified against a hand-computed digest (secret is "" in test builds).

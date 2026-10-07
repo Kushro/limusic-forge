@@ -432,9 +432,17 @@ export interface PlaybackSnapshot {
 export const getPlayback = () => invoke<PlaybackSnapshot>('get_playback');
 
 // --- settings (context/11) -----------------------------------------------------------------
-export const getSettings = () => invoke<Record<string, string>>('get_settings');
+/** Stored settings plus a few read-only, derived ones (`native_chrome`, `native_video`,
+ *  `discord_available`). Every value is a string, booleans as `'true'`/`'false'`. */
+export type Settings = Record<string, string> & {
+	/** Whether this build was compiled with a Discord application id (rich presence can work). */
+	discord_available?: 'true' | 'false';
+};
+export const getSettings = () => invoke<Settings>('get_settings');
 export const setSetting = (key: string, value: string) =>
 	invoke<void>('set_setting', { key, value });
+/** Why the database's schema upgrade failed at startup, or `null` if it did not. */
+export const dbMigrationError = () => invoke<string | null>('db_migration_error');
 /** Streamable client keys for the "disabled clients" setting. */
 export const getStreamClients = () => invoke<string[]>('get_stream_clients');
 /** Wipe both cache tiers (URL cache + mpv on-disk audio cache). */
@@ -477,6 +485,56 @@ export const releaseNotes = () => invoke<ReleaseNote[]>('release_notes');
 /** False on Linux builds that aren't the AppImage (.rpm, the AUR package): they update through the
  *  package manager, so the UI offers a download link instead of an install button. */
 export const canSelfUpdate = () => invoke<boolean>('can_self_update');
+export interface InstallInfo {
+	/** Running from a folder with a `data` directory next to the exe (paths.rs). */
+	portable: boolean;
+	/** Where the database, log and caches live. */
+	data_dir: string;
+}
+/** Portable or installed, for Settings > About and the autostart toggle. */
+export const installInfo = () => invoke<InstallInfo>('install_info');
+
+// --- import & migrate (migrate_upstream.rs) --------------------------------------------------
+/** What there is to import on this machine. Detection only. */
+export interface ImportSources {
+	/** Upstream LiMusic's data folder: where, how big, and whether LiMusic is open right now. */
+	upstream: { path: string; bytes: number; running: boolean } | null;
+	/** PlaylistForge's database, when there is one. */
+	playlistforge: string | null;
+}
+export const importSources = () => invoke<ImportSources>('import_sources');
+/** Leave the migration marker and restart: the copy runs on the next launch, before anything
+ *  opens the database. Rejects with `upstream_running` while LiMusic is open. */
+export const migrateUpstreamRequest = (includeWebview: boolean) =>
+	invoke<void>('migrate_upstream_request', { includeWebview });
+export interface MigrateReport {
+	/** `retry`: LiMusic was open, the next launch tries again. `expired`: the request was more than
+	 *  ten minutes old, so nothing was done; the marker waits for "retry now" or "cancel". */
+	status: 'done' | 'retry' | 'expired' | 'error';
+	error: string | null;
+	files: number;
+	bytes: number;
+	/** Where this app's previous data was moved to, if it had any. */
+	aside: string | null;
+	webview: boolean;
+	/** Whether LiMusic starts at login (only reported after a successful copy). */
+	upstream_autostart: boolean | null;
+}
+/** What the last migration did; read once, then gone. */
+export const migrateUpstreamResult = () => invoke<MigrateReport | null>('migrate_upstream_result');
+/** A migration asked for and not carried out yet. Only valid for ten minutes after
+ *  `requested_at`; past that (`expired`) the next launch no longer acts on it on its own. */
+export interface MigratePending {
+	/** Unix seconds. */
+	requested_at: number;
+	expired: boolean;
+	/** What the last launch made of it: `retry` (LiMusic open, a file held) or `expired`. */
+	last_status: string | null;
+	include_webview: boolean;
+}
+export const migrateUpstreamPending = () => invoke<MigratePending | null>('migrate_upstream_pending');
+/** Drop the pending migration marker (only that file). */
+export const migrateUpstreamCancel = () => invoke<void>('migrate_upstream_cancel');
 /** The updater plugin's `check()` against the beta channel's manifest, as the metadata the
  *  plugin's `Update` class is built from. `null` when this build is what the channel offers. */
 export const checkBetaUpdate = () =>
@@ -601,11 +659,333 @@ export const getPlaylistMore = (token: string) =>
  * answers instantly and is empty until `syncPlaylistIndex` has filled it in at least once.
  */
 export const playlistIndex = () => invoke<Record<string, string[]>>('playlist_index');
+/** Who started a sync, as `monitor_runs` files it. */
+export type SyncTrigger = 'manual_ui' | 'scheduler' | 'headless';
 /**
  * Re-walk your own playlists and answer with the rebuilt map. Skips the crawl while the stored one
- * is still inside its window, so calling this on every launch is cheap.
+ * is still inside `monitor_interval_hours`, so calling this on every launch is cheap; `force` crawls
+ * anyway. Rejects with `busy` while another sync runs (its `onPlaylistIndexSynced` will follow).
  */
-export const syncPlaylistIndex = () => invoke<Record<string, string[]>>('sync_playlist_index');
+export const syncPlaylistIndex = (opts: { force?: boolean; trigger?: SyncTrigger } = {}) =>
+	invoke<Record<string, string[]>>('sync_playlist_index', {
+		force: opts.force ?? null,
+		trigger: opts.trigger ?? null
+	});
+/** One sync run, summed over its playlists. */
+export type SyncSummary = {
+	at: number;
+	trigger: SyncTrigger;
+	/** Playlists read (yours; the ones merely saved are skipped). */
+	playlists: number;
+	/** Read to the end. */
+	complete: number;
+	/** Could not be read at all. */
+	failed: number;
+	added: number;
+	removed: number;
+	moved: number;
+	unavailable: number;
+	restored: number;
+	alerts_new: number;
+	/** Data API units the run spent; 0 when it read through InnerTube. */
+	units_spent?: number;
+};
+/** Sync one playlist now, interval or not. Rejects with `busy` while another sync runs, and with
+ *  `unreadable` when YouTube would not hand the playlist over. */
+export const syncPlaylist = (playlistId: string) =>
+	invoke<SyncSummary>('sync_playlist', { playlistId });
+/** The last full sync's summary, null before the first. */
+export const lastSyncSummary = () => invoke<SyncSummary | null>('last_sync_summary');
+/** One playlist's last complete sync: when (epoch seconds), how many items it held, and what that
+ *  sync found changed. */
+export type PlaylistSyncInfo = {
+	synced_at: number;
+	item_count: number;
+	added: number;
+	removed: number;
+	moved: number;
+	/** The privacy the last Data API sync read; absent until one did (InnerTube does not say). */
+	privacy?: PlaylistPrivacy;
+};
+export type PlaylistPrivacy = 'public' | 'unlisted' | 'private';
+/** Playlist id → its last complete sync; playlists never synced are absent. SQLite only. */
+export const playlistSyncInfo = () =>
+	invoke<Record<string, PlaylistSyncInfo>>('playlist_sync_info');
+/** `videoId` → the earliest date (epoch seconds) it was added to one of your playlists, as the Data
+ *  API reported it. Tracks only InnerTube has read are absent. SQLite only. */
+export const playlistAddedDates = () => invoke<Record<string, number>>('playlist_added_dates');
+/** Whether the YouTube Data API can be used now (src-tauri/src/ytdata_status.rs). Precedence:
+ *  not_configured > api_disabled > needs_auth > quota_exhausted > ok. States and counters only. */
+export type YtDataState =
+	| 'not_configured'
+	| 'needs_auth'
+	| 'quota_exhausted'
+	| 'api_disabled'
+	| 'ok';
+export type YtDataReason =
+	| 'no_client_secret'
+	| 'no_account_for_active'
+	| 'invalid_grant'
+	| 'no_refresh_token'
+	| 'keyring_unavailable'
+	| 'secret_undecryptable';
+export type YtDataStatus = {
+	state: YtDataState;
+	reason?: YtDataReason;
+	/** The channel id the Data API acts as, and its title. */
+	account?: string;
+	account_title?: string;
+	spent_today: number;
+	daily_units: number;
+	/** The next quota reset (midnight Pacific), RFC 3339. */
+	next_reset: string;
+};
+export const ytdataStatus = () => invoke<YtDataStatus>('ytdata_status');
+export const onYtDataStatus = (cb: (s: YtDataStatus) => void): Promise<UnlistenFn> =>
+	listen<YtDataStatus>('ytdata-status-changed', (e) => cb(e.payload));
+
+// --- Settings ▸ YouTube Data API ------------------------------------------------------------
+// Only the masked client id, channel metadata and states come back: never a token, never the
+// client secret (commands.rs).
+/** The imported `client_secret.json`, as much of it as the UI may see. */
+export type ClientSecretInfo = { masked_client_id: string };
+/** Validate the picked `client_secret.json` and copy it into the data folder. */
+export const ytdataImportClientSecret = (path: string) =>
+	invoke<ClientSecretInfo>('ytdata_import_client_secret', { path });
+/** The imported client secret, or null before one is. */
+export const ytdataClientSecretInfo = () =>
+	invoke<ClientSecretInfo | null>('ytdata_client_secret_info');
+/** Start connecting a channel: Google's consent page opens in the system browser. The end arrives
+ *  as `onYtDataConnectFinished` with the same `attempt`. */
+export const ytdataConnectStart = () =>
+	invoke<{ authorize_url: string; attempt: number }>('ytdata_connect_start');
+export const ytdataConnectCancel = () => invoke<void>('ytdata_connect_cancel');
+export type YtDataConnectFinished = {
+	attempt: number;
+	ok: boolean;
+	code?: 'cancelled' | 'timed_out' | 'failed';
+	error?: string;
+	channel_id?: string;
+	title?: string;
+};
+export const onYtDataConnectFinished = (cb: (r: YtDataConnectFinished) => void): Promise<UnlistenFn> =>
+	listen<YtDataConnectFinished>('ytdata-connect-finished', (e) => cb(e.payload));
+/** A channel connected through the Data API. `linked_account` is the cookie account (the `id` of
+ *  `getGoogleAccounts`) it acts for. */
+export type YtDataAccount = {
+	channel_id: string;
+	title: string;
+	thumb: string | null;
+	status: 'connected' | 'reauth_required';
+	linked_account: string | null;
+	added_at: number;
+};
+export const ytdataAccounts = () => invoke<YtDataAccount[]>('ytdata_accounts');
+/** Revoke and forget a channel's sign-in. Its jobs stay, without an account. */
+export const ytdataDisconnect = (channelId: string) =>
+	invoke<void>('ytdata_disconnect', { channelId });
+/** Pair a channel with a cookie account, or unpair it with null. */
+export const ytdataLinkAccount = (channelId: string, account: string | null) =>
+	invoke<void>('ytdata_link_account', { channelId, account });
+/** The budget settings as they read (defaults filled in) and today's partition of the quota. The
+ *  settings themselves are written with `setSetting` (`budget.*`), which validates them. */
+export type BudgetInfo = {
+	daily_units: number;
+	safety_margin_percent: number;
+	safety_margin_units: number;
+	backup_reserve_units: number;
+	backup_reserve_remaining_today: number;
+	opportunistic_mode: boolean;
+	backup_runs_per_day: number;
+	spent_today: number;
+	jobs_spent_today: number;
+	backup_spent_today: number;
+	available_for_jobs_now: number;
+	next_reset: string;
+};
+export const budgetGet = () => invoke<BudgetInfo>('budget_get');
+
+/** `playlist_engine`, or one operation's choice of engine. */
+export type PlaylistEngine = 'auto' | 'ytdata' | 'innertube';
+/** What a copy, move or removal would cost on the Data API, what jobs may still spend today, and
+ *  the engine it would run on (null: it touches a playlist on this computer, nothing to spend). */
+export type OpEstimate = {
+	units: number;
+	available: number;
+	engine: 'ytdata' | 'innertube' | null;
+	state: YtDataState;
+};
+export const estimateOp = (
+	kind: 'copy' | 'move' | 'remove',
+	params: { rows: number; playlists: string[]; playlist_len?: number; engine?: PlaylistEngine | null }
+) => invoke<OpEstimate>('estimate_op', { kind, params });
+
+/** The engine the next playlist writes (`transferTracks`, `removeTracks`) ask for when their caller
+ *  names none: set by a confirmation that offers the choice (the drop popover, the tools dialog)
+ *  around the writes it starts. Null leaves it to `playlist_engine`. */
+let engineChoice: PlaylistEngine | null = null;
+export function setEngineChoice(engine: PlaylistEngine | null) {
+	engineChoice = engine;
+}
+/** Run `start` with `engine` as the choice for the writes it makes before its first `await` (where
+ *  `transfer` calls `transferTracks`), then put the previous choice back. */
+export function withEngineChoice<T>(engine: PlaylistEngine | null, start: () => Promise<T>): Promise<T> {
+	const before = engineChoice;
+	engineChoice = engine;
+	try {
+		return start();
+	} finally {
+		engineChoice = before;
+	}
+}
+/** Alerts neither seen nor dismissed (the badge). */
+export const unseenAlertCount = () => invoke<number>('unseen_alert_count');
+/** The monitor page's cards. `items` is index rows (a track once per playlist); `duplicates_estimate`
+ *  is the extra copies inside each synced playlist's newest snapshot, as PlaylistForge counts them. */
+export type MonitorStats = {
+	playlists: number;
+	items: number;
+	unavailable: number;
+	duplicates_estimate: number;
+};
+export const monitorStats = () => invoke<MonitorStats>('monitor_stats');
+export type MonitorOutcome = 'ok' | 'partial' | 'failed' | 'lock_busy' | 'cancelled';
+/** One `monitor_runs` row. Times are epoch seconds; `detail_json` is the run's JSON detail as text. */
+export type MonitorRun = {
+	id: number;
+	started_at: number;
+	finished_at: number;
+	trigger: SyncTrigger;
+	outcome: MonitorOutcome;
+	playlists_ok: number;
+	playlists_failed: number;
+	alerts_new: number;
+	units_spent: number;
+	detail_json: string;
+};
+/** The newest monitor runs, newest first (20 by default). */
+export const monitorRuns = (limit?: number) =>
+	invoke<MonitorRun[]>('monitor_runs', { limit: limit ?? null });
+/** Every alert filed over the last `days` days (14 by default), oldest first, unbucketed: the page
+ *  groups them by its own local day. */
+export type AlertStamp = { at: number; kind: AlertKind };
+export const alertsByDay = (days?: number) =>
+	invoke<AlertStamp[]>('alerts_by_day', { days: days ?? null });
+/** A sync's progress: `current` is the playlist being read, null once it is done. */
+export type SyncProgress = { done: number; total: number; current: string | null };
+export const onPlaylistSyncProgress = (cb: (p: SyncProgress) => void): Promise<UnlistenFn> =>
+	listen<SyncProgress>('playlist-sync-progress', (e) => cb(e.payload));
+/** A sync finished (any trigger, the scheduler's included): the index is worth re-reading. */
+export const onPlaylistIndexSynced = (cb: (s: SyncSummary) => void): Promise<UnlistenFn> =>
+	listen<SyncSummary>('playlist-index-synced', (e) => cb(e.payload));
+export const onAlertsChanged = (cb: (unseen: number) => void): Promise<UnlistenFn> =>
+	listen<{ unseen: number }>('alerts-changed', (e) => cb(e.payload.unseen));
+/** Snapshot backups (backups.rs): the folder in use, the default one, and how many each playlist
+ *  keeps. The folder and the count are the `monitor.backups_dir` and `retention_keep_last`
+ *  settings; an empty folder setting means the default. `rejected`: the folder picked lies inside
+ *  PlaylistForge's or LiMusic's data, so `dir` is the default instead. */
+export type BackupsInfo = { dir: string; default_dir: string; keep: number; rejected: boolean };
+export const backupsInfo = () => invoke<BackupsInfo>('backups_info');
+export type BackupsOutcome = { written: number; pruned_files: number; pruned_rows: number };
+/** Back up every synced playlist's newest snapshot now, then prune. Rejects with `busy` while a
+ *  sync runs. */
+export const exportBackupsNow = () => invoke<BackupsOutcome>('export_backups_now');
+/** Open the backups folder in the file manager (created if missing). */
+export const openBackupsDir = () => invoke<void>('open_backups_dir');
+
+// --- downloads (Rust `download/`) ---------------------------------------------------------------
+export type DownloadFormat = 'audio' | 'video';
+export type DownloadStatus = 'queued' | 'running' | 'available' | 'error' | 'missing';
+/** One `downloads` row. Dates are RFC 3339 UTC. */
+export type DownloadRow = {
+	video_id: string;
+	format: DownloadFormat;
+	status: DownloadStatus;
+	requested_quality: string;
+	thumbnail_mode: string;
+	dest_dir: string;
+	file_path: string | null;
+	file_size_bytes: number | null;
+	container: string | null;
+	error: string | null;
+	attempts: number;
+	created_at: string;
+	completed_at: string | null;
+	last_verified_at: string | null;
+};
+/** yt-dlp's version (null: missing or broken), ffmpeg's presence, and whether the app installs
+ *  them itself (Windows) or uses the ones on PATH. */
+export type ToolsStatus = { ytdlp_version: string | null; ffmpeg_present: boolean; managed: boolean };
+export const downloadToolsStatus = () => invoke<ToolsStatus>('download_tools_status');
+/** Install or update yt-dlp (channel: the `downloads.ytdlp_channel` setting). Resolves with the
+ *  installed version; rejects with `busy`, `not_managed`, `checksum_mismatch` or a message. */
+export const installYtdlp = () => invoke<string>('install_ytdlp');
+/** Install or update ffmpeg. Rejects as `installYtdlp`. */
+export const installFfmpeg = () => invoke<void>('install_ffmpeg');
+export type ToolsInstallProgress = {
+	tool: 'yt-dlp' | 'ffmpeg';
+	stage: 'resolving' | 'downloading' | 'verifying' | 'extracting' | 'done';
+	received: number;
+	total: number | null;
+};
+export const onToolsInstallProgress = (cb: (p: ToolsInstallProgress) => void): Promise<UnlistenFn> =>
+	listen<ToolsInstallProgress>('tools-install-progress', (e) => cb(e.payload));
+/** The download folder in use and the default one (the `downloads.dir` setting empty). */
+export type DownloadsInfo = { dir: string; default_dir: string };
+export const downloadsInfo = () => invoke<DownloadsInfo>('downloads_info');
+export const openDownloadsDir = () => invoke<void>('open_downloads_dir');
+/** `invalid`: songs left out because their id is not a YouTube video's. */
+export type EnqueueResult = { queued: number; already: number; invalid: number };
+/** What a download needs of a song: the id, plus what fills the catalog. A `SongItem` is one. */
+export type DownloadSong = Pick<SongItem, 'video_id'> &
+	Partial<Pick<SongItem, 'title' | 'artists' | 'duration'>>;
+/** Queue songs. `format` defaults to the `downloads.default_format` setting; `redownload` queues
+ *  downloaded ones again. Local files are skipped. */
+export const downloadEnqueue = (
+	songs: DownloadSong[],
+	format?: DownloadFormat,
+	redownload?: boolean
+) =>
+	invoke<EnqueueResult>('download_enqueue', {
+		songs,
+		format: format ?? null,
+		redownload: redownload ?? null
+	});
+/** Stop the running download (its row goes). False when nothing runs. */
+export const downloadCancel = () => invoke<boolean>('download_cancel');
+export const downloadRetry = (videoId: string, format: DownloadFormat) =>
+	invoke<boolean>('download_retry', { videoId, format });
+/** Forget a download (stopping it if it runs). Never deletes the file. */
+export const downloadRemove = (videoId: string, format: DownloadFormat) =>
+	invoke<boolean>('download_remove', { videoId, format });
+export type DownloadProgress = {
+	video_id: string;
+	format: DownloadFormat;
+	percent: number;
+	speed: string | null;
+	eta: string | null;
+};
+export const downloadActive = () => invoke<DownloadProgress | null>('download_active');
+/** The rows of these videos, by video, after checking their files are still on disk. */
+export const downloadsFor = (videoIds: string[]) =>
+	invoke<Record<string, DownloadRow[]>>('downloads_for', { videoIds });
+export const downloadsRecent = (limit?: number) =>
+	invoke<DownloadRow[]>('downloads_recent', { limit: limit ?? null });
+/** The running download's progress; null when it ends. */
+export const onDownloadProgress = (cb: (p: DownloadProgress | null) => void): Promise<UnlistenFn> =>
+	listen<DownloadProgress | null>('download-progress', (e) => cb(e.payload));
+/** How a finished run ended. `tools_missing`: queued downloads wait for yt-dlp. */
+export type DownloadOutcome = {
+	video_id: string;
+	format: DownloadFormat;
+	status: 'available' | 'error' | 'cancelled' | 'tools_missing';
+	title: string | null;
+	error: string | null;
+};
+/** Rows changed: these videos' (empty: possibly any), and the outcome of a finished run. */
+export type DownloadsChanged = { video_ids: string[]; outcome: DownloadOutcome | null };
+export const onDownloadsChanged = (cb: (c: DownloadsChanged) => void): Promise<UnlistenFn> =>
+	listen<DownloadsChanged>('downloads-changed', (e) => cb(e.payload));
 /**
  * videoId → times played, from the local listening history. Same trailing window On Repeat uses
  * (a month): the history table is pruned to it, so there is no older data. A videoId that isn't in
@@ -700,7 +1080,7 @@ export type RowRef = { song: SongItem; before: string | null };
 /** One journal entry: an edit the playlist tools made, and whether it can still be undone. */
 export type PlaylistOp = {
 	id: number;
-	kind: 'reorder' | 'remove' | 'copy' | 'move' | 'dedupe' | 'split' | 'merge' | 'add';
+	kind: 'reorder' | 'remove' | 'copy' | 'move' | 'dedupe' | 'split' | 'merge' | 'extract' | 'add';
 	summary: { playlists: { id: string; title: string }[]; count: number };
 	createdAt: number;
 	undone: boolean;
@@ -725,13 +1105,15 @@ export const removeTracks = async (
 	playlistId: string,
 	title: string,
 	rows: RowRef[],
-	kind: 'remove' | 'dedupe' = 'remove'
+	kind: 'remove' | 'dedupe' = 'remove',
+	engine?: PlaylistEngine
 ) => {
 	const r = await invoke<RawPlaylistOp | null>('remove_tracks', {
 		playlistId,
 		title,
 		rows: rows.map((r) => ({ song: r.song, before: r.before })),
-		kind
+		kind,
+		engine: engine ?? engineChoice
 	});
 	return r && op(r);
 };
@@ -764,6 +1146,8 @@ export const transferTracks = async (args: {
 	rows: RowRef[];
 	mode: 'copy' | 'move';
 	duplicates: 'skip' | 'allow' | 'consolidate';
+	/** This write's engine; by default the confirmation's choice, else `playlist_engine`. */
+	engine?: PlaylistEngine;
 }) => {
 	const r = await invoke<Omit<Transferred, 'op'> & { op: RawPlaylistOp | null }>('transfer_tracks', {
 		source: args.source?.id ?? null,
@@ -772,10 +1156,15 @@ export const transferTracks = async (args: {
 		targetTitle: args.target.title,
 		rows: args.rows.map((r) => ({ song: r.song, before: r.before })),
 		mode: args.mode,
-		duplicates: args.duplicates
+		duplicates: args.duplicates,
+		engine: args.engine ?? engineChoice
 	});
 	return { ...r, op: r.op && op(r.op) };
 };
+/** Every row of a playlist in its order, read in full (every page of an account playlist). Rows of
+ *  a playlist you can edit carry their handle (`set_video_id`); what Extract and Reorder work on. */
+export const playlistRows = (playlistId: string) =>
+	invoke<SongItem[]>('playlist_rows', { playlistId });
 export type SplitBy = { by: 'artist'; min: number } | { by: 'count'; parts: number } | { by: 'size'; max: number };
 export type SplitOrder =
 	| { order: 'playlist' | 'title' | 'artist' | 'duration' }
@@ -797,18 +1186,26 @@ export type BuildDest = { to: 'new'; local: boolean } | { to: 'existing'; id: st
 export type Built = {
 	created: { id: string; title: string }[];
 	added: number;
+	/** Rows a move took out of its source (an extract only). */
+	removed: number;
 	stopped: boolean;
 	error: string | null;
 	op: PlaylistOp | null;
 };
-/** Write a split or a merge. Progress comes through `onPlaylistOpProgress`. */
+/** Write a split, a merge or an extract. Progress comes through `onPlaylistOpProgress`. `mode`
+ *  only matters to an extract from one playlist: `move` takes the rows out of it once they are in,
+ *  undoably (copy when left out). */
 export const buildPlaylists = async (args: {
-	kind: 'split' | 'merge';
+	kind: 'split' | 'merge' | 'extract';
 	sources: { id: string; title: string }[];
 	lists: { name: string; songs: SongItem[] }[];
 	dest: BuildDest;
+	mode?: 'copy' | 'move';
 }) => {
-	const r = await invoke<Omit<Built, 'op'> & { op: RawPlaylistOp | null }>('build_playlists', args);
+	const r = await invoke<Omit<Built, 'op'> & { op: RawPlaylistOp | null }>('build_playlists', {
+		...args,
+		mode: args.mode ?? null
+	});
 	return { ...r, op: r.op && op(r.op) };
 };
 export const cancelPlaylistBuild = () => invoke<void>('cancel_playlist_build');
@@ -823,7 +1220,9 @@ export type BuildProgress = { done: number; total: number; current: string };
 export const onPlaylistOpProgress = (cb: (p: BuildProgress) => void): Promise<UnlistenFn> =>
 	listen<BuildProgress>('playlist-op-progress', (e) => cb(e.payload));
 /** A song in your playlists, once, with the ids of the playlists that hold it. */
-export type Everywhere = { song: SongItem; playlists: string[] };
+/** A song with the playlists holding it, and when it was first seen in any of them (epoch seconds;
+ *  null when they all held it from before tracking began). */
+export type Everywhere = { song: SongItem; playlists: string[]; first_seen: number | null };
 /** Every song across your playlists, from the index (no network). */
 export const songsEverywhere = () => invoke<Everywhere[]>('songs_everywhere');
 export type Kept = { added: number; removed: number; failed: string[]; op: PlaylistOp | null };
@@ -841,15 +1240,65 @@ export const keepOnlyIn = async (
 	});
 	return { ...r, op: r.op && op(r.op) };
 };
-/** A track that left a playlist of yours, or turned unavailable in it, since the sync before. */
+export type AlertKind = 'added' | 'removed' | 'moved' | 'unavailable' | 'restored';
+/** A change the monitor found in a playlist of yours since the sync before. `from`/`to` are the
+ *  0-based positions a row went between, where known (always on `moved`). */
 export type PlaylistAlert = {
+	id?: number;
 	playlist_id: string;
 	video_id: string;
-	kind: 'gone' | 'unavailable';
+	kind: AlertKind;
 	song: SongItem | null;
 	at: number;
+	seen: boolean;
+	from?: number;
+	to?: number;
+	/** Dismissed from Library ▸ In your playlists (only ever true with `all`). */
+	dismissed?: boolean;
 };
-export const playlistAlerts = () => invoke<PlaylistAlert[]>('playlist_alerts');
+/** The alerts not dismissed, newest first, one per playlist, track and kind (the newest of its
+ *  repeats). `all` is the alerts page: every row ever filed, repeats and dismissed ones included,
+ *  in pages of at most `limit` rows older than `before`, the `[at, id]` of the last row loaded.
+ *  `limit`/`before` only apply with `all`. */
+export const playlistAlerts = (
+	opts: { all?: boolean; limit?: number; before?: [number, number] } = {}
+) =>
+	invoke<PlaylistAlert[]>('playlist_alerts', {
+		all: opts.all ?? null,
+		limit: opts.limit ?? null,
+		before: opts.before ?? null
+	});
+/** Mark these alerts seen, or every one with no ids. Answers the unseen count after (also sent as
+ *  `alerts-changed`). */
+export const markAlertsSeen = (ids?: number[]) =>
+	invoke<number>('mark_alerts_seen', { ids: ids ?? null });
+/** One change between two snapshots of a playlist; `from`/`to` are 0-based positions in the older
+ *  and the newer one, where known. */
+export type TimelineChange = {
+	video_id: string;
+	kind: AlertKind;
+	song: SongItem | null;
+	from?: number;
+	to?: number;
+};
+/** One snapshot of a playlist and what changed since the one before it. `baseline` is the oldest
+ *  kept, with nothing to compare against. */
+export type TimelineEntry = {
+	snapshot_id: number;
+	taken_at: number;
+	item_count: number;
+	title: string | null;
+	baseline: boolean;
+	added: number;
+	removed: number;
+	moved: number;
+	unavailable: number;
+	restored: number;
+	changes: TimelineChange[];
+};
+/** Every snapshot kept of a playlist, newest first, with its changes. Empty when never synced. */
+export const playlistTimeline = (playlistId: string) =>
+	invoke<TimelineEntry[]>('playlist_timeline', { playlistId });
 export const dismissPlaylistAlert = (a: PlaylistAlert) =>
 	invoke<void>('dismiss_playlist_alert', {
 		playlistId: a.playlist_id,
@@ -1038,7 +1487,7 @@ export const onQueueAppended = (cb: (q: QueueAppended) => void): Promise<Unliste
 /** Main window shown/hidden (close-to-tray, the mini player). WebKitGTK never tells the page. */
 export const onUiVisible = (cb: (v: boolean) => void): Promise<UnlistenFn> =>
 	listen<boolean>('ui-visible', (e) => cb(e.payload));
-/** `limusic-app <link>` (#348): the arguments a cold launch was given, handed over once... */
+/** `limusic-forge <link>` (#348): the arguments a cold launch was given, handed over once... */
 export const takeLaunchArgs = () => invoke<string[]>('take_launch_args');
 /** ...and those of a second launch while this one runs. */
 export const onOpenLink = (cb: (args: string[]) => void): Promise<UnlistenFn> =>
@@ -1141,6 +1590,8 @@ export const theaterFullscreen = (on: boolean) => invoke<void>('theater_fullscre
 
 // --- Last.fm scrobbling ---------------------------------------------------------------------
 export interface LastfmState {
+	/** From `lastfm_status` only: whether this build carries Last.fm API credentials. */
+	configured?: boolean;
 	connected: boolean;
 	username?: string | null;
 	/** Set when a connect attempt failed (timeout, network, rejected) — show it as a toast. */
@@ -1216,3 +1667,285 @@ export const onLtState = (cb: (s: LtState) => void): Promise<UnlistenFn> =>
 	listen<LtState>('lt-state', (e) => cb(e.payload));
 export const onLtNotice = (cb: (msg: string) => void): Promise<UnlistenFn> =>
 	listen<string>('lt-notice', (e) => cb(e.payload));
+
+// --- jobs page ---
+// The playlist job queue and its history (src-tauri/src/jobs/control.rs), today's Data API quota
+// and its last two weeks. Dates are RFC 3339 UTC.
+export type JobStatus =
+	| 'queued'
+	| 'running'
+	| 'paused_user'
+	| 'waiting_quota'
+	| 'waiting_auth'
+	| 'paused_network'
+	| 'verifying'
+	| 'completed'
+	| 'completed_with_errors'
+	| 'failed'
+	| 'cancelled';
+export type JobEngine = 'ytdata' | 'innertube';
+/** One job as the jobs page shows it. `priority`: 0 the app's own, 1 high, 2 normal, 3 low. */
+export type JobView = {
+	id: number;
+	kind: string;
+	/** The operation asked for (`copy`, `move`, `dedupe`...), when the dispatch named it. */
+	op_kind: string | null;
+	status: JobStatus;
+	priority: number;
+	engine: JobEngine;
+	account_id: string | null;
+	phase: number;
+	total_phases: number;
+	created_at: string;
+	started_at: string | null;
+	finished_at: string | null;
+	resume_at: string | null;
+	est_units_total: number;
+	spent_units: number;
+	total_items: number;
+	done_items: number;
+	failed_items: number;
+	skipped_items: number;
+	/** The tracks asked for; unlike `total_items` it does not grow with a move's later phases. */
+	planned_items: number;
+	retried_items: number;
+	last_error: string | null;
+	summary: { playlists: { id: string; title: string }[]; count: number } | null;
+	undo_of_job_id: number | null;
+	revert_job_id: number | null;
+	revert_requested: boolean;
+	/** Its entry in the undo history (`playlistHistory`). */
+	op_id: number | null;
+};
+export type JobItemStatus = 'pending' | 'in_flight' | 'done' | 'failed' | 'skipped';
+export type JobItemView = {
+	id: number;
+	seq: number;
+	phase: number;
+	action: string;
+	status: JobItemStatus;
+	attempts: number;
+	last_error: string | null;
+	video_id: string | null;
+	playlist_id: string | null;
+	updated_at: string;
+};
+export type JobDetail = {
+	job: JobView;
+	items: JobItemView[];
+	/** What undoing it would take: the done items with an inverse, and their cost on the Data API. */
+	revert: { item_count: number; estimated_units: number };
+};
+/** `active`: not ended, in the order they run. `history`: ended, newest first. `all`: both. */
+export type JobsFilter = 'active' | 'history' | 'all';
+export const jobsList = (filter?: JobsFilter, limit?: number) =>
+	invoke<JobView[]>('jobs_list', { filter: filter ?? null, limit: limit ?? null });
+export const jobDetail = (id: number) => invoke<JobDetail | null>('job_detail', { id });
+export const jobPause = (id: number) => invoke<void>('job_pause', { id });
+export const jobResume = (id: number) => invoke<void>('job_resume', { id });
+/** Cancel; with `revert`, also undo what it did (on an ended job that is the whole request). */
+export const jobCancel = (id: number, revert: boolean) => invoke<void>('job_cancel', { id, revert });
+/** Put its failed items back in the queue. Answers how many. */
+export const jobRetryFailed = (id: number) => invoke<number>('job_retry_failed', { id });
+/** 1 high, 2 normal, 3 low. */
+export const jobSetPriority = (id: number, priority: number) =>
+	invoke<void>('job_set_priority', { id, priority });
+/** The queue in a new order. Jobs keep their priority; within one they run in this order. */
+export const jobsReorder = (ids: number[]) => invoke<number>('jobs_reorder', { ids });
+export type EndpointUsage = { endpoint: string; calls: number; units: number };
+export type QuotaToday = {
+	spent: number;
+	daily_units: number;
+	next_reset: string;
+	/** Costliest first. */
+	endpoints: EndpointUsage[];
+};
+export const quotaToday = () => invoke<QuotaToday>('quota_today');
+/** One Pacific day's spend; `date` is `YYYY-MM-DD`. */
+export type DailyUsage = { date: string; units: number };
+/** The last `days` Pacific days (14 by default), oldest first, today last. */
+export const quotaHistory = (days?: number) =>
+	invoke<DailyUsage[]>('quota_history', { days: days ?? null });
+/** Today's quota as the budget bar splits it. Units; `daily_units` is the whole bar. */
+export type BudgetPartition = {
+	daily_units: number;
+	spent_total: number;
+	spent_backup: number;
+	spent_jobs: number;
+	spent_other: number;
+	reserve_remaining: number;
+	safety_margin: number;
+	available_for_jobs: number;
+	next_reset: string;
+};
+export const budgetPartition = () => invoke<BudgetPartition>('budget_partition');
+/** A job changed; `jobId` 0 means possibly any. */
+export const onJobsChanged = (cb: (jobId: number) => void): Promise<UnlistenFn> =>
+	listen<{ job_id?: number } | null>('jobs-changed', (e) => cb(e.payload?.job_id ?? 0));
+/** Data API units were spent. */
+export const onQuotaChanged = (cb: () => void): Promise<UnlistenFn> =>
+	listen('quota-changed', () => cb());
+
+// --- headless monitor and Windows task ---
+// The Windows scheduled task that runs `limusic-forge --monitor --all` daily (src-tauri/src/
+// wintask.rs). Dates are as Windows printed them, in its own language and format.
+export type WinTaskStatus = {
+	/** `false` off Windows: there is no task to register. */
+	supported: boolean;
+	registered: boolean;
+	/** `HH:MM`, local: the time registering uses (`monitor.schedule_time`). */
+	schedule_time: string;
+	next_run: string | null;
+	status: string | null;
+	last_run: string | null;
+	last_result: string | null;
+	/** The exe the task runs, and this one's. */
+	registered_exe: string | null;
+	current_exe: string | null;
+	/** The task runs another copy (a portable folder that moved): register again to fix it. */
+	exe_moved: boolean;
+	/** Why the Task Scheduler could not be asked. */
+	error: string | null;
+};
+export const wintaskStatus = () => invoke<WinTaskStatus>('wintask_status');
+/** Register (or move) the task to run this copy daily at `time` (`HH:MM`). */
+export const wintaskRegister = (time: string) => invoke<WinTaskStatus>('wintask_register', { time });
+export const wintaskUnregister = () => invoke<WinTaskStatus>('wintask_unregister');
+
+// --- PlaylistForge import ---
+// Settings ▸ Import & migrate ▸ PlaylistForge (src-tauri/src/pf_import/). Rejections are short
+// codes: `pf_running` (close PlaylistForge first), `not_found`, `not_playlistforge`, `too_new`,
+// `corrupt`, `io`, `sqlite`, `consent_required`, `confirmation_required`.
+export type PfDetect = {
+	/** PlaylistForge's folder, when it holds a database. */
+	path: string | null;
+	found: boolean;
+	running: boolean;
+	user_version: number | null;
+	too_new: boolean;
+	/** "PlaylistForge Monitor" is registered; null off Windows or when Windows did not answer. */
+	task: boolean | null;
+	error: string | null;
+};
+export type PfSummary = {
+	user_version: number;
+	accounts: number;
+	playlists: number;
+	playlists_with_items: number;
+	items: number;
+	snapshots: number;
+	alerts: number;
+	downloads: number;
+	jobs_pending: number;
+	jobs_total: number;
+	quota_units_today: number;
+	settings: number;
+	backups: number;
+	has_client_secret: boolean;
+	json_accounts: number;
+};
+/** D36: whose index wins when the playlist goes into the index. */
+export type PfWinner = 'pf' | 'forge';
+export type PfPreviewPlaylist = {
+	id: string;
+	title: string;
+	account_id: string;
+	privacy: string;
+	items: number;
+	deleted_remotely: boolean;
+	in_forge: boolean;
+	forge_synced_at: number | null;
+	pf_synced_at: string | null;
+	winner: PfWinner;
+};
+export type PfPreviewAccount = {
+	id: string;
+	title: string;
+	last_sync_at: string | null;
+	/** The Forge cookie account of the same channel, if one is saved. */
+	forge_account: string | null;
+	/** PlaylistForge has it as a Data API account (a token may be there to bring over). */
+	data_api: boolean;
+};
+export type PfForgeAccount = {
+	id: string;
+	name: string | null;
+	channel_id: string | null;
+	active: boolean;
+};
+export type PfThemeChoice = { id: string; mode: 'dark' | 'light' | null };
+export type PfPreview = {
+	summary: PfSummary;
+	playlists: PfPreviewPlaylist[];
+	accounts: PfPreviewAccount[];
+	forge_accounts: PfForgeAccount[];
+	pf_client_secret: boolean;
+	forge_client_secret: boolean;
+	tokens_compatible: boolean;
+	theme: PfThemeChoice | null;
+	locale: string | null;
+	problems: string[];
+};
+export type PfMissingAs = 'local' | 'account' | 'skip';
+export type PfSelection = {
+	path?: string | null;
+	playlists: string[];
+	/** PlaylistForge channel id → Forge cookie account id (null: none). Left out: paired automatically. */
+	account_map: Record<string, string | null>;
+	missing_as: PfMissingAs;
+	alerts: boolean;
+	downloads: boolean;
+	settings: boolean;
+	appearance: boolean;
+	data_api: boolean;
+};
+export type PfReport = {
+	playlists_indexed: number;
+	playlists_kept: number;
+	playlists_history: number;
+	local_created: number;
+	local_existing: number;
+	account_queued: number;
+	missing_skipped: number;
+	tracks: number;
+	snapshots: number;
+	alerts: number;
+	videos: number;
+	downloads: number;
+	downloads_available: number;
+	downloads_missing: number;
+	settings: number;
+	settings_skipped: { key: string; reason: string }[];
+	theme: PfThemeChoice | null;
+	locale: string | null;
+	ytdata_accounts: number;
+	jobs: number;
+	job_items: number;
+	quota_entries: number;
+	client_secret_copied: boolean;
+	warnings: string[];
+};
+export type PfApplyResult = {
+	report: PfReport;
+	/** The account playlists went to the import queue (followed by `import-progress`). */
+	import_started: boolean;
+	import_error: string | null;
+};
+export type PfTokenOutcome = {
+	channel_id: string;
+	outcome: 'imported' | 'none' | 'error';
+	code: string | null;
+};
+export type PfProgress = { step: string; done: number; total: number };
+export const pfDetect = () => invoke<PfDetect>('pf_detect');
+export const pfPreview = (path?: string | null) => invoke<PfPreview>('pf_preview', { path: path ?? null });
+export const pfImportApply = (selection: PfSelection) =>
+	invoke<PfApplyResult>('pf_import_apply', { selection });
+/** Only with `consent` (the box the user ticked); Rust refuses otherwise. */
+export const pfImportCredentials = (channelIds: string[], consent: boolean, path?: string | null) =>
+	invoke<PfTokenOutcome[]>('pf_import_credentials', { channelIds, consent, path: path ?? null });
+/** Only after the user confirmed: `schtasks /delete /tn "PlaylistForge Monitor" /f`. */
+export const pfUnregisterTask = (confirmed: boolean) =>
+	invoke<void>('pf_unregister_task', { confirmed });
+export const onPfImportProgress = (cb: (p: PfProgress) => void): Promise<UnlistenFn> =>
+	listen<PfProgress>('pf-import-progress', (e) => cb(e.payload));

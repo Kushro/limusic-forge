@@ -552,14 +552,32 @@ impl Tier {
 /// The cache key: Spotify's track id, or for a track with none (a local file, a CSV row) its
 /// normalized title and first artist.
 fn key(t: &SourceTrack) -> String {
-    match &t.id {
-        Some(id) => id.clone(),
-        None => format!(
+    match (&t.id, &t.video_id) {
+        (Some(id), _) => id.clone(),
+        // A track that names its video (PlaylistForge) is that video, whatever it is called.
+        (None, Some(video_id)) => format!("yt:{video_id}"),
+        (None, None) => format!(
             "~{}|{}",
             norm(&t.title),
             t.artists.first().map(|a| norm(a)).unwrap_or_default()
         ),
     }
+}
+
+/// A track whose video the source already names (a PlaylistForge playlist) is matched as it is:
+/// no `FILTER_SONG` search, and nothing filed in `import_matches`, which is for searches.
+fn direct(t: &SourceTrack) -> Option<Answer> {
+    let video_id = t.video_id.as_deref().map(str::trim).filter(|v| !v.is_empty())?;
+    let song = SongItem {
+        video_id: video_id.to_owned(),
+        title: t.title.clone(),
+        artists: t.artists.join(", "),
+        album: t.album.clone(),
+        duration: t.duration_ms.map(|ms| crate::ytdata_sync::format_duration((ms / 1000) as i64)),
+        thumbnail: Some(format!("https://i.ytimg.com/vi/{video_id}/mqdefault.jpg")),
+        ..Default::default()
+    };
+    Some((Tier::Matched, Some(song), Vec::new()))
 }
 
 fn classify(ranked: Vec<(f64, SongItem)>) -> (Tier, Option<SongItem>, Vec<SongItem>) {
@@ -942,6 +960,38 @@ pub fn start(state: &Arc<AppState>, picked: Vec<usize>) -> Result<Snapshot, Stri
     Ok(snapshot)
 }
 
+/// Import lists whose every track names its video (PlaylistForge's playlists, `pf_import`): each
+/// is matched as it is ([`direct`]), so there is nothing to search and nothing to review, and the
+/// job goes straight to creating. The writes are paced like any import's. Refused like [`start`]
+/// while another import runs, or (on the account) while the cooldown does.
+pub fn start_known(
+    state: &Arc<AppState>,
+    lists: Vec<SourceList>,
+    local: bool,
+) -> Result<Snapshot, String> {
+    let local = local || !state.it.is_logged_in();
+    if let Some(until) = cooldown(state).filter(|_| !local) {
+        return Err(Halt::Cooldown(until).code());
+    }
+    let mut g = IMPORT.lock().unwrap();
+    if g.job.as_ref().is_some_and(Job::running) {
+        return Err("busy".into());
+    }
+    g.gen += 1;
+    let mut job = Job::new(g.gen, lists);
+    for i in 0..job.rows.len() {
+        let answer = direct(&job.rows[i].track).unwrap_or((Tier::Missing, None, Vec::new()));
+        job.resolve(i, answer);
+    }
+    job.phase = Phase::Creating;
+    let gen = g.gen;
+    let snapshot = job.snapshot();
+    g.job = Some(job);
+    drop(g);
+    tauri::async_runtime::spawn(run_create(Arc::clone(state), gen, HashMap::new(), local));
+    Ok(snapshot)
+}
+
 async fn run_matching(state: Arc<AppState>, gen: u64) {
     let todo: Vec<(usize, String, SourceTrack)> = with_job(gen, |j| {
         j.rows
@@ -956,6 +1006,10 @@ async fn run_matching(state: Arc<AppState>, gen: u64) {
     // Everything already known first, so a re-import fills in at once.
     let mut network = Vec::new();
     for (i, key, track) in todo {
+        if let Some(answer) = direct(&track) {
+            with_job(gen, |j| j.resolve(i, answer));
+            continue;
+        }
         match cached(&state, &key) {
             Some(answer) => {
                 with_job(gen, |j| j.resolve(i, answer));
@@ -1630,6 +1684,7 @@ mod tests {
             album: album.map(Into::into),
             duration_ms: secs.map(|s| s * 1000),
             explicit: None,
+            video_id: None,
         }
     }
 
@@ -1647,6 +1702,34 @@ mod tests {
         ranked.sort_by(|a, b| b.0.total_cmp(&a.0));
         let (tier, pick, _) = classify(ranked);
         (tier, pick.map(|p| p.video_id))
+    }
+
+    #[test]
+    fn a_known_video_is_matched_without_a_search() {
+        let known = SourceTrack {
+            video_id: Some("vidAAAAAAA1".into()),
+            duration_ms: Some(213_000),
+            ..src("Fake Song One", &["Fake Artist A", "Fake Artist B"], Some("Fake Album"), None)
+        };
+        let (tier, pick, candidates) = direct(&known).unwrap();
+        assert_eq!(tier, Tier::Matched);
+        assert!(candidates.is_empty());
+        let pick = pick.unwrap();
+        assert_eq!(pick.video_id, "vidAAAAAAA1");
+        assert_eq!(pick.title, "Fake Song One");
+        assert_eq!(pick.artists, "Fake Artist A, Fake Artist B");
+        assert_eq!(pick.album.as_deref(), Some("Fake Album"));
+        assert_eq!(pick.duration.as_deref(), Some("3:33"));
+        // Keyed by the video, so the same video under two names is one row.
+        assert_eq!(key(&known), "yt:vidAAAAAAA1");
+        let renamed = SourceTrack { title: "Other name".into(), ..known.clone() };
+        assert_eq!(key(&renamed), key(&known));
+        // Without one it is searched for, as before.
+        let plain = src("Fake Song One", &["Fake Artist A"], None, None);
+        assert!(direct(&plain).is_none());
+        assert!(key(&plain).starts_with('~'));
+        let blank = SourceTrack { video_id: Some("  ".into()), ..plain };
+        assert!(direct(&blank).is_none());
     }
 
     #[test]

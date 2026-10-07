@@ -1,6 +1,7 @@
 # Community-maintained development shell; it is not covered by CI.
 {
-  description = "Development environment for Limusic";
+  # LiMusic Forge: https://github.com/Kushro/limusic-forge
+  description = "Development environment for LiMusic Forge";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
@@ -28,6 +29,7 @@
           ];
         in {
           default = pkgs.mkShell {
+            name = "limusic-forge-dev";
             packages = with pkgs; [
               cargo
               nodejs

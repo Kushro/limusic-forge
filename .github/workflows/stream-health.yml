@@ -1,6 +1,6 @@
 name: Stream health
 
-# Asks live YouTube, once a night, whether this app can still resolve and stream a track.
+# Asks live YouTube, on demand (see `on:` below), whether this app can still resolve and stream a track.
 #
 # WHY THIS EXISTS: every playback breakage this project has had came from YouTube changing
 # something, and every one of them was discovered by a user opening an issue. Two ANDROID_VR
@@ -32,11 +32,10 @@ name: Stream health
 # job, so there is no glibc floor to protect, and `innertube` is pure Rust with no libmpv or
 # WebKitGTK to install.
 
+# MANUAL ONLY in the fork. The upstream nightly `schedule:` (04:00 UTC) is off: a fork's scheduled
+# runs spend its Actions minutes and mail its owner about YouTube outages it does not triage.
+# Run it from Actions ▸ Stream health ▸ Run workflow when playback looks broken.
 on:
-  schedule:
-    # 04:00 UTC. Off the peak of YouTube's own deploy window and early enough that a red run is
-    # waiting when the day starts.
-    - cron: '0 4 * * *'
   workflow_dispatch:
 
 permissions:

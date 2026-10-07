@@ -41,7 +41,7 @@
 		open(target);
 	}
 
-	// The same from outside the app (#348): `limusic-app <link>`, from Rust at launch or from a
+	// The same from outside the app (#348): `limusic-forge <link>`, from Rust at launch or from a
 	// second launch while this one runs. Flags ride along in argv (`--autostart`, macOS's `-psn_`),
 	// and a leading word like `open` is skipped too, since the first argument that parses wins.
 	onMount(() => {

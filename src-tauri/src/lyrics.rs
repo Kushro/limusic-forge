@@ -385,8 +385,11 @@ impl LrclibTrack {
 }
 
 /// LRCLIB asks integrations to identify themselves via User-Agent.
-const LRCLIB_UA: &str =
-    concat!("Limusic v", env!("CARGO_PKG_VERSION"), " (https://github.com/SimoHypers/limusic)");
+const LRCLIB_UA: &str = concat!(
+    "LiMusic Forge v",
+    env!("CARGO_PKG_VERSION"),
+    " (https://github.com/Kushro/limusic-forge)"
+);
 
 /// A GET to LRCLIB, carrying the two things this API wants from us: who we are, and a bound on how
 /// long we will wait. Both used to be baked into a client of our own.
@@ -1697,7 +1700,7 @@ mod tests {
 
     /// Are the external providers still alive? Hits them all for real, so it is NOT in the default
     /// run (context/17: network tests are opt-in, or `cargo test` fails offline):
-    ///   cargo test -p limusic-app --lib -- --ignored --nocapture
+    ///   cargo test -p limusic-forge --lib -- --ignored --nocapture
     ///
     /// This exists because a provider that is *broken* and a provider that simply *has no lyrics
     /// for this track* both return `Ok(None)`, and nothing else in the chain can tell them apart:

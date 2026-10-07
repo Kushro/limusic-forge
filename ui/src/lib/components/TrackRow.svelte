@@ -1,6 +1,11 @@
 <script lang="ts">
+	import { untrack } from 'svelte';
 	import { HugeiconsIcon, type IconSvgElement } from '@hugeicons/svelte';
 	import {
+		Alert02Icon,
+		AlertCircleIcon,
+		Clock01Icon,
+		Download04Icon,
 		FavouriteIcon,
 		MusicNote01Icon,
 		PlayIcon,
@@ -14,6 +19,7 @@
 	import { thumb } from '$lib/thumb';
 	import { lt } from '$lib/lt.svelte';
 	import { anySaved, isLiked, openAddManyToPlaylist, ratingOf, savedPlaylists, toast, toggleRating } from '$lib/player.svelte';
+	import { progressOf, rowsOf, statusOf, track as trackDownloads } from '$lib/downloads.svelte';
 	import SavedInPlaylists from './SavedInPlaylists.svelte';
 	import TrackMenu from './TrackMenu.svelte';
 	import ArtistLine from './ArtistLine.svelte';
@@ -148,6 +154,24 @@
 	// answers the same three questions: a local file is in no YTM playlist, and the compact and
 	// queue variants have no width left for another mark.
 	const inPlaylists = $derived(showRating ? savedPlaylists(song.video_id) : []);
+
+	// Download state (`downloads.svelte.ts`): asked for once per id, batched with the rest of the
+	// list. Untracked, so the cache filling in doesn't re-run this. The compact grid has no room.
+	$effect(() => {
+		const id = song.video_id;
+		untrack(() => trackDownloads([id]));
+	});
+	const dlState = $derived(compact ? 'none' : statusOf(song.video_id));
+	const dlPercent = $derived(dlState === 'running' ? Math.floor(progressOf(song.video_id)?.percent ?? 0) : 0);
+	const dlTitle = $derived.by(() => {
+		if (dlState === 'none') return '';
+		if (dlState === 'running') return t('downloads.status_running', { percent: dlPercent });
+		if (dlState === 'error') {
+			const error = rowsOf(song.video_id).find((r) => r.status === 'error')?.error;
+			return error ? `${t('downloads.status_error')}: ${error}` : t('downloads.status_error');
+		}
+		return t(`downloads.status_${dlState}`);
+	});
 
 	// The whole row is a play target (role="button"), so mirror native button keyboard activation.
 	// Only when the key lands on the row itself — keydowns bubble up from nested interactive
@@ -387,6 +411,31 @@
 				{@render rateButton(ThumbsUpIcon, 'like', t('common.like'))}
 				{@render rateButton(ThumbsDownIcon, 'dislike', t('common.dislike'))}
 			</div>
+		{/if}
+		<!-- Download state, only on rows that have one: nothing reserved on the rest, since most
+		     rows will never have a download and a column of empty slots is width taken from titles.
+		     One branch per state because `icon` freezes at mount. No spinner: a looping animation
+		     keeps the compositor busy for as long as the download runs (see the playing mark). -->
+		{#if dlState !== 'none'}
+			<span
+				class="flex shrink-0 items-center gap-0.5 text-[10px] tabular-nums text-muted-foreground"
+				title={dlTitle}
+				role="img"
+				aria-label={dlTitle}
+			>
+				{#if dlState === 'available'}
+					<HugeiconsIcon icon={Download04Icon} class="h-3.5 w-3.5 text-primary" />
+				{:else if dlState === 'running'}
+					<HugeiconsIcon icon={Download04Icon} class="h-3.5 w-3.5" />
+					<span>{dlPercent}%</span>
+				{:else if dlState === 'queued'}
+					<HugeiconsIcon icon={Clock01Icon} class="h-3.5 w-3.5" />
+				{:else if dlState === 'error'}
+					<HugeiconsIcon icon={Alert02Icon} class="h-3.5 w-3.5 text-destructive" />
+				{:else}
+					<HugeiconsIcon icon={AlertCircleIcon} class="h-3.5 w-3.5" />
+				{/if}
+			</span>
 		{/if}
 		{#if duration && !compact}
 			<span class="shrink-0 text-xs tabular-nums text-muted-foreground">{duration}</span>

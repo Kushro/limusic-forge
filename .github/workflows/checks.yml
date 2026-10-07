@@ -8,7 +8,7 @@ name: Checks
 # had no way to know. `rustfmt.toml` is committed now and the tree was normalised to it, which means
 # the drift is detectable mechanically instead of during review.
 #
-# WHY NOT ALSO BUILD AND TEST HERE: `limusic-app` links libmpv and webkit2gtk, so testing it needs
+# WHY NOT ALSO BUILD AND TEST HERE: `limusic-forge` links libmpv and webkit2gtk, so testing it needs
 # the full Tauri system-dependency install and a cold Rust compile. This job needs neither: rustfmt
 # parses the source and never builds it, so it finishes in seconds on a bare runner and stays cheap
 # enough to run on every push. The tests live in the `test` job below for exactly that reason.
@@ -33,6 +33,27 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      # The repo does not keep the +x bit on scripts/*.sh (GitButler on Windows commits them as
+      # 100644), so a workflow that runs `scripts/foo.sh` directly dies with "Permission denied"
+      # only when that release job runs. Every call must go through `bash scripts/foo.sh`. This
+      # flags a command (at line start, after `run:` or after `;` `&` `|` `(`, optionally behind
+      # `then`/`else`/`do`/`sudo` and `VAR=value` words) that starts with `scripts/…sh` or
+      # `./scripts/…sh`. Whole-line comments and `$PWD/scripts/…` paths are not commands.
+      # Known limits, it is a grep and not a shell parser. Missed: quoted paths
+      # (`"scripts/x.sh"`), assignments with spaces in the value (`X="a b" scripts/x.sh`), sudo
+      # with options (`sudo -E scripts/x.sh`), and any other wrapper (`env`, `time`, `xargs`).
+      # False positive: `(scripts/x.sh)` on a line that is not a whole-line comment, e.g. inside
+      # an echo string or after a trailing `# …`. Reword such a line rather than weaken the check.
+      # Tested against the current workflows (0 hits) and positive/negative cases. -H keeps the
+      # `file:line:` prefix the comment filter strips even if the glob ever matches one file.
+      - name: Workflows call scripts/*.sh through bash
+        run: |
+          if grep -HnE '(^[[:space:]]*(-[[:space:]]+)?(run:[[:space:]]*)?|[;&|(][[:space:]]*)((then|else|do|sudo|[A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*)[[:space:]]+)*(\./)?scripts/[A-Za-z0-9._/-]+\.sh' \
+               .github/workflows/*.yml | grep -vE '^[^:]+:[0-9]+:[[:space:]]*#'; then
+            echo "::error::run scripts/*.sh as 'bash scripts/…' — the repo does not keep the +x bit (docs/RELEASING-FORK.md)"
+            exit 1
+          fi
 
       # `components: rustfmt` rather than the default toolchain: nothing here compiles, so the rest
       # would only be download time.
@@ -90,12 +111,12 @@ jobs:
         working-directory: ui
         run: pnpm test
 
-  # The Rust half. `limusic-app` links libmpv and webkit2gtk, so this job pays for an apt install
+  # The Rust half. `limusic-forge` links libmpv and webkit2gtk, so this job pays for an apt install
   # and a cold compile that the rustfmt job deliberately avoids. That is why it is a separate job:
   # rustfmt still answers in seconds while this one runs.
   #
   # `cargo test --all` and not a pure-Rust subset: `crates/player` depends on libmpv2, so it
-  # needs the same system libraries `limusic-app` does. The subset that builds bare is
+  # needs the same system libraries `limusic-forge` does. The subset that builds bare is
   # `-p innertube -p listen-protocol`, which is not worth a second job.
   #
   # This is also the only place `macos_window_config_mirrors_the_base_window` runs. Nobody here

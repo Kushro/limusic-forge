@@ -106,6 +106,28 @@ pub fn remove_folder(db: &Db, path: &str) {
     set_folders(db, &list);
 }
 
+/// Set once the download folder has been offered to the library. Never cleared: what the user
+/// does with the folder afterwards is theirs to decide.
+const DOWNLOADS_ADDED_SETTING: &str = "downloads.folder_added";
+
+/// The first finished download puts its folder in the library, so what was downloaded plays
+/// offline from the Local tab. Once only: a user who takes the folder out keeps it out, whatever
+/// is downloaded next. `true` when the folder list changed (not when the folder was already
+/// watched, itself or through a parent).
+///
+/// Only audio shows up there: a downloaded video is `.mp4`/`.webm`, which `AUDIO_EXT` leaves out.
+/// A file's title and artist come from its tags (yt-dlp runs with `--embed-metadata`), and from
+/// the file name only when it carries none.
+pub fn adopt_download_folder(db: &Db, dir: &str) -> bool {
+    if db.get_setting(DOWNLOADS_ADDED_SETTING).is_some_and(|v| !v.is_empty()) {
+        return false;
+    }
+    db.set_setting(DOWNLOADS_ADDED_SETTING, "1");
+    let before = folders(db);
+    add_folder(db, dir.to_owned());
+    folders(db) != before
+}
+
 // --- scanning -----------------------------------------------------------------------------------
 
 /// Re-read the watched folders and return the whole library. Files whose mtime hasn't moved keep
@@ -684,8 +706,7 @@ pub fn allow_music_paths(app: &tauri::AppHandle, db: &Db) {
 /// The covers directory, alongside the SQLite file (not inside the audio cache — "Clear caches"
 /// must not wipe artwork that only a full re-tag would regenerate).
 pub fn covers_dir(app: &tauri::AppHandle) -> PathBuf {
-    use tauri::Manager;
-    app.path().app_data_dir().unwrap_or_else(|_| std::env::temp_dir()).join("covers")
+    crate::paths::data_dir(app).join("covers")
 }
 
 #[cfg(test)]
@@ -871,6 +892,33 @@ mod tests {
         assert_eq!(folders(&db), vec!["/music".to_string(), "/other".to_string()]);
         remove_folder(&db, "/music");
         assert_eq!(folders(&db), vec!["/other".to_string()]);
+    }
+
+    #[test]
+    fn the_download_folder_joins_the_library_once() {
+        let db = Db::open(Path::new(":memory:")).unwrap();
+        add_folder(&db, "/music".into());
+        assert!(adopt_download_folder(&db, "/dl"), "the first download adds its folder");
+        assert_eq!(folders(&db), vec!["/music".to_string(), "/dl".to_string()]);
+        assert!(!adopt_download_folder(&db, "/dl"), "a second download changes nothing");
+
+        // Taken out by the user: the next download leaves it out.
+        remove_folder(&db, "/dl");
+        assert!(!adopt_download_folder(&db, "/dl"));
+        assert!(!adopt_download_folder(&db, "/elsewhere"), "nor a folder moved since");
+        assert_eq!(folders(&db), vec!["/music".to_string()]);
+    }
+
+    #[test]
+    fn a_download_folder_already_watched_is_not_added_twice() {
+        let db = Db::open(Path::new(":memory:")).unwrap();
+        add_folder(&db, "/music".into());
+        assert!(!adopt_download_folder(&db, "/music/Downloads"), "covered by its parent");
+        assert_eq!(folders(&db), vec!["/music".to_string()]);
+        // Still counts as the one time: removing /music later does not bring Downloads in.
+        remove_folder(&db, "/music");
+        assert!(!adopt_download_folder(&db, "/music/Downloads"));
+        assert!(folders(&db).is_empty());
     }
 
     #[test]

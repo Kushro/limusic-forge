@@ -52,7 +52,7 @@ enum Leg {
     Streams(i32),
     /// Resolved, but googlevideo will not serve the whole file (the KI-11 cap).
     Capped(i32),
-    /// Needs the cipher and a minted PoToken, which live in `limusic-app`, not here.
+    /// Needs the cipher and a minted PoToken, which live in `limusic-forge`, not here.
     NotTestableHere,
     Failed(String),
 }
@@ -666,7 +666,7 @@ async fn rustypipe_url_streams_to_the_end() {
 }
 
 /// The two community registries `src-tauri/src/cipher/config.rs` reads. Duplicated here on purpose:
-/// they live in `limusic-app`, which this crate cannot depend on, and a nightly that had to build
+/// they live in `limusic-forge`, which this crate cannot depend on, and a nightly that had to build
 /// libmpv and WebKitGTK to check a JSON file would not be run.
 // ponytail: hand-synced with `cipher::config::REGISTRY_URLS`. If that list ever changes, change
 // this; the cost of being wrong is a false red on a nightly, not a shipped bug.

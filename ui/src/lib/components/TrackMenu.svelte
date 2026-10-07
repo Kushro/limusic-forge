@@ -24,8 +24,16 @@
 		Vynil02Icon,
 		DashboardSquare02Icon,
 		Share08Icon,
-		PreferenceVerticalIcon
+		PreferenceVerticalIcon,
+		Download04Icon,
+		FolderOpenIcon,
+		RefreshIcon,
+		Delete02Icon,
+		Cancel01Icon,
+		MusicNote01Icon,
+		Video01Icon
 	} from '@hugeicons/core-free-icons';
+	import * as downloads from '$lib/downloads.svelte';
 	import * as api from '$lib/api';
 	import type { SongItem } from '$lib/api';
 	import { anchorMenu, ctxHost, fitMenu, NO_ANCHOR, toBody } from '$lib/menu';
@@ -110,6 +118,8 @@
 		e.stopPropagation();
 		anchor = anchorMenu(e, { align: 'right' });
 		menuOpen = true;
+		// Hosts other than a track row (cards, the player bar) never asked; a cached id is skipped.
+		if (!isLocal) downloads.track([song.video_id]);
 	}
 	// stopPropagation everywhere: the trigger sits inside a clickable row (TrackRow's whole row is a
 	// play target), so its click must not reach the row's onplay (e.g. replacing the queue with the
@@ -140,6 +150,19 @@
 	// "Remove from this playlist", for a row playing out of a playlist (issue #270). What the three
 	// conditions are and why is in `removableFromPlaylist` (queue.ts), where they are checkable.
 	const removable = $derived(removableFromPlaylist(song, playlistId, savedIn.map));
+
+	// Downloads act on the row that speaks for the video (`statusOf`): with an audio and a video
+	// row, the one moving, else the file that is there, else the one that failed.
+	const dlState = $derived(isLocal ? 'none' : downloads.statusOf(song.video_id));
+	const dlRow = $derived.by(() => {
+		if (dlState === 'none') return undefined;
+		const rows = downloads.rowsOf(song.video_id);
+		if (dlState === 'running') {
+			const format = downloads.progressOf(song.video_id)?.format;
+			return rows.find((r) => r.format === format) ?? rows.find((r) => r.status === 'running');
+		}
+		return rows.find((r) => r.status === dlState);
+	});
 
 	// "Play next" on a track that is already coming up in the queue moves it into the Play next block
 	// rather than queueing a second copy. A row the user queued, the backend moves by itself
@@ -391,6 +414,78 @@
 			>
 				<HugeiconsIcon icon={PlayListAddIcon} class="h-4 w-4" /> {t('player.save_to_playlist')}
 			</button>
+		{/if}
+		<!-- Downloads. Nothing yet: Download in the default format, with audio and video as the two
+		     small buttons on the right (one row, two targets, like Play/Shuffle on a playlist's
+		     menu). Otherwise what the row it has allows. Remove forgets the row, never the file. -->
+		{#if !isLocal}
+			{#if dlState === 'none'}
+				<div class="flex items-center rounded-md hover:bg-accent/10">
+					<button
+						class="flex flex-1 cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm"
+						onclick={(e) => run(e, () => downloads.enqueue([song]))}
+					>
+						<HugeiconsIcon icon={Download04Icon} class="h-4 w-4" /> {t('downloads.download')}
+					</button>
+					<button
+						class="flex h-6 w-6 shrink-0 cursor-pointer items-center justify-center rounded-md hover:bg-accent/20"
+						title={t('downloads.download_audio')}
+						aria-label={t('downloads.download_audio')}
+						onclick={(e) => run(e, () => downloads.enqueue([song], 'audio'))}
+					>
+						<HugeiconsIcon icon={MusicNote01Icon} class="h-4 w-4" />
+					</button>
+					<button
+						class="mr-1 flex h-6 w-6 shrink-0 cursor-pointer items-center justify-center rounded-md hover:bg-accent/20"
+						title={t('downloads.download_video')}
+						aria-label={t('downloads.download_video')}
+						onclick={(e) => run(e, () => downloads.enqueue([song], 'video'))}
+					>
+						<HugeiconsIcon icon={Video01Icon} class="h-4 w-4" />
+					</button>
+				</div>
+			{:else if dlState === 'queued' || dlState === 'running'}
+				{@const format = dlRow?.format ?? downloads.progressOf(song.video_id)?.format}
+				{#if format}
+					<button
+						class="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm hover:bg-accent/10"
+						onclick={(e) => run(e, () => downloads.remove(song.video_id, format))}
+					>
+						<HugeiconsIcon icon={Cancel01Icon} class="h-4 w-4" /> {t('downloads.cancel')}
+					</button>
+				{/if}
+			{:else if dlRow}
+				{@const row = dlRow}
+				{#if row.status === 'available'}
+					<button
+						class="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm hover:bg-accent/10"
+						onclick={(e) => run(e, downloads.showFolder)}
+					>
+						<HugeiconsIcon icon={FolderOpenIcon} class="h-4 w-4" /> {t('downloads.show_in_folder')}
+					</button>
+					<button
+						class="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm hover:bg-accent/10"
+						onclick={(e) => run(e, () => downloads.enqueue([song], row.format, true))}
+					>
+						<HugeiconsIcon icon={RefreshIcon} class="h-4 w-4" /> {t('downloads.redownload')}
+					</button>
+				{:else}
+					<button
+						class="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm hover:bg-accent/10"
+						title={row.error ?? undefined}
+						onclick={(e) => run(e, () => downloads.retry(song.video_id, row.format))}
+					>
+						<HugeiconsIcon icon={RefreshIcon} class="h-4 w-4" /> {t('downloads.retry')}
+					</button>
+				{/if}
+				<button
+					class="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm hover:bg-accent/10"
+					title={t('downloads.remove_hint')}
+					onclick={(e) => run(e, () => downloads.remove(song.video_id, row.format))}
+				>
+					<HugeiconsIcon icon={Delete02Icon} class="h-4 w-4" /> {t('downloads.remove')}
+				</button>
+			{/if}
 		{/if}
 		{#if onRemove}
 			<button

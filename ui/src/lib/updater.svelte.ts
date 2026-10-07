@@ -9,9 +9,11 @@ import { t } from './i18n.svelte';
 import { friendlyNetError } from './neterr';
 import { canSelfUpdate, checkBetaUpdate, getSettings, openExternal, releaseNotes } from './api';
 import { isNewer, isPrerelease } from './version';
+// The fork's `-forge.N` is stable (D1): only rc/beta/alpha builds count as prereleases here.
+import { REPO_URL } from './brand';
 import { getVersion } from '@tauri-apps/api/app';
 
-const RELEASES_URL = 'https://github.com/SimoHypers/limusic/releases/latest';
+const RELEASES_URL = `${REPO_URL}/releases/latest`;
 
 /** How often the quiet check repeats while the app stays open. */
 export const QUIET_INTERVAL_MS = 6 * 60 * 60 * 1000;

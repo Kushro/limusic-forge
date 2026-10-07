@@ -18,14 +18,18 @@
 		BookPlusIcon,
 		DashboardSquare02Icon,
 		PlayListAddIcon,
+		RefreshIcon,
 		Share08Icon,
-		UserBlock01Icon
+		UserBlock01Icon,
+		Download04Icon
 	} from '@hugeicons/core-free-icons';
+	import { enqueue as enqueueDownloads } from '$lib/downloads.svelte';
 	import * as api from '$lib/api';
 	import type { BrowseItem } from '$lib/api';
 	import { addItemToPlaylist, enqueueItem, playItem } from '$lib/browse';
 	import { anchorMenu, ctxHost, fitMenu, NO_ANCHOR, toBody } from '$lib/menu';
 	import { t } from '$lib/i18n.svelte';
+	import { syncLine } from '$lib/plsort';
 	import {
 		addPick,
 		addToLibrary,
@@ -148,6 +152,53 @@
 			toast.error(String(e));
 		} finally {
 			saving = false;
+		}
+	}
+
+	// The monitor reads only YouTube playlists you own (or Liked Music): a local playlist or On Repeat
+	// has nothing on YouTube to read, and someone else's playlist is skipped by the sync itself.
+	const canSync = $derived(
+		item.kind === 'playlist' && onYouTube && owned && !!auth.account?.signedIn
+	);
+	// Closes at once: a sync takes a while and its toast is the answer. The row's line and the
+	// playlist page catch up on `playlist-index-synced`.
+	async function syncNow() {
+		try {
+			const s = await api.syncPlaylist(item.id);
+			const changes = syncLine(s);
+			toast.success(
+				changes ? t('library.sync_done', { changes }) : t('library.sync_no_changes')
+			);
+		} catch (e) {
+			const msg = String(e);
+			if (msg === 'busy') toast(t('monitor.busy'));
+			else if (msg === 'unreadable') toast.error(t('library.sync_unreadable'));
+			else toast.error(msg);
+		}
+	}
+
+	// Every track, not the first page: `playlist_rows` reads an account playlist to the end and a
+	// local one from SQLite (local files in it are skipped by the queue). An album is one page.
+	// On Repeat and folders on this disk have nothing to download.
+	const canDownload = $derived(
+		item.id !== api.ON_REPEAT_ID &&
+			((item.kind === 'playlist' && (onYouTube || api.isLocalPlaylist(item.id))) ||
+				(item.kind === 'album' && onYouTube))
+	);
+	// Same shape as `queue`: the tracks come first, so the menu stays open until they are queued.
+	let downloading = $state(false);
+	async function downloadAll() {
+		if (downloading) return;
+		downloading = true;
+		try {
+			const songs =
+				item.kind === 'album' ? (await api.getAlbum(item.id)).items : await api.playlistRows(item.id);
+			await enqueueDownloads(songs);
+			menuOpen = false;
+		} catch (e) {
+			toast.error(t('downloads.enqueue_failed', { error: String(e) }));
+		} finally {
+			downloading = false;
 		}
 	}
 
@@ -293,6 +344,32 @@
 				}}
 			>
 				<HugeiconsIcon icon={PlayListAddIcon} class="h-4 w-4" /> {t('player.save_to_playlist')}
+			</button>
+		{/if}
+		{#if canDownload}
+			<button
+				class="flex w-full cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm hover:bg-accent/10 disabled:opacity-50"
+				disabled={downloading}
+				onclick={(e) => {
+					e.stopPropagation();
+					downloadAll();
+				}}
+			>
+				<HugeiconsIcon icon={Download04Icon} class="h-4 w-4" />
+				{downloading
+					? t('common.loading')
+					: item.kind === 'album'
+						? t('downloads.download_album')
+						: t('downloads.download_playlist')}
+			</button>
+		{/if}
+		{#if canSync}
+			<button
+				class="flex w-full cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm hover:bg-accent/10"
+				title={t('library.sync_tooltip')}
+				onclick={(e) => run(e, syncNow)}
+			>
+				<HugeiconsIcon icon={RefreshIcon} class="h-4 w-4" /> {t('library.sync')}
 			</button>
 		{/if}
 		<button

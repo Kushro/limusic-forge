@@ -340,7 +340,6 @@
 			"updates": "",
 			"report": "",
 			"whats_new": "",
-			"support": "",
 			"discord_status": "",
 			"discord_card": "",
 			"discord_links": "",
@@ -350,7 +349,6 @@
 			"language": "",
 			"language_hint": "",
 			"language_search": "",
-			"language_contribute": "",
 			"shortcuts_hint": "",
 			"autostart": "",
 			"autostart_hint": "",
@@ -531,10 +529,7 @@
 			"diagnostics_saved": "",
 			"report_issue": "",
 			"report_issue_hint": "",
-			"report_issue_button": "",
-			"kofi": "",
-			"kofi_hint": "",
-			"kofi_button": ""
+			"report_issue_button": ""
 		},
 		"discord": {
 			"enable": "",

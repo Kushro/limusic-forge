@@ -83,12 +83,22 @@ impl Status {
     }
 }
 
-/// The server a user gets when they have set none of their own. Kept out of the UI on purpose:
-/// the settings field seeds empty, `snapshot_of` reports it empty, and an invite minted on it is a
-/// bare room code, so nobody has to see (or retype) somebody else's hostname to listen together.
-/// An empty `server_url` means "this one", resolved at connect time in [`LtSession::run`], so
-/// clearing the field is how a self-hoster comes back to the default.
-const DEFAULT_SERVER: &str = "wss://fedora-1.tail9c4985.ts.net/ws";
+/// The server a user gets when they have set none of their own. The fork ships none: upstream's
+/// default is somebody else's machine, so a Forge user points Listen Together at a server they run
+/// (`crates/sync-server`, see docs/RELEASING-FORK.md). Kept as a constant so a build that does
+/// host one can fill it in; empty means "no default", and [`resolve_server`] then refuses to
+/// connect instead of dialing nothing.
+const DEFAULT_SERVER: &str = "";
+
+/// The server to connect to: the user's own `server_url` when set, else [`DEFAULT_SERVER`], else
+/// none at all (`None`), which [`LtSession::run`] reports instead of trying to connect.
+fn resolve_server(stored: &str) -> Option<String> {
+    [stored.trim(), DEFAULT_SERVER.trim()].into_iter().find(|s| !s.is_empty()).map(str::to_string)
+}
+
+/// The notice for a Host/Join with no server to connect to.
+const NO_SERVER_NOTICE: &str =
+    "No Listen Together server is set. Enter your server's address in the Listen Together panel.";
 
 #[derive(Default)]
 struct Inner {
@@ -319,10 +329,12 @@ impl LtSession {
             if self.gen.load(Ordering::SeqCst) != gen {
                 return;
             }
-            let mut url = self.inner.lock().await.server_url.clone();
-            if url.is_empty() {
-                url = DEFAULT_SERVER.to_string();
-            }
+            let stored = self.inner.lock().await.server_url.clone();
+            let Some(url) = resolve_server(&stored) else {
+                tracing::warn!("listen-together: no server configured");
+                self.close_locally(NO_SERVER_NOTICE).await;
+                return;
+            };
             {
                 let mut inner = self.inner.lock().await;
                 inner.connecting = true;
@@ -775,6 +787,18 @@ async fn connect_first(addrs: &[SocketAddr]) -> std::io::Result<TcpStream> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The fork ships no default server: with nothing stored there is nothing to connect to.
+    #[test]
+    fn resolve_server_empty_is_none() {
+        assert_eq!(DEFAULT_SERVER, "");
+        assert_eq!(resolve_server(""), None);
+        assert_eq!(resolve_server("   "), None);
+        assert_eq!(
+            resolve_server(" wss://lt.example.test/ws ").as_deref(),
+            Some("wss://lt.example.test/ws")
+        );
+    }
 
     /// The bug: a dead address ahead of a live one used to cost a full OS SYN timeout (~127s on
     /// Linux, six minutes across Funnel's three AAAA records). It must now fall through fast.

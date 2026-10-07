@@ -2,6 +2,11 @@
 
 Thanks for wanting to help. This is a small project, so this is short.
 
+LiMusic Forge is a fork of [LiMusic](https://github.com/SimoHypers/limusic). Issues and pull
+requests for the fork go to [Kushro/limusic-forge](https://github.com/Kushro/limusic-forge). If a
+bug also exists in upstream LiMusic and has nothing to do with what the fork adds, consider
+reporting it upstream too.
+
 ## Getting set up
 
 Prerequisites and the build are in the [README](README.md#building-from-source).
@@ -40,7 +45,7 @@ commas). Match the style of the file you are in.
 
 ```bash
 cargo test --all                                        # everything, no network
-cargo test -p limusic-app --lib -- --ignored --nocapture   # hits live lyrics APIs
+cargo test -p limusic-forge --lib -- --ignored --nocapture # hits live lyrics APIs
 cd ui && pnpm check                                     # svelte-check + types
 ```
 
@@ -58,7 +63,7 @@ cargo test -p innertube --features integration-tests -- --nocapture
 
 Run these after changing the client list, the cipher, or anything in the resolve
 path. A failure usually means YouTube changed something rather than that your
-patch is wrong; `.github/workflows/stream-health.yml` runs them nightly and says
+patch is wrong; `.github/workflows/stream-health.yml` runs them in CI and says
 what each one means.
 
 On macOS the test binaries link libmpv just like the app does, so they need the
@@ -74,9 +79,8 @@ setup.
 
 ## Pull requests
 
-- **Target `dev`, not `master`.** Every change lands on `dev` first, and `master`
-  only moves when a release is cut from it. Branch from `dev` and pick it as the
-  base when you open the PR.
+- **Target `master`.** The fork has a single long-lived branch; releases are cut
+  from tags on it.
 - **Open from a branch, not your fork's `master`.** It keeps your default branch
   clean and makes it much easier to take your changes.
 - **Changing how the app looks or behaves? Open an issue first.** Describe what
@@ -99,21 +103,24 @@ setup.
 Translations live in `ui/src/lib/locales/` as nested JSON, one file per language,
 with `en.json` as the source of truth.
 
-**Use [Weblate](https://hosted.weblate.org/projects/limusic/) rather than editing
-the JSON by hand.** It shows you the English original beside each string, flags
-translations that went stale when the English changed, and opens the pull request
-for you. Hand-edited JSON tends to drift out of sync with `en.json` within a
-release or two.
+**Translations are done by pull request.** The fork does not use a hosted
+translation service: edit the JSON file for your language directly and open a PR.
+Keep the key structure identical to `en.json` and only change the values. Every
+string the fork adds goes into `en.json` (and `es.json`) in the same PR that adds
+the UI; other languages can catch up later.
 
-Two things to know:
+Three things to know:
 
 - Placeholders like `{count}` and `{playlist}` are substituted at runtime. Keep
   them spelled exactly as they are in the English string; you can move them
   around the sentence freely.
 - A missing key is not a bug. Anything a catalog does not have falls back to
   English at runtime, so a partial translation is safe to ship.
+- An empty string (`""`) counts as missing too, so leaving a value blank is the
+  same as not translating it.
 
-Adding a new language: Weblate creates the JSON file, then import it in
+Adding a new language: copy `en.json` to the new language's file name, translate
+it, then import it in
 `ui/src/lib/locales/index.ts` and add the locale to `LocaleId`, `LOCALES` and
 `translations` there so the picker offers it.
 

@@ -106,7 +106,7 @@
 		"sign_in_hint": "Melde dich mit deinem Google-Konto an, um auf deine YouTube Music-Bibliothek und Playlists zuzugreifen.",
 		"add_account": "Konto hinzufügen",
 		"remove_account": "Konto entfernen",
-		"remove_account_title": "Aus Limusic entfernen?",
+		"remove_account_title": "Aus LiMusic Forge entfernen?",
 		"remove_account_desc": "„{name}“ wird nur aus dieser Liste entfernt. Das Google-Konto selbst bleibt unberührt und du kannst dich jederzeit wieder anmelden.",
 		"saved_accounts_hint": "Wähle ein gespeichertes Konto aus, um dorthin zu wechseln.",
 		"history": "Verlauf",
@@ -335,7 +335,6 @@
 			"updates": "Updates",
 			"report": "Problem melden",
 			"whats_new": "Was ist neu",
-			"support": "Unterstützung",
 			"discord_status": "Status",
 			"discord_card": "Statuskarte",
 			"discord_links": "Klickbare Links",
@@ -346,26 +345,25 @@
 			"language_hint": "Wähle die Anzeigesprache für die Benutzeroberfläche aus.",
 			"shortcuts_hint": "Tastenkombinationen mit {key} aufrufen",
 			"autostart": "Beim Systemstart ausführen",
-			"autostart_hint": "Limusic beim Hochfahren des Computers automatisch starten.",
+			"autostart_hint": "LiMusic Forge beim Hochfahren des Computers automatisch starten.",
 			"close_to_tray": "In den Infobereich minimieren",
-			"close_to_tray_hint": "Limusic beim Schließen des Fensters im Hintergrund weiterlaufen lassen.",
+			"close_to_tray_hint": "LiMusic Forge beim Schließen des Fensters im Hintergrund weiterlaufen lassen.",
 			"system_titlebar": "System-Titelleiste verwenden",
-			"system_titlebar_hint": "Den nativen Fensterrahmen des Betriebssystems verwenden. Limusic platziert seine Werkzeugleiste darunter.",
+			"system_titlebar_hint": "Den nativen Fensterrahmen des Betriebssystems verwenden. LiMusic Forge platziert seine Werkzeugleiste darunter.",
 			"discord_rpc": "Discord Rich Presence",
 			"discord_rpc_hint": "Den aktuell wiedergegebenen Song in deinem Discord-Profil anzeigen.",
 			"update_banner": "Update-Benachrichtigungen",
-			"update_banner_hint": "Ein Banner anzeigen, sobald eine neuere Version von Limusic verfügbar ist.",
+			"update_banner_hint": "Ein Banner anzeigen, sobald eine neuere Version von LiMusic Forge verfügbar ist.",
 			"proxy": "HTTP/HTTPS-Proxy",
 			"proxy_hint": "Alle Netzwerkanfragen über einen benutzerdefinierten Proxy-Server leiten.",
 			"proxy_placeholder": "http://host:port (leer = kein Proxy)",
 			"stream_clients": "Stream-Clients",
 			"stream_clients_hint": "Einen Client deaktivieren, um ihn beim Abrufen von Streams zu überspringen. Wird durch die Umgebungsvariable {var} überschrieben.",
 			"language_search": "Sprachen durchsuchen",
-			"language_contribute": "Hilf mit, Limusic zu übersetzen",
 			"track_notifications": "Titelbenachrichtigungen",
-			"track_notifications_hint": "Eine Benachrichtigung anzeigen, wenn ein neuer Titel startet und Limusic im Hintergrund läuft.",
+			"track_notifications_hint": "Eine Benachrichtigung anzeigen, wenn ein neuer Titel startet und LiMusic Forge im Hintergrund läuft.",
 			"start_minimized": "Minimiert im Infobereich starten",
-			"start_minimized_hint": "Beim automatischen Systemstart bleibt Limusic im Tray minimiert. Manuelles Öffnen zeigt stets das Fenster an."
+			"start_minimized_hint": "Beim automatischen Systemstart bleibt LiMusic Forge im Tray minimiert. Manuelles Öffnen zeigt stets das Fenster an."
 		},
 		"themes": {
 			"interface_font": "Schriftart der Benutzeroberfläche",
@@ -487,9 +485,6 @@
 			"report_issue": "Fehler melden",
 			"report_issue_hint": "Öffnet GitHub im Browser mit vorausgefüllten System- und Versionsdaten.",
 			"report_issue_button": "Melden",
-			"kofi": "Projekt unterstützen",
-			"kofi_hint": "Limusic ist und bleibt kostenlos. Wenn du möchtest, kannst du die Entwicklung über Ko-fi unterstützen.",
-			"kofi_button": "Ko-fi öffnen",
 			"rollback_available": "Diese Version wird auf {version} (die letzte als stabil bekannte Version) zurückgesetzt.",
 			"beta": "Beta-Versionen",
 			"beta_hint": "Erhalte Vorabversionen einige Tage früher. Diese sind möglicherweise weniger gründlich getestet."
@@ -508,8 +503,8 @@
 			"status_line1": "Zeile 1",
 			"status_line2": "Zeile 2",
 			"app_name": "App-Name",
-			"app_name_hint": "Ersetzt den Namen „Limusic“ überall dort, wo die App aufgeführt wird. Leer lassen, um den Standard beizubehalten.",
-			"app_name_placeholder": "Limusic",
+			"app_name_hint": "Ersetzt den Namen „LiMusic Forge“ überall dort, wo die App aufgeführt wird. Leer lassen, um den Standard beizubehalten.",
+			"app_name_placeholder": "LiMusic Forge",
 			"line1": "Zeile 1",
 			"line1_hint": "Die fett hervorgehobene Zeile direkt unter der Überschrift.",
 			"line2": "Zeile 2",
@@ -522,7 +517,7 @@
 			"cover": "Albumcover",
 			"cover_hint": "Das Artwork neben dem Songtitel anzeigen.",
 			"badge": "Anbieter-Logo",
-			"badge_hint": "Kennzeichnet das Artwork mit einem kleinen Limusic-Symbol (ähnlich wie bei Spotify oder Apple Music).",
+			"badge_hint": "Kennzeichnet das Artwork mit einem kleinen LiMusic-Forge-Symbol (ähnlich wie bei Spotify oder Apple Music).",
 			"line3": "Zeile 3",
 			"line3_hint": "Die unterste Zeile. Discord nutzt diesen Text auch als Tooltip für das Coverbild (erfordert aktiviertes Albumcover).",
 			"timestamps": "Fortschrittsbalken",
@@ -537,7 +532,7 @@
 			"button_listen": "Auf YouTube Music anhören",
 			"button_album": "Album ansehen",
 			"button_artist": "Künstler ansehen",
-			"button_app": "Limusic herunterladen",
+			"button_app": "LiMusic Forge herunterladen",
 			"button_off": "Keine",
 			"preview": "Vorschau",
 			"preview_live": "Aktuelle Wiedergabe",
@@ -550,7 +545,7 @@
 		},
 		"hotkeys": {
 			"title": "Globale Hotkeys",
-			"description": "Steuere die Wiedergabe über frei wählbare Tastenkombinationen – selbst wenn Limusic minimiert ist oder im Hintergrund läuft.",
+			"description": "Steuere die Wiedergabe über frei wählbare Tastenkombinationen – selbst wenn LiMusic Forge minimiert ist oder im Hintergrund läuft.",
 			"enable": "Globale Hotkeys aktivieren",
 			"enable_hint": "Globale Hotkeys sind derzeit ausgeschaltet. Aktiviere sie, um Tastenkürzel systemweit zu nutzen.",
 			"off": "Aus",
@@ -585,7 +580,7 @@
 			"action_toggle_repeat": "Wiederholmodus umschalten",
 			"action_toggle_repeat_hint": "Wiederholmodus durchschalten: Aus, Alle, Einzeln.",
 			"action_show_app": "App in den Vordergrund",
-			"action_show_app_hint": "Das Limusic-Fenster in den Vordergrund holen."
+			"action_show_app_hint": "Das LiMusic-Forge-Fenster in den Vordergrund holen."
 		}
 	},
 	"dialogs": {
@@ -714,7 +709,7 @@
 		"discord_tooltip_off": "Gespielte Musik auf Discord anzeigen",
 		"lastfm_scrobbling_as": "Scrobbeln als {user}",
 		"lastfm_disconnected": "Last.fm getrennt",
-		"lastfm_approve_in_browser": "Limusic im Browser autorisieren",
+		"lastfm_approve_in_browser": "LiMusic Forge im Browser autorisieren",
 		"lastfm_connecting": "Verbindung zu Last.fm wird hergestellt – Klick zum Abbrechen",
 		"lastfm_scrobble_to": "Zu Last.fm scrobbeln",
 		"disconnect": "Trennen"
@@ -919,7 +914,7 @@
 	"errors": {
 		"unreachable": "YouTube Music kann nicht erreicht werden. Bitte überprüfe deine Verbindung.",
 		"offline_title": "Keine Verbindung",
-		"offline_body": "Limusic kann YouTube Music nicht erreichen. Überprüfe deine Internetverbindung und versuche es erneut.",
+		"offline_body": "LiMusic Forge kann YouTube Music nicht erreichen. Überprüfe deine Internetverbindung und versuche es erneut.",
 		"generic_title": "Etwas ist schiefgelaufen"
 	}
 }

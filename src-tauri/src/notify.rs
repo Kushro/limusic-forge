@@ -2,7 +2,7 @@
 //! setting. Off by default: Linux desktops already show the MPRIS widget, and a notification per
 //! song is a preference, not something everyone wants.
 //!
-//! Only while no Limusic window has focus: a song change the user is looking at needs no toast.
+//! Only while no LiMusic Forge window has focus: a song change the user is looking at needs no toast.
 //! Best-effort like `media.rs`: a missing notification daemon is a `debug!` line.
 
 #[cfg(all(unix, not(target_os = "macos")))]
@@ -20,7 +20,7 @@ pub fn track_changed(app: &AppHandle, title: &str, artists: &str) {
         return;
     }
     let mut n = notify_rust::Notification::new();
-    n.summary(title).body(artists).appname("Limusic");
+    n.summary(title).body(artists).appname(crate::brand::APP_NAME);
     #[cfg(all(unix, not(target_os = "macos")))]
     {
         // The binary name is the icon name the .deb/.rpm install. An AppImage has no themed icon,
@@ -29,9 +29,9 @@ pub fn track_changed(app: &AppHandle, title: &str, artists: &str) {
     }
     // A toast is only delivered for an AppUserModelID that a Start menu shortcut registers, and the
     // NSIS installer registers the bundle identifier. A dev build has no shortcut, so it keeps
-    // notify-rust's default (PowerShell's).
+    // notify-rust's default (PowerShell's). Neither has a portable copy, which installs nothing.
     #[cfg(target_os = "windows")]
-    if !tauri::is_dev() {
+    if !tauri::is_dev() && !crate::paths::is_portable() {
         n.app_id(&app.config().identifier);
     }
     // Which app macOS files the notification under. Errors after the first call (it is set once per
@@ -59,4 +59,42 @@ pub fn track_changed(app: &AppHandle, title: &str, artists: &str) {
             Err(e) => tracing::debug!("notification: {e}"),
         }
     });
+}
+
+/// A playlist check (headless.rs) found something: one toast, its text already in the user's
+/// language (D33). Unlike [`track_changed`] it is not a preference: alerts are what the check is
+/// for. Skipped while a LiMusic Forge window has focus, where the alerts badge already says it.
+/// `wait`: show it before returning, for a headless run that exits right after; otherwise off the
+/// calling thread.
+pub fn monitor_toast(app: &AppHandle, title: &str, body: &str, wait: bool) {
+    if app.webview_windows().values().any(|w| w.is_focused().unwrap_or(false)) {
+        return;
+    }
+    let mut n = notify_rust::Notification::new();
+    n.summary(title).body(body).appname(crate::brand::APP_NAME);
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        n.auto_icon();
+    }
+    // As in `track_changed`: only the installer registers the AppUserModelID a toast needs.
+    #[cfg(target_os = "windows")]
+    if !tauri::is_dev() && !crate::paths::is_portable() {
+        n.app_id(&app.config().identifier);
+    }
+    #[cfg(target_os = "macos")]
+    let _ = notify_rust::set_application(if tauri::is_dev() {
+        "com.apple.Terminal"
+    } else {
+        &app.config().identifier
+    });
+    let show = move || {
+        if let Err(e) = n.show() {
+            tracing::warn!("monitor notification: {e}");
+        }
+    };
+    if wait {
+        show();
+    } else {
+        std::thread::spawn(show);
+    }
 }

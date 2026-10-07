@@ -37,7 +37,7 @@
 	/** Discord's own wording, deliberately untranslated — see the note at the top. */
 	const LISTENING_TO = 'Listening to';
 
-	const appName = $derived(cfg.app_name.trim() || 'Limusic');
+	const appName = $derived(cfg.app_name.trim() || 'LiMusic Forge');
 	// The profile card's header is *always* the application name. `status_display_type` only moves
 	// the one-line status Discord writes under your name in the member list, which is why that gets
 	// its own mock below rather than being folded into this header.

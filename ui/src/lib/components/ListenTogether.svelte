@@ -45,6 +45,9 @@
 	const inRoom = $derived(lt.role !== 'none');
 	const isHost = $derived(lt.role === 'host');
 	const onCustomServer = $derived(!!lt.serverUrl);
+	// The fork ships no default server (`DEFAULT_SERVER` in listentogether/mod.rs is empty): then
+	// the address is not an advanced option behind a toggle but a required field, in both modes.
+	const hasDefault = $derived(!!lt.defaultServerUrl);
 	// What a guest has to be sent. On the default server that is the bare room code and nothing
 	// else; a self-hosted room has to carry its address or the code means nothing.
 	const invite = $derived(makeInvite(lt.serverUrl, lt.roomCode ?? ''));
@@ -113,6 +116,7 @@
 		e?.preventDefault();
 		if (!name.trim()) return toast.error(t('dialogs.listen_together.err_enter_name'));
 		const u = normalize(serverUrl);
+		if (!u && !hasDefault) return toast.error(t('dialogs.listen_together.err_enter_server'));
 		busy = true;
 		try {
 			if (u !== lt.serverUrl) await api.ltSetServerUrl(u);
@@ -130,7 +134,9 @@
 		if (!parsed || !parsed.code) return toast.error(t('dialogs.listen_together.err_paste_code'));
 		// A bare code is what a host on the default server sends (`makeInvite`), so it means the
 		// default even for a guest who set their own: a self-hosted room's invite carries its address.
-		const server = parsed.server ? normalize(parsed.server) : '';
+		// With no default, a bare code can only mean the server typed in the field.
+		const server = parsed.server ? normalize(parsed.server) : hasDefault ? '' : normalize(serverUrl);
+		if (!server && !hasDefault) return toast.error(t('dialogs.listen_together.err_enter_server'));
 		busy = true;
 		try {
 			if (server !== lt.serverUrl) await api.ltSetServerUrl(server);
@@ -214,6 +220,26 @@
 					/>
 				</div>
 
+				{#if !hasDefault}
+					<!-- No built-in server in this build: both paths need one, so it is asked here. -->
+					<div class="flex flex-col gap-1.5">
+						<label class="text-xs font-medium text-muted-foreground" for="lt-server">
+							{t('dialogs.listen_together.server_label')}
+						</label>
+						<Input
+							id="lt-server"
+							bind:value={serverUrl}
+							required
+							spellcheck={false}
+							class="font-mono text-xs"
+							placeholder={t('dialogs.listen_together.sync_server_placeholder')}
+						/>
+						<p class="text-xs text-muted-foreground">
+							{t('dialogs.listen_together.server_required_hint')}
+						</p>
+					</div>
+				{/if}
+
 				{#if mode === 'join'}
 					<form class="flex flex-col gap-5" onsubmit={join}>
 						<div class="flex flex-col gap-1.5">
@@ -249,7 +275,9 @@
 						</Button>
 
 						<!-- The server address lives behind this, and nowhere else. Almost nobody runs
-						     one, so the default path never shows a URL at all. -->
+						     one, so the default path never shows a URL at all. Without a default the
+						     field above is the only way in. -->
+						{#if hasDefault}
 						<div class="border-t pt-3">
 							<button
 								type="button"
@@ -290,6 +318,7 @@
 								</div>
 							{/if}
 						</div>
+						{/if}
 					</form>
 				{/if}
 			</div>

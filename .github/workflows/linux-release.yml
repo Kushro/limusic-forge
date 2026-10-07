@@ -29,6 +29,7 @@ name: Linux release binaries
 # Requires repo secrets (same set as the Windows workflow):
 #   TAURI_SIGNING_PRIVATE_KEY / TAURI_SIGNING_PRIVATE_KEY_PASSWORD   (mandatory — no sig, no update)
 #   LASTFM_API_KEY / LASTFM_API_SECRET                               (optional — warn-only)
+#   LIMUSIC_DISCORD_APP_ID                                           (optional — Discord off if absent)
 
 # DISPATCH ONLY, ON PURPOSE — do not add `release: published` back. Actions caches are ref-scoped:
 # a run can read caches from its own ref and from the default branch, nothing else. A run triggered
@@ -107,8 +108,17 @@ jobs:
         run: |
           VERSION="$(jq -r .version src-tauri/tauri.conf.json)"
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"
-          # 1.1.0-rc.1: a release candidate, for the beta channel only (RELEASING.md §8).
-          if [[ "$VERSION" == *-* ]]; then echo "PRERELEASE=true"; else echo "PRERELEASE=false"; fi >> "$GITHUB_ENV"
+          # Prerelease (beta channel only, RELEASING.md §8): drop build metadata (+…), take the suffix
+          # after the FIRST '-', and it is one only if that suffix starts with rc, beta or alpha, any
+          # case. Any other suffix is stable: the fork ships 1.2.0-forge.1 (and 1.2.0-forge.2-rc.1)
+          # as Latest, so `*-*` is NOT the test. Body identical to is_prerelease in
+          # scripts/release.sh and the other two workflows; same rule as isPrerelease in the app.
+          is_prerelease() {
+            local core="${1%%+*}"
+            case "$core" in *-*) ;; *) return 1 ;; esac
+            case "$(printf '%s' "${core#*-}" | tr '[:upper:]' '[:lower:]')" in rc*|beta*|alpha*) return 0 ;; *) return 1 ;; esac
+          }
+          if is_prerelease "$VERSION"; then echo "PRERELEASE=true"; else echo "PRERELEASE=false"; fi >> "$GITHUB_ENV"
           if [ "v$VERSION" != "${{ steps.rel.outputs.tag }}" ]; then
             if [ "${{ inputs.dry_run }}" = "true" ]; then
               echo "::warning::dry run: built ref is ${{ steps.rel.outputs.tag }} but the app version is $VERSION"
@@ -185,7 +195,6 @@ jobs:
           # the ones a music video needs into the AppDir by name.
 
       # pnpm before setup-node, so `cache: pnpm` below can find the binary and cache its store.
-      # Same shape as website.yml.
       - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
         with:
           version: 10
@@ -237,6 +246,9 @@ jobs:
           # Scoped to this step only — no other step (or third-party action) sees the signing key.
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # Public Discord application id for rich presence, baked in by `option_env!` in
+          # discord.rs. Optional: without it the build ships with Discord disabled.
+          LIMUSIC_DISCORD_APP_ID: ${{ secrets.LIMUSIC_DISCORD_APP_ID }}
           # linuxdeploy bundles an ancient `strip` that chokes on modern ELF sections (DT_RELR).
           NO_STRIP: "true"
           # The bundler runs linuxdeploy/appimagetool, themselves AppImages — the runner has no
@@ -250,19 +262,50 @@ jobs:
           fi
           (cd ui && pnpm build)
           # beforeBuildCommand is emptied because we just ran it, deterministically. Left on, tauri
-          # runs `pnpm build` from the repo root — which has no package.json, so which of the two
-          # frontend packages (ui/, website/) pnpm picks is up to the filesystem: Windows resolved
-          # it to ui, Linux to website, whose deps this job never installs. It only works locally
-          # because you run it from ui/.
+          # runs `pnpm build` from the repo root, which has no package.json, so what pnpm builds
+          # there is up to the filesystem rather than this job. It only works locally because you
+          # run it from ui/.
           # A release candidate builds only what the updater installs. The beta channel is its whole
           # audience, and a deb install can't take an update from it anyway.
           BUNDLES=appimage,deb; [ "$PRERELEASE" = false ] || BUNDLES=appimage
+          # A restored target/ could carry bundles from an earlier run; the renaming globs below
+          # must only ever see this build's.
+          rm -f target/release/bundle/appimage/*.AppImage target/release/bundle/appimage/*.AppImage.sig \
+                target/release/bundle/deb/*.deb
           tauri build --bundles "$BUNDLES" --config '{"build":{"beforeBuildCommand":""}}'
           # Strip the bundled TLS trust stack + gio modules out of the AppDir and repack: they are
           # coupled to the build host's config and leave the webview with no TLS backend anywhere
           # else. Repacking invalidates the bundler's signature, so the script re-signs — which is
-          # why it runs inside this step, where the key is in scope.
-          scripts/fix-appdir-tls.sh
+          # why it runs inside this step, where the key is in scope. Called through bash: the repo
+          # does not keep the +x bit on scripts/*.sh (docs/RELEASING-FORK.md).
+          bash scripts/fix-appdir-tls.sh
+
+          # Tauri names every bundle after productName, which has a space ("LiMusic Forge"), so the
+          # AppDir, AppImage and deb come out as "LiMusic Forge_<version>_amd64.*" (the exact
+          # spelling is the bundler's business; it is confirmed by a dry run, hence the globs).
+          # Ship slugs instead: limusic-forge_<version>_<arch>.<ext>, keeping the bundler's arch
+          # token. Done here, after the repack and re-sign above, so every later step sees the final
+          # names. The .sig signs the bytes, not the name, so it moves along unchanged.
+          shopt -s nullglob
+          slug() { # slug <file> -> prints the renamed path
+            local f="$1" to
+            to="$(dirname "$f")/limusic-forge_${VERSION}_${f##*_}"
+            if [ "$f" != "$to" ]; then
+              mv -f "$f" "$to"
+              [ ! -f "$f.sig" ] || mv -f "$f.sig" "$to.sig"
+            fi
+            echo "$to"
+          }
+          B=target/release/bundle
+          appdirs=("$B"/appimage/*.AppDir)
+          [ "${#appdirs[@]}" = 1 ] || { echo "::error::expected one AppDir, found ${#appdirs[@]}"; ls -la "$B/appimage"; exit 1; }
+          # The AppDir is not shipped, so it keeps its name; later steps find it through this.
+          echo "APPDIR=$PWD/${appdirs[0]}" >> "$GITHUB_ENV"
+          appimages=("$B"/appimage/*_"${VERSION}"_*.AppImage)
+          [ "${#appimages[@]}" = 1 ] || { echo "::error::expected one *_${VERSION}_*.AppImage, found ${#appimages[@]}"; ls -la "$B/appimage"; exit 1; }
+          slug "${appimages[0]}"
+          for deb in "$B"/deb/*_"${VERSION}"_*.deb; do slug "$deb"; done
+          ls -la "$B/appimage" "$B/deb" 2>/dev/null || true
 
       # v0.2.11 shipped an AppImage that couldn't start on a host without JACK, because libmpv
       # DT_NEEDs libjack.so.0 and linuxdeploy excludes it. Everything the bundle links must either be
@@ -272,7 +315,7 @@ jobs:
       - name: Check nothing is missing from the bundle
         run: |
           set -euo pipefail
-          APPDIR=target/release/bundle/appimage/limusic.AppDir
+          # $APPDIR comes from the build step (globbed: the bundler names it after productName).
           HOST_BASELINE="ld-linux-x86-64.so.2 libc.so.6 libm.so.6 libresolv.so.2 libgcc_s.so.1
             libstdc++.so.6 libGL.so.1 libEGL.so.1 libGLX.so.0 libGLdispatch.so.0 libOpenGL.so.0
             libdrm.so.2 libgbm.so.1 libwayland-client.so.0 libX11.so.6
@@ -321,7 +364,7 @@ jobs:
       - name: Verify it loads and runs on foreign distros
         run: |
           set -euo pipefail
-          APPDIR="$PWD/target/release/bundle/appimage/limusic.AppDir"
+          # $APPDIR (absolute, may contain a space) comes from the build step.
           CHECK="$PWD/scripts/appdir-foreign-check.sh"
           IMAGES="debian:sid archlinux:latest opensuse/tumbleweed"
 
@@ -352,8 +395,8 @@ jobs:
         run: |
           set -euo pipefail
           FLOOR=2.39   # keep in sync with `runs-on` above
-          APPDIR=target/release/bundle/appimage/limusic.AppDir
-          [ -d "$APPDIR" ] || { echo "::error::no AppDir at $APPDIR — did the bundler change its layout?"; exit 1; }
+          # $APPDIR comes from the build step.
+          [ -d "${APPDIR:-}" ] || { echo "::error::no AppDir at $APPDIR — did the bundler change its layout?"; exit 1; }
           # `|| true`: objdump exits nonzero on the non-ELF files that live under usr/lib (module
           # caches, pkgconfig, …), which under pipefail would fail the step for no reason.
           WORST="$(find "$APPDIR/usr/lib" "$APPDIR/usr/bin" -type f -exec objdump -T {} + 2>/dev/null \
@@ -380,14 +423,17 @@ jobs:
         continue-on-error: true
         run: |
           set -euo pipefail
-          DEB="$(ls target/release/bundle/deb/limusic_${VERSION}_*.deb | head -1)"
-          docker run --rm -v "$PWD/$DEB:/limusic.deb:ro" ubuntu:24.04 bash -c '
+          DEB="$(ls target/release/bundle/deb/limusic-forge_${VERSION}_*.deb | head -1)"
+          docker run --rm -v "$PWD/$DEB:/limusic-forge.deb:ro" ubuntu:24.04 bash -c '
             set -eu
             export DEBIAN_FRONTEND=noninteractive
             apt-get update -qq
-            apt-get install -y --no-install-recommends /limusic.deb
-            BIN="$(dpkg -L limusic | grep "^/usr/bin/" | head -1)"
-            echo "installed $BIN, declared: $(dpkg-query -f "\${Depends}" -W limusic)"
+            apt-get install -y --no-install-recommends /limusic-forge.deb
+            # The package name is derived by the bundler from productName ("LiMusic Forge"), so
+            # read it off the deb rather than guess its spelling (confirmed by a dry run).
+            PKG="$(dpkg-deb -f /limusic-forge.deb Package)"
+            BIN="$(dpkg -L "$PKG" | grep "^/usr/bin/" | head -1)"
+            echo "installed $PKG: $BIN, declared: $(dpkg-query -f "\${Depends}" -W "$PKG")"
             if ldd "$BIN" | grep "not found"; then
               echo "the deb declares nothing that provides the libraries above"
               exit 1
@@ -482,7 +528,8 @@ jobs:
           RELEASE_ID="$(retry 3 gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" --jq .id)"
           [ -n "$RELEASE_ID" ] || { echo "::error::no release found for $TAG"; exit 1; }
 
-          APPIMAGE="$(ls target/release/bundle/appimage/limusic_${VERSION}_*.AppImage 2>/dev/null | head -1 || true)"
+          # Slug names, set by the build step.
+          APPIMAGE="$(ls target/release/bundle/appimage/limusic-forge_${VERSION}_*.AppImage 2>/dev/null | head -1 || true)"
           SIG="$APPIMAGE.sig"
 
           if [ -z "$APPIMAGE" ] || [ ! -f "$APPIMAGE" ]; then
@@ -498,7 +545,7 @@ jobs:
           # support, so there is nothing for a signature to be checked by. Debian users update by
           # downloading the next one. Skipped entirely if it failed its check, which is a warning
           # rather than an error: the release is complete without it.
-          DEB="$(ls target/release/bundle/deb/limusic_${VERSION}_*.deb 2>/dev/null | head -1 || true)"
+          DEB="$(ls target/release/bundle/deb/limusic-forge_${VERSION}_*.deb 2>/dev/null | head -1 || true)"
           if [ "$PRERELEASE" = true ]; then
             echo "release candidate: no deb"
           elif [ "${{ steps.deb_check.outcome }}" != "success" ]; then
@@ -559,8 +606,9 @@ jobs:
           # shared script or composite action would come from the tag and a re-dispatch against an
           # older one would not pick this up. Keep the three copies byte-identical.
           #
-          # A release candidate (a version with a `-`, 1.1.0-rc.1) is never Latest, so no stable
-          # install ever reads it. What it moves instead is the beta pointer: a permanent prerelease
+          # A release candidate (PRERELEASE=true: a -rc*, -beta* or -alpha* version, 1.1.0-rc.1) is
+          # never Latest, so no stable install ever reads it. Any other suffix is stable: the fork
+          # ships 1.2.0-forge.1 as Latest, with its latest.json at /releases/latest/download/. What it moves instead is the beta pointer: a permanent prerelease
           # tagged `beta` holding one latest.json, which installs on the beta channel read
           # (`check_beta_update` in commands.rs). A complete stable release moves the pointer too when
           # it is ahead of what the pointer holds, so beta installs land on 1.1.0 once it ships but
@@ -574,7 +622,7 @@ jobs:
             echo "::notice::not promoting yet, latest.json carries $HAVE and needs $REQUIRED_PLATFORMS"
             exit 0
           fi
-          if [[ "$VERSION" == *-* ]]; then
+          if [ "$PRERELEASE" = true ]; then
             echo "$TAG is a release candidate: never Latest, beta channel only"
           else
             retry 3 gh release edit "$TAG" --latest --repo "$GITHUB_REPOSITORY"
@@ -599,7 +647,7 @@ jobs:
           # An RC exists for the beta channel, so it fails without one; a stable release is complete
           # without it and only warns.
           if ! BETA_ID="$(retry 3 gh api "repos/$GITHUB_REPOSITORY/releases/tags/beta" --jq .id)"; then
-            if [[ "$VERSION" == *-* ]]; then
+            if [ "$PRERELEASE" = true ]; then
               echo "::error::no beta release to point at $TAG, so no install can get it. Create it (RELEASING.md §8) and re-dispatch"
               exit 1
             fi

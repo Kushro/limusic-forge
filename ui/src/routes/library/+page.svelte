@@ -12,7 +12,10 @@
 		Add01Icon,
 		CloudSyncIcon,
 		CloudUploadIcon,
+		DashboardSquare02Icon,
 		DriveIcon,
+		RefreshIcon,
+		Sorting01Icon,
 		MusicNote01Icon,
 		MusicNoteSquare02Icon,
 		Playlist02Icon,
@@ -32,9 +35,12 @@
 	import MediaCard from '$lib/components/MediaCard.svelte';
 	import MediaCardSkeleton from '$lib/components/MediaCardSkeleton.svelte';
 	import ErrorState from '$lib/components/ErrorState.svelte';
-	import type { BrowseItem } from '$lib/api';
+	import ItemMenu from '$lib/components/ItemMenu.svelte';
+	import * as Select from '$lib/components/ui/select';
+	import type { BrowseItem, PlaylistSyncInfo } from '$lib/api';
 	import {
 		auth,
+		monitor,
 		personal,
 		toast,
 		library,
@@ -42,8 +48,23 @@
 		loadLibraryExtras,
 		loadUploadAlbums,
 		openNewPlaylist,
+		syncAllPlaylists,
 		syncSavedToYouTube
 	} from '$lib/player.svelte';
+	import {
+		DEFAULT_SORT,
+		DEFAULT_VIEW,
+		formatSort,
+		infoFor,
+		parseSort,
+		parseView,
+		relativeAgo,
+		sortPlaylists,
+		syncLine,
+		type PlView
+	} from '$lib/plsort';
+	import { openItem } from '$lib/browse';
+	import { thumb } from '$lib/thumb';
 	import { mergeSaved, unsynced } from '$lib/personal';
 	import { reveal } from '$lib/reveal.svelte';
 	import { t } from '$lib/i18n.svelte';
@@ -55,6 +76,12 @@
 	let tab = $state(page.url.searchParams.get('tab') ?? lastTab);
 	$effect(() => {
 		lastTab = tab;
+	});
+	// And on every later navigation to `/library?tab=…` too: SvelteKit keeps this page mounted when
+	// only the query changes, so reading it once at mount left an already-open Library where it was.
+	$effect(() => {
+		const wanted = page.url.searchParams.get('tab');
+		if (wanted) untrack(() => (tab = wanted));
 	});
 	// Uploads splits three ways (all / songs / albums): YouTube Music takes uploaded albums too, and
 	// they are a card grid rather than rows, so they can't just join the track list.
@@ -129,6 +156,100 @@
 			syncing = false;
 		}
 	}
+
+	// --- playlists tab: sort, view, last sync -----------------------------------------------------
+	// Both persisted (`library_playlists_sort`, `library_playlists_view`); see plsort.ts for values.
+	const SORT_OPTIONS = [
+		{ value: 'default', label: 'library.playlists_sort_default' },
+		{ value: 'title', label: 'library.playlists_sort_title' },
+		{ value: 'title:desc', label: 'library.playlists_sort_title_desc' },
+		{ value: 'count:desc', label: 'library.playlists_sort_count_desc' },
+		{ value: 'count', label: 'library.playlists_sort_count' },
+		{ value: 'synced:desc', label: 'library.playlists_sort_synced_desc' },
+		{ value: 'synced', label: 'library.playlists_sort_synced' }
+	] as const;
+	let plSort = $state(formatSort(DEFAULT_SORT));
+	let plView = $state<PlView>(DEFAULT_VIEW);
+	const sortLabel = $derived(
+		t((SORT_OPTIONS.find((o) => o.value === plSort) ?? SORT_OPTIONS[0]).label)
+	);
+	// Playlist id → its last complete sync. SQLite only, so re-read whenever a sync ends.
+	let syncInfo = $state.raw<Record<string, PlaylistSyncInfo>>({});
+	function loadSyncInfo() {
+		api.playlistSyncInfo()
+			.then((i) => (syncInfo = i))
+			.catch(() => {});
+	}
+	// "2 h ago" ages while the page is open: a minute's tick is as fine as the line gets.
+	let now = $state(Date.now() / 1000);
+	onMount(() => {
+		api.getSettings()
+			.then((s) => {
+				plSort = formatSort(parseSort(s.library_playlists_sort));
+				plView = parseView(s.library_playlists_view);
+			})
+			.catch(() => {});
+		loadSyncInfo();
+		const off = api.onPlaylistIndexSynced(loadSyncInfo);
+		const tick = setInterval(() => (now = Date.now() / 1000), 60_000);
+		return () => {
+			clearInterval(tick);
+			void off.then((f) => f());
+		};
+	});
+	const sortedPlaylists = $derived(sortPlaylists(playlists, parseSort(plSort), syncInfo));
+
+	async function chooseSort(value: string) {
+		const before = plSort;
+		plSort = value;
+		try {
+			await api.setSetting('library_playlists_sort', value);
+		} catch (e) {
+			plSort = before;
+			toast.error(String(e));
+		}
+	}
+	async function chooseView(value: PlView) {
+		if (value === plView) return;
+		const before = plView;
+		plView = value;
+		try {
+			await api.setSetting('library_playlists_view', value);
+		} catch (e) {
+			plView = before;
+			toast.error(String(e));
+		}
+	}
+
+	/** "Synced 2 h ago · +3 −1 ~2", or null for a playlist the monitor has not read yet. */
+	function syncedText(id: string): string | null {
+		const info = infoFor(syncInfo, id);
+		if (!info) return null;
+		const a = relativeAgo(info.synced_at, now);
+		const ago = t(`library.sync_ago_${a.unit}`, { n: a.n });
+		const changes = syncLine(info);
+		return changes
+			? t('library.synced_line_changes', { ago, changes })
+			: t('library.synced_line', { ago });
+	}
+
+	// Sync all: the monitor's full run (`syncAllPlaylists`), its progress from `monitor.progress`
+	// whoever started it. The scheduler holding the monitor answers `busy`.
+	let startingSync = $state(false);
+	const syncingAll = $derived(startingSync || monitor.progress !== null);
+	async function syncAll() {
+		if (syncingAll) return;
+		startingSync = true;
+		try {
+			await syncAllPlaylists();
+		} catch (e) {
+			if (String(e) === 'busy') toast(t('monitor.busy'));
+			else toast.error(String(e));
+		} finally {
+			startingSync = false;
+			loadSyncInfo();
+		}
+	}
 </script>
 
 {#snippet grid(items: BrowseItem[], empty: string, rv: ReturnType<typeof reveal>, nudge = false)}
@@ -160,6 +281,133 @@
 		</button>
 		{/if}
 	{/if}
+{/snippet}
+
+<!-- Sort, view and Sync all, over the playlists tab only: the other tabs have neither a sync nor a
+     count to sort by. -->
+{#snippet playlistsToolbar()}
+	<div class="mb-4 flex flex-wrap items-center gap-2">
+		<Select.Root type="single" value={plSort} onValueChange={(v) => v && v !== plSort && chooseSort(v)}>
+			<Select.Trigger size="sm" class="w-56" aria-label={t('library.playlists_sort')}>
+				<HugeiconsIcon icon={Sorting01Icon} class="h-4 w-4 shrink-0" />
+				<span class="flex-1 truncate text-left">{sortLabel}</span>
+			</Select.Trigger>
+			<Select.Content>
+				{#each SORT_OPTIONS as o (o.value)}
+					<Select.Item value={o.value} label={t(o.label)}>{t(o.label)}</Select.Item>
+				{/each}
+			</Select.Content>
+		</Select.Root>
+		<div class="flex items-center rounded-md border p-0.5" role="group">
+			<Button
+				variant={plView === 'grid' ? 'secondary' : 'ghost'}
+				size="icon-sm"
+				aria-label={t('library.view_grid')}
+				aria-pressed={plView === 'grid'}
+				title={t('library.view_grid')}
+				onclick={() => chooseView('grid')}
+			>
+				<HugeiconsIcon icon={DashboardSquare02Icon} class="h-4 w-4" />
+			</Button>
+			<Button
+				variant={plView === 'list' ? 'secondary' : 'ghost'}
+				size="icon-sm"
+				aria-label={t('library.view_list')}
+				aria-pressed={plView === 'list'}
+				title={t('library.view_list')}
+				onclick={() => chooseView('list')}
+			>
+				<HugeiconsIcon icon={LeftToRightListBulletIcon} class="h-4 w-4" />
+			</Button>
+		</div>
+		<div class="flex-1"></div>
+		{#if !signedOut}
+			<Button
+				variant="outline"
+				size="sm"
+				class="gap-2"
+				disabled={syncingAll}
+				title={t('library.sync_all_tooltip')}
+				onclick={syncAll}
+			>
+				<HugeiconsIcon icon={RefreshIcon} class="h-4 w-4 {syncingAll ? 'animate-spin' : ''}" />
+				{#if monitor.progress}
+					<span class="tabular-nums">
+						{t('library.sync_progress', { done: monitor.progress.done, total: monitor.progress.total })}
+					</span>
+				{:else}
+					{syncingAll ? t('library.syncing') : t('library.sync_all')}
+				{/if}
+			</Button>
+		{/if}
+	</div>
+{/snippet}
+
+<!-- The card grid with the last-sync line under each card. Rows a line taller than `.card-grid`'s
+     pinned 12.75rem, for every card alike: an auto row would bring back the reflow that comment
+     describes. -->
+{#snippet playlistGrid(items: BrowseItem[], rv: ReturnType<typeof reveal>)}
+	<div class="card-grid content-in" style="grid-auto-rows: 14rem">
+		{#each items.slice(0, rv.count(items.length)) as item (item.kind + item.id)}
+			{@const line = syncedText(item.id)}
+			<div class="flex flex-col" style="contain-intrinsic-size: auto 14rem">
+				<MediaCard {item} />
+				{#if line}
+					<span class="-mt-1.5 truncate px-2 text-[0.6875rem] tabular-nums text-muted-foreground" title={line}>
+						{line}
+					</span>
+				{/if}
+			</div>
+		{/each}
+	</div>
+	{#if rv.more(items.length)}<div {@attach rv.sentinel}></div>{/if}
+{/snippet}
+
+<!-- One row per playlist: cover, title, subtitle, the last-sync line and the ⋯ menu. -->
+{#snippet playlistRows(items: BrowseItem[], rv: ReturnType<typeof reveal>)}
+	<div class="content-in flex flex-col">
+		{#each items.slice(0, rv.count(items.length)) as item (item.kind + item.id)}
+			{@const line = syncedText(item.id)}
+			{@const cover = thumb(item.thumbnail, 96) ?? item.thumbnail}
+			<div class="group/row relative flex items-center gap-2 rounded-lg pr-1 hover:bg-accent/10" data-ctx>
+				<div
+					class="flex min-w-0 flex-1 cursor-pointer items-center gap-3 px-2 py-1.5"
+					role="button"
+					tabindex="0"
+					onclick={() => openItem(item)}
+					onkeydown={(e) => {
+						if (e.target !== e.currentTarget) return;
+						if (e.key === 'Enter' || e.key === ' ') {
+							e.preventDefault();
+							openItem(item);
+						}
+					}}
+				>
+					<div class="flex h-12 w-12 shrink-0 items-center justify-center overflow-hidden rounded-md bg-muted text-muted-foreground/50">
+						{#if cover}
+							<img src={cover} alt="" class="h-full w-full object-cover" loading="lazy" draggable="false" />
+						{:else}
+							<HugeiconsIcon icon={Playlist02Icon} class="h-5 w-5" />
+						{/if}
+					</div>
+					<div class="min-w-0 flex-1">
+						<div class="truncate text-sm font-medium">{item.title}</div>
+						{#if item.subtitle}
+							<div class="truncate text-xs text-muted-foreground">{item.subtitle}</div>
+						{/if}
+					</div>
+					{#if line}
+						<span class="shrink-0 text-xs tabular-nums text-muted-foreground">{line}</span>
+					{/if}
+				</div>
+				<ItemMenu
+					{item}
+					triggerClass="flex h-8 w-8 shrink-0 cursor-pointer items-center justify-center rounded-md text-muted-foreground opacity-0 transition hover:bg-accent/20 hover:text-foreground focus-visible:opacity-100 group-hover/row:opacity-100"
+				/>
+			</div>
+		{/each}
+	</div>
+	{#if rv.more(items.length)}<div {@attach rv.sentinel}></div>{/if}
 {/snippet}
 
 <div class="p-6">
@@ -363,12 +611,16 @@
 			</Tabs.Content>
 			<Tabs.Content value="playlists">
 				{#if tab === 'playlists'}
-					{@render grid(
-						playlists,
-						t('library.no_saved_playlists'),
-						rvPlaylists,
-						true
-					)}
+					{#if playlists.length}
+						{@render playlistsToolbar()}
+					{/if}
+					{#if plView === 'list' && playlists.length}
+						{@render playlistRows(sortedPlaylists, rvPlaylists)}
+					{:else if playlists.length}
+						{@render playlistGrid(sortedPlaylists, rvPlaylists)}
+					{:else}
+						{@render grid(playlists, t('library.no_saved_playlists'), rvPlaylists, true)}
+					{/if}
 				{/if}
 			</Tabs.Content>
 			<Tabs.Content value="albums">

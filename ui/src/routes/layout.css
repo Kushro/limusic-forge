@@ -491,6 +491,181 @@
 	--sidebar-ring: oklch(0.7729 0.1535 163.2231);
 }
 
+/* Nord (nordtheme.com), from the official 16-colour palette converted to oklch: Polar Night
+   nord0-3 #2E3440 #3B4252 #434C5E #4C566A, Snow Storm nord4-6 #D8DEE9 #E5E9F0 #ECEFF4, Frost
+   nord7-10 #8FBCBB #88C0D0 #81A1C1 #5E81AC, Aurora nord11-15 #BF616A #D08770 #EBCB8B #A3BE8C
+   #B48EAD. Light mode is Snow Storm surfaces with Polar Night text; its primary is nord10 darkened
+   to #4C6A92, since #5E81AC under nord6 text is 3.5:1 and AA needs 4.5:1 (this gives 4.8:1).
+   Off-palette, both in dark mode:
+   the sidebar is #242933 (one step below nord0, as Nord's own editor ports do) and
+   --muted-foreground sits between nord3 and nord4 so secondary text stays legible on nord0. */
+.theme-nord {
+	--background: oklch(0.9513 0.0074 260.7315);
+	--foreground: oklch(0.3244 0.0229 264.1820);
+	--card: oklch(0.9330 0.0104 261.7885);
+	--card-foreground: oklch(0.3244 0.0229 264.1820);
+	--popover: oklch(0.9330 0.0104 261.7885);
+	--popover-foreground: oklch(0.3244 0.0229 264.1820);
+	--primary: oklch(0.5181 0.0729 255.8599);
+	--primary-foreground: oklch(0.9513 0.0074 260.7315);
+	--secondary: oklch(0.8993 0.0164 262.7493);
+	--secondary-foreground: oklch(0.3244 0.0229 264.1820);
+	--muted: oklch(0.9330 0.0104 261.7885);
+	--muted-foreground: oklch(0.4523 0.0352 264.1312);
+	--accent: oklch(0.7746 0.0622 217.4690);
+	--accent-foreground: oklch(0.3244 0.0229 264.1820);
+	--destructive: oklch(0.6061 0.1206 15.3419);
+	--border: oklch(0.8993 0.0164 262.7493);
+	--input: oklch(0.8993 0.0164 262.7493);
+	--ring: oklch(0.5181 0.0729 255.8599);
+	--chart-1: oklch(0.5944 0.0772 254.0278);
+	--chart-2: oklch(0.7746 0.0622 217.4690);
+	--chart-3: oklch(0.7683 0.0749 131.0631);
+	--chart-4: oklch(0.8549 0.0892 84.0933);
+	--chart-5: oklch(0.6921 0.0625 332.6649);
+	--sidebar: oklch(0.9330 0.0104 261.7885);
+	--sidebar-foreground: oklch(0.3244 0.0229 264.1820);
+	--sidebar-primary: oklch(0.5181 0.0729 255.8599);
+	--sidebar-primary-foreground: oklch(0.9513 0.0074 260.7315);
+	--sidebar-accent: oklch(0.8993 0.0164 262.7493);
+	--sidebar-accent-foreground: oklch(0.3244 0.0229 264.1820);
+	--sidebar-border: oklch(0.8993 0.0164 262.7493);
+	--sidebar-ring: oklch(0.5181 0.0729 255.8599);
+	--radius: 0.4rem;
+	--font-sans: 'IBM Plex Sans Variable', sans-serif;
+	--font-heading: 'IBM Plex Sans Variable', sans-serif;
+	--font-serif: ui-serif, Georgia, serif;
+	--font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+	--shadow-2xs: 0px 2px 4px 0px hsl(220 16% 22% / 0.05);
+	--shadow-xs: 0px 2px 4px 0px hsl(220 16% 22% / 0.05);
+	--shadow-sm: 0px 2px 4px 0px hsl(220 16% 22% / 0.10), 0px 1px 2px -1px hsl(220 16% 22% / 0.10);
+	--shadow-md: 0px 2px 4px 0px hsl(220 16% 22% / 0.10), 0px 2px 4px -1px hsl(220 16% 22% / 0.10);
+	--shadow-lg: 0px 2px 4px 0px hsl(220 16% 22% / 0.10), 0px 4px 6px -1px hsl(220 16% 22% / 0.10);
+	--shadow-xl: 0px 2px 4px 0px hsl(220 16% 22% / 0.10), 0px 8px 10px -1px hsl(220 16% 22% / 0.10);
+	--shadow-2xl: 0px 2px 4px 0px hsl(220 16% 22% / 0.25);
+}
+.dark.theme-nord {
+	--background: oklch(0.3244 0.0229 264.1820);
+	--foreground: oklch(0.9513 0.0074 260.7315);
+	--card: oklch(0.3792 0.0290 266.4705);
+	--card-foreground: oklch(0.9513 0.0074 260.7315);
+	--popover: oklch(0.4157 0.0324 264.1312);
+	--popover-foreground: oklch(0.9513 0.0074 260.7315);
+	--primary: oklch(0.7746 0.0622 217.4690);
+	--primary-foreground: oklch(0.3244 0.0229 264.1820);
+	--secondary: oklch(0.4157 0.0324 264.1312);
+	--secondary-foreground: oklch(0.9513 0.0074 260.7315);
+	--muted: oklch(0.3792 0.0290 266.4705);
+	--muted-foreground: oklch(0.7200 0.0250 263.0000);
+	--accent: oklch(0.6965 0.0591 248.6872);
+	--accent-foreground: oklch(0.3244 0.0229 264.1820);
+	--destructive: oklch(0.6061 0.1206 15.3419);
+	--border: oklch(0.4157 0.0324 264.1312);
+	--input: oklch(0.4523 0.0352 264.1312);
+	--ring: oklch(0.7746 0.0622 217.4690);
+	--chart-1: oklch(0.7746 0.0622 217.4690);
+	--chart-2: oklch(0.7683 0.0749 131.0631);
+	--chart-3: oklch(0.8549 0.0892 84.0933);
+	--chart-4: oklch(0.6929 0.0963 38.2407);
+	--chart-5: oklch(0.6921 0.0625 332.6649);
+	--sidebar: oklch(0.2804 0.0198 264.1821);
+	--sidebar-foreground: oklch(0.8993 0.0164 262.7493);
+	--sidebar-primary: oklch(0.7746 0.0622 217.4690);
+	--sidebar-primary-foreground: oklch(0.3244 0.0229 264.1820);
+	--sidebar-accent: oklch(0.3792 0.0290 266.4705);
+	--sidebar-accent-foreground: oklch(0.9513 0.0074 260.7315);
+	--sidebar-border: oklch(0.3792 0.0290 266.4705);
+	--sidebar-ring: oklch(0.7746 0.0622 217.4690);
+}
+
+/* Dracula (draculatheme.com). Dark mode is the official palette in oklch: background #282A36,
+   current line #44475A, foreground #F8F8F2, comment #6272A4, and the accents cyan #8BE9FD, green
+   #50FA7B, orange #FFB86C, pink #FF79C6, purple #BD93F9, red #FF5555; the darker #21222C and
+   #191A21 and the floating #343746 are the spec's UI shades. Light mode is the official "Alucard"
+   variant: background #FFFBEB, floating #F5F2E4 / #ECE9DF, foreground #1F1F1F, comment #635D97,
+   purple #644AC9, pink #A3144D, cyan #036A96, green #14710A, orange #A34D14, red #CB3A2A.
+   Off-palette: dark --muted-foreground is the comment colour lifted to #9AA5CE, since #6272A4 on
+   #282A36 is too dim for body text; and the light --border is #DEDCCF, a step below the floating
+   shade. */
+.theme-dracula {
+	--background: oklch(0.9869 0.0214 95.2774);
+	--foreground: oklch(0.2393 0 0);
+	--card: oklch(0.9597 0.0188 96.8650);
+	--card-foreground: oklch(0.2393 0 0);
+	--popover: oklch(0.9597 0.0188 96.8650);
+	--popover-foreground: oklch(0.2393 0 0);
+	--primary: oklch(0.5091 0.1878 287.1454);
+	--primary-foreground: oklch(1.0000 0 0);
+	--secondary: oklch(0.9336 0.0137 92.9875);
+	--secondary-foreground: oklch(0.2393 0 0);
+	--muted: oklch(0.9336 0.0137 92.9875);
+	--muted-foreground: oklch(0.5093 0.0908 287.4571);
+	--accent: oklch(0.4682 0.1765 4.9627);
+	--accent-foreground: oklch(1.0000 0 0);
+	--destructive: oklch(0.5632 0.1844 30.0767);
+	--border: oklch(0.8925 0.0176 99.6251);
+	--input: oklch(0.8925 0.0176 99.6251);
+	--ring: oklch(0.5091 0.1878 287.1454);
+	--chart-1: oklch(0.5091 0.1878 287.1454);
+	--chart-2: oklch(0.4682 0.1765 4.9627);
+	--chart-3: oklch(0.4961 0.1061 236.1715);
+	--chart-4: oklch(0.4784 0.1547 141.8965);
+	--chart-5: oklch(0.5205 0.1308 48.4589);
+	--sidebar: oklch(0.9597 0.0188 96.8650);
+	--sidebar-foreground: oklch(0.2393 0 0);
+	--sidebar-primary: oklch(0.5091 0.1878 287.1454);
+	--sidebar-primary-foreground: oklch(1.0000 0 0);
+	--sidebar-accent: oklch(0.9336 0.0137 92.9875);
+	--sidebar-accent-foreground: oklch(0.2393 0 0);
+	--sidebar-border: oklch(0.8925 0.0176 99.6251);
+	--sidebar-ring: oklch(0.5091 0.1878 287.1454);
+	--radius: 0.5rem;
+	--font-sans: 'Outfit Variable', sans-serif;
+	--font-heading: 'Outfit Variable', sans-serif;
+	--font-serif: ui-serif, Georgia, serif;
+	--font-mono: 'Fira Code', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+	--shadow-2xs: 0px 4px 8px -2px hsl(231 15% 18% / 0.06);
+	--shadow-xs: 0px 4px 8px -2px hsl(231 15% 18% / 0.06);
+	--shadow-sm: 0px 4px 8px -2px hsl(231 15% 18% / 0.12), 0px 1px 2px -1px hsl(231 15% 18% / 0.12);
+	--shadow-md: 0px 4px 8px -2px hsl(231 15% 18% / 0.12), 0px 2px 4px -1px hsl(231 15% 18% / 0.12);
+	--shadow-lg: 0px 4px 8px -2px hsl(231 15% 18% / 0.12), 0px 4px 6px -1px hsl(231 15% 18% / 0.12);
+	--shadow-xl: 0px 4px 8px -2px hsl(231 15% 18% / 0.12), 0px 8px 10px -1px hsl(231 15% 18% / 0.12);
+	--shadow-2xl: 0px 4px 8px -2px hsl(231 15% 18% / 0.30);
+}
+.dark.theme-dracula {
+	--background: oklch(0.2882 0.0221 277.5087);
+	--foreground: oklch(0.9775 0.0079 106.5450);
+	--card: oklch(0.3402 0.0266 276.0460);
+	--card-foreground: oklch(0.9775 0.0079 106.5450);
+	--popover: oklch(0.4028 0.0322 277.8320);
+	--popover-foreground: oklch(0.9775 0.0079 106.5450);
+	--primary: oklch(0.7420 0.1485 301.8831);
+	--primary-foreground: oklch(0.2882 0.0221 277.5087);
+	--secondary: oklch(0.4028 0.0322 277.8320);
+	--secondary-foreground: oklch(0.9775 0.0079 106.5450);
+	--muted: oklch(0.3402 0.0266 276.0460);
+	--muted-foreground: oklch(0.7276 0.0609 273.0872);
+	--accent: oklch(0.7546 0.1831 346.8124);
+	--accent-foreground: oklch(0.2882 0.0221 277.5087);
+	--destructive: oklch(0.6822 0.2063 24.4310);
+	--border: oklch(0.4028 0.0322 277.8320);
+	--input: oklch(0.4028 0.0322 277.8320);
+	--ring: oklch(0.7420 0.1485 301.8831);
+	--chart-1: oklch(0.7420 0.1485 301.8831);
+	--chart-2: oklch(0.7546 0.1831 346.8124);
+	--chart-3: oklch(0.8826 0.0934 212.8465);
+	--chart-4: oklch(0.8710 0.2195 148.0249);
+	--chart-5: oklch(0.8339 0.1241 66.5585);
+	--sidebar: oklch(0.2554 0.0188 280.4884);
+	--sidebar-foreground: oklch(0.9775 0.0079 106.5450);
+	--sidebar-primary: oklch(0.7420 0.1485 301.8831);
+	--sidebar-primary-foreground: oklch(0.2882 0.0221 277.5087);
+	--sidebar-accent: oklch(0.4028 0.0322 277.8320);
+	--sidebar-accent-foreground: oklch(0.9775 0.0079 106.5450);
+	--sidebar-border: oklch(0.2199 0.0137 278.8034);
+	--sidebar-ring: oklch(0.7420 0.1485 301.8831);
+}
+
 /* Pitch black for OLED/AMOLED panels: --background is #000000, so those pixels are switched off
    rather than lit. Surfaces are black too and separated by borders instead of by lighter greys,
    and the palette is monochrome so the one coloured thing on screen is the artwork. It stays

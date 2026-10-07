@@ -101,7 +101,11 @@ fn run(app: AppHandle, rx: std::sync::mpsc::Receiver<MediaUpdate>) {
     #[cfg(not(target_os = "windows"))]
     let hwnd = None;
 
-    let config = PlatformConfig { dbus_name: "limusic", display_name: "Limusic", hwnd };
+    let config = PlatformConfig {
+        dbus_name: crate::brand::APP_SLUG,
+        display_name: crate::brand::APP_NAME,
+        hwnd,
+    };
     let mut controls = match MediaControls::new(config) {
         Ok(c) => c,
         Err(e) => {
