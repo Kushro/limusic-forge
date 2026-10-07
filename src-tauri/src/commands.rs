@@ -4430,6 +4430,294 @@ pub async fn wintask_unregister(state: St<'_>) -> Result<crate::wintask::WinTask
         .map_err(|e| e.to_string())
 }
 
+// --- PlaylistForge import ---
+// Settings ▸ Import & migrate ▸ PlaylistForge (pf_import/): detect, preview, apply, the Data API
+// tokens (only with consent) and PlaylistForge's scheduled task (only once confirmed). Nothing here
+// writes under PlaylistForge's folder or its keyring service, and no token or client secret
+// reaches the webview: only counts, names and short codes.
+
+/// What Settings shows before anything is read.
+#[derive(Debug, serde::Serialize)]
+pub struct PfDetect {
+    /// PlaylistForge's folder, when it holds a database.
+    path: Option<String>,
+    found: bool,
+    /// PlaylistForge is open: it has to be closed before its database is copied (D35).
+    running: bool,
+    /// Its database's schema version, read off a copy (not while it runs).
+    user_version: Option<i64>,
+    /// Newer than this importer knows (D34).
+    too_new: bool,
+    /// "PlaylistForge Monitor" is registered; `None` off Windows or when Windows did not answer.
+    task: Option<bool>,
+    /// Why the copy could not be read (`PfImportError::code`).
+    error: Option<&'static str>,
+}
+
+/// PlaylistForge's folder: the one picked (absolute only), or `%APPDATA%\PlaylistForge`.
+fn pf_dir(path: Option<String>) -> Result<std::path::PathBuf, String> {
+    match path.map(|p| p.trim().to_owned()).filter(|p| !p.is_empty()) {
+        Some(p) => {
+            let p = std::path::PathBuf::from(p);
+            if p.is_absolute() {
+                Ok(p)
+            } else {
+                Err("not_found".into())
+            }
+        }
+        None => crate::pf_import::pf_default_dir().map_err(|e| e.code().to_string()),
+    }
+}
+
+/// `set_setting`'s gate, for a setting the import brings: a key the UI may write, with a value
+/// its per-key rule accepts.
+pub(crate) fn pf_settable(key: &str, value: &str) -> Result<(), String> {
+    if !UI_SETTINGS.contains(&key) {
+        return Err(format!("unknown setting: {key}"));
+    }
+    validate_setting(key, value)
+}
+
+/// The Data API's account manager reads its channels once, at startup: hand it a fresh copy after
+/// the import added channels or tokens, as `lib.rs` builds it.
+fn pf_reload_ytdata(state: &AppState, jobs: &crate::jobs::JobsState) {
+    let store = crate::ytdata_secrets::token_store(&state.app);
+    let repo = Arc::new(crate::ytdata_accounts::DbAccountsRepo::new(state.db.clone()));
+    match ytdata::auth::accounts::AccountManager::new(store, repo) {
+        Ok(manager) => {
+            let data_dir = crate::paths::data_dir(&state.app);
+            if let Some(secret) = ytdata::client_secret::load_existing(&data_dir) {
+                manager.set_client_secret(secret);
+            }
+            jobs.set_account_manager(Some(Arc::new(manager)));
+        }
+        Err(e) => tracing::warn!(error = %e, "pf import: Data API account manager not reloaded"),
+    }
+}
+
+/// Whether PlaylistForge is installed here, open, which schema, and whether its task is there.
+#[tauri::command]
+pub async fn pf_detect(state: St<'_>) -> Result<PfDetect, String> {
+    let data_dir = crate::paths::data_dir(&state.app);
+    tauri::async_runtime::spawn_blocking(move || {
+        use crate::pf_import::{self as pf, PfImportError};
+        let dir = pf::pf_default_dir().map_err(|e| e.code().to_string())?;
+        let found = dir.join(pf::PF_DB_FILE).is_file();
+        let running = pf::pf_running();
+        let mut out = PfDetect {
+            path: found.then(|| dir.to_string_lossy().into_owned()),
+            found,
+            running,
+            user_version: None,
+            too_new: false,
+            task: pf::task::exists(),
+            error: None,
+        };
+        if found && !running {
+            pf::reader::sweep_stale(&data_dir);
+            match pf::reader::stage(&dir, &data_dir) {
+                Ok(staged) => {
+                    out.user_version = Some(staged.user_version());
+                    let _ = staged.finish();
+                }
+                Err(e) => {
+                    if let PfImportError::TooNew { found, .. } = &e {
+                        out.user_version = Some(*found);
+                        out.too_new = true;
+                    }
+                    out.error = Some(e.code());
+                }
+            }
+        }
+        Ok(out)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Read PlaylistForge (a copy of its database) and say what an import would bring: counts, the
+/// playlists with D36's verdict, the accounts and how they pair. `pf_running` while it is open.
+#[tauri::command]
+pub async fn pf_preview(
+    state: St<'_>,
+    path: Option<String>,
+) -> Result<crate::pf_import::apply::Preview, String> {
+    let dir = pf_dir(path)?;
+    if crate::pf_import::pf_running() {
+        return Err("pf_running".into());
+    }
+    let data_dir = crate::paths::data_dir(&state.app);
+    let secret = crate::ytdata_secrets::client_secret_path(&state.app);
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        use crate::pf_import::{apply, reader};
+        reader::sweep_stale(&data_dir);
+        let data = reader::read_all(&dir, &data_dir, chrono::Utc::now())
+            .map_err(|e| e.code().to_string())?;
+        let forge_client = ytdata::client_secret::ClientSecretFile::load(&secret)
+            .ok()
+            .map(|c| c.installed.client_id);
+        Ok(apply::preview(&db, &data, forge_client.as_deref()))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct PfApplyResult {
+    report: crate::pf_import::apply::Report,
+    /// The account playlists went to the import queue (`import-progress` follows them).
+    import_started: bool,
+    /// Why they did not (`busy`, `cooldown:<until>`).
+    import_error: Option<String>,
+}
+
+/// Import the user's selection. Progress arrives as `pf-import-progress`
+/// (`{ step, done, total }`); the account playlists, if any, are then created through the
+/// Spotify import's paced writer, followed by its own `import-progress`.
+#[tauri::command]
+pub async fn pf_import_apply(
+    state: St<'_>,
+    jobs: Jobs<'_>,
+    selection: crate::pf_import::apply::Selection,
+) -> Result<PfApplyResult, String> {
+    let dir = pf_dir(selection.path.clone())?;
+    if crate::pf_import::pf_running() {
+        return Err("pf_running".into());
+    }
+    let data_dir = crate::paths::data_dir(&state.app);
+    let secret_dest = crate::ytdata_secrets::client_secret_path(&state.app);
+    let db = state.db.clone();
+    let app = state.app.clone();
+    let mut report = tauri::async_runtime::spawn_blocking(move || {
+        use crate::pf_import::{apply, reader};
+        let progress = |step: &'static str, done: usize, total: usize| {
+            let _ = app
+                .emit("pf-import-progress", json!({ "step": step, "done": done, "total": total }));
+        };
+        progress("read", 0, 1);
+        reader::sweep_stale(&data_dir);
+        let data = reader::read_all(&dir, &data_dir, chrono::Utc::now())
+            .map_err(|e| e.code().to_string())?;
+        let forbidden = crate::backups::forbidden_roots();
+        let ctx = apply::ApplyCtx {
+            now: chrono::Utc::now(),
+            validate: &pf_settable,
+            forbidden: &forbidden,
+            client_secret_dest: Some(secret_dest.as_path()),
+            progress: &progress,
+        };
+        apply::apply(&db, &data, &selection, &ctx).map_err(|e| e.code().to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+
+    let mut import_started = false;
+    let mut import_error = None;
+    if !report.account_lists.is_empty() {
+        let lists = std::mem::take(&mut report.account_lists);
+        match crate::import::start_known(state.inner(), lists, false) {
+            Ok(_) => {
+                import_started = true;
+                let ids = std::mem::take(&mut report.account_list_ids);
+                if let Err(e) = crate::pf_import::apply::mark_account_lists(&state.db, &ids) {
+                    tracing::warn!(error = %e, "pf import: queued playlists not remembered");
+                }
+            }
+            Err(e) => import_error = Some(e),
+        }
+    }
+    pf_reload_ytdata(&state, &jobs);
+    if report.jobs > 0 {
+        jobs.nudge();
+    }
+    let _ = state.app.emit("jobs-changed", json!({}));
+    let _ = state.app.emit("quota-changed", ());
+    let unseen = state.db.unseen_alert_count();
+    let _ = state.app.emit("alerts-changed", json!({ "unseen": unseen }));
+    crate::ytdata_status::announce(&state).await;
+    tracing::info!(
+        indexed = report.playlists_indexed,
+        local = report.local_created,
+        jobs = report.jobs,
+        "pf import applied"
+    );
+    Ok(PfApplyResult { report, import_started, import_error })
+}
+
+/// Bring PlaylistForge's Data API refresh tokens for `channel_ids` into Forge's own store. Only
+/// with `consent` (the user ticked the box); otherwise `consent_required` and nothing is read.
+/// When Forge has no OAuth client yet, PlaylistForge's comes too: a token only works with the
+/// client that minted it.
+#[tauri::command]
+pub async fn pf_import_credentials(
+    state: St<'_>,
+    jobs: Jobs<'_>,
+    channel_ids: Vec<String>,
+    consent: bool,
+    path: Option<String>,
+) -> Result<Vec<crate::pf_import::apply::TokenOutcome>, String> {
+    if !consent {
+        return Err("consent_required".into());
+    }
+    let dir = pf_dir(path)?;
+    let secret_dest = crate::ytdata_secrets::client_secret_path(&state.app);
+    let forge_store = crate::ytdata_secrets::token_store(&state.app);
+    let db = state.db.clone();
+    let outcomes = tauri::async_runtime::spawn_blocking(move || {
+        use crate::pf_import::{apply, credentials, reader};
+        let files = reader::read_files(&dir);
+        if !secret_dest.exists() {
+            if let Some(secret) = &files.client_secret {
+                if let Some(parent) = secret_dest.parent() {
+                    std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+                }
+                std::fs::write(&secret_dest, &secret.raw).map_err(|e| e.to_string())?;
+            }
+        }
+        let forge_client = ytdata::client_secret::ClientSecretFile::load(&secret_dest)
+            .ok()
+            .map(|c| c.installed.client_id);
+        let pf_store = credentials::pf_token_store();
+        apply::import_tokens(
+            &db,
+            &files,
+            &pf_store,
+            forge_store.as_ref(),
+            &channel_ids,
+            forge_client.as_deref(),
+            true,
+            crate::db::now_secs(),
+        )
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    pf_reload_ytdata(&state, &jobs);
+    for o in outcomes.iter().filter(|o| o.outcome == "imported") {
+        if let Err(e) =
+            crate::jobs::control::resume_waiting_auth_for_account(&state.db, &o.channel_id)
+        {
+            tracing::warn!(error = %e, "pf import: waiting jobs not resumed");
+        }
+    }
+    jobs.nudge();
+    let _ = state.app.emit("jobs-changed", json!({}));
+    crate::ytdata_status::announce(&state).await;
+    Ok(outcomes)
+}
+
+/// Remove PlaylistForge's "PlaylistForge Monitor" task (D35), only after the user confirmed it in
+/// the UI (`confirmed`): `schtasks /delete /tn "PlaylistForge Monitor" /f`, nothing else.
+#[tauri::command]
+pub async fn pf_unregister_task(confirmed: bool) -> Result<(), String> {
+    if !confirmed {
+        return Err("confirmation_required".into());
+    }
+    tauri::async_runtime::spawn_blocking(crate::pf_import::task::unregister)
+        .await
+        .map_err(|e| e.to_string())?
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -12,13 +12,18 @@
 //!
 //! [`reader`] produces the model ([`reader::PfData`]), [`mapping`] translates it to Forge's
 //! vocabulary (alert kinds, settings keys, theme, dates), [`credentials`] reads refresh tokens.
+//! [`apply`] writes the user's selection into Forge's database (in foreign-key order: accounts,
+//! then jobs, then their items), and [`task`] removes PlaylistForge's scheduled task once the
+//! user confirms (D35).
 
 // Some of the reader's model is only read by the tests and the preview.
 #![allow(dead_code)]
 
+pub mod apply;
 pub mod credentials;
 pub mod mapping;
 pub mod reader;
+pub mod task;
 
 use std::path::PathBuf;
 

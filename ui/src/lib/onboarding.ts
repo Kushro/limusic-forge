@@ -57,6 +57,14 @@ export function pendingNotice(p: PendingMarker | null | undefined): 'expired' | 
 	return null;
 }
 
+/** Where "Now" opens Settings ▸ Import & migrate: on the PlaylistForge section when PlaylistForge
+ *  is among the sources found (its import starts there), at the top otherwise. */
+export function nowFocus(detected: string[]): { tab: 'import'; section?: string } {
+	return detected.includes('playlistforge')
+		? { tab: 'import', section: 'playlistforge' }
+		: { tab: 'import' };
+}
+
 /** The value to store for an answer: what was answered, and every source seen so far. */
 export function answerValue(
 	answer: PromptAnswer,

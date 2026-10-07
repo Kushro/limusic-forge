@@ -13,6 +13,7 @@
 	import { t } from '$lib/i18n.svelte';
 	import {
 		answerValue,
+		nowFocus,
 		pendingNotice,
 		shouldPrompt,
 		type ImportSourceId,
@@ -72,7 +73,8 @@
 			// Not stored: it asks again next launch, which is the safe way to fail.
 		}
 		if (a === 'now') {
-			ui.settingsFocus = { tab: 'import' };
+			// PlaylistForge's import lives in its own section of the tab.
+			ui.settingsFocus = nowFocus(detected);
 			ui.settingsOpen = true;
 		}
 	}

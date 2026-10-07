@@ -1207,6 +1207,11 @@ pub fn run() {
             commands::wintask_status,
             commands::wintask_register,
             commands::wintask_unregister,
+            commands::pf_detect,
+            commands::pf_preview,
+            commands::pf_import_apply,
+            commands::pf_import_credentials,
+            commands::pf_unregister_task,
         ])
         .on_window_event(|window, event| {
             // Close-to-tray: ✕ hides the main window and playback keeps running; real quit is

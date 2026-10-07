@@ -43,6 +43,10 @@ pub struct SourceTrack {
     pub duration_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub explicit: Option<bool>,
+    /// The YouTube video it already is, when the source knows (a PlaylistForge playlist): the
+    /// import then takes it as matched without searching (`import::direct`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub video_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -249,6 +253,7 @@ fn embed_list(kind: LinkKind, id: &str, entity: &Value) -> SourceList {
                 album: album.clone(),
                 duration_ms: t.get("duration").and_then(Value::as_u64).filter(|d| *d > 0),
                 explicit: t.get("isExplicit").and_then(Value::as_bool),
+                video_id: None,
             })
         })
         .collect();
@@ -277,6 +282,7 @@ fn embed_track(entity: &Value) -> Option<SourceTrack> {
         album: None,
         duration_ms: entity.get("duration").and_then(Value::as_u64).filter(|d| *d > 0),
         explicit: entity.get("isExplicit").and_then(Value::as_bool),
+        video_id: None,
     })
 }
 
@@ -379,6 +385,7 @@ fn parse_page(v: &Value) -> Option<(usize, Vec<Option<SourceTrack>>)> {
                     .pointer("/contentRating/label")
                     .and_then(Value::as_str)
                     .map(|l| l == "EXPLICIT"),
+                video_id: None,
             })
         })
         .collect();
@@ -565,6 +572,7 @@ fn parse_local_uri(uri: &str) -> Option<SourceTrack> {
         album: non_empty(album),
         duration_ms: secs.parse::<u64>().ok().filter(|s| *s > 0).map(|s| s * 1000),
         explicit: None,
+        video_id: None,
     })
 }
 
@@ -735,6 +743,7 @@ fn read_csv(bytes: &[u8], file_name: &str, lib: &mut Library) -> Result<(), Stri
                     "false" | "no" | "0" => Some(false),
                     _ => None,
                 },
+                video_id: None,
             }
         });
         match lists.iter_mut().find(|(n, _)| *n == name) {
@@ -952,5 +961,23 @@ mod tests {
         assert_eq!(read_file(b"foo,bar\n1,2\n", "x.csv").unwrap_err(), "csv_columns");
         assert_eq!(parse_duration("3:45"), Some(225_000));
         assert_eq!(parse_duration("225"), Some(225_000));
+    }
+
+    #[test]
+    fn source_track_carries_a_known_video_id() {
+        let t = SourceTrack {
+            title: "Fake Song One".into(),
+            artists: vec!["Fake Artist A".into()],
+            video_id: Some("vidAAAAAAA1".into()),
+            ..Default::default()
+        };
+        let json = serde_json::to_value(&t).unwrap();
+        assert_eq!(json["video_id"], "vidAAAAAAA1");
+        let back: SourceTrack = serde_json::from_value(json).unwrap();
+        assert_eq!(back, t);
+        // Every other source names none, and says nothing about it.
+        let plain: SourceTrack = serde_json::from_str(r#"{"title":"T","artists":["A"]}"#).unwrap();
+        assert_eq!(plain.video_id, None);
+        assert!(serde_json::to_value(&plain).unwrap().get("video_id").is_none());
     }
 }

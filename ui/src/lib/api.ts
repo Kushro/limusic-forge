@@ -1811,3 +1811,141 @@ export const wintaskStatus = () => invoke<WinTaskStatus>('wintask_status');
 /** Register (or move) the task to run this copy daily at `time` (`HH:MM`). */
 export const wintaskRegister = (time: string) => invoke<WinTaskStatus>('wintask_register', { time });
 export const wintaskUnregister = () => invoke<WinTaskStatus>('wintask_unregister');
+
+// --- PlaylistForge import ---
+// Settings ▸ Import & migrate ▸ PlaylistForge (src-tauri/src/pf_import/). Rejections are short
+// codes: `pf_running` (close PlaylistForge first), `not_found`, `not_playlistforge`, `too_new`,
+// `corrupt`, `io`, `sqlite`, `consent_required`, `confirmation_required`.
+export type PfDetect = {
+	/** PlaylistForge's folder, when it holds a database. */
+	path: string | null;
+	found: boolean;
+	running: boolean;
+	user_version: number | null;
+	too_new: boolean;
+	/** "PlaylistForge Monitor" is registered; null off Windows or when Windows did not answer. */
+	task: boolean | null;
+	error: string | null;
+};
+export type PfSummary = {
+	user_version: number;
+	accounts: number;
+	playlists: number;
+	playlists_with_items: number;
+	items: number;
+	snapshots: number;
+	alerts: number;
+	downloads: number;
+	jobs_pending: number;
+	jobs_total: number;
+	quota_units_today: number;
+	settings: number;
+	backups: number;
+	has_client_secret: boolean;
+	json_accounts: number;
+};
+/** D36: whose index wins when the playlist goes into the index. */
+export type PfWinner = 'pf' | 'forge';
+export type PfPreviewPlaylist = {
+	id: string;
+	title: string;
+	account_id: string;
+	privacy: string;
+	items: number;
+	deleted_remotely: boolean;
+	in_forge: boolean;
+	forge_synced_at: number | null;
+	pf_synced_at: string | null;
+	winner: PfWinner;
+};
+export type PfPreviewAccount = {
+	id: string;
+	title: string;
+	last_sync_at: string | null;
+	/** The Forge cookie account of the same channel, if one is saved. */
+	forge_account: string | null;
+	/** PlaylistForge has it as a Data API account (a token may be there to bring over). */
+	data_api: boolean;
+};
+export type PfForgeAccount = {
+	id: string;
+	name: string | null;
+	channel_id: string | null;
+	active: boolean;
+};
+export type PfThemeChoice = { id: string; mode: 'dark' | 'light' | null };
+export type PfPreview = {
+	summary: PfSummary;
+	playlists: PfPreviewPlaylist[];
+	accounts: PfPreviewAccount[];
+	forge_accounts: PfForgeAccount[];
+	pf_client_secret: boolean;
+	forge_client_secret: boolean;
+	tokens_compatible: boolean;
+	theme: PfThemeChoice | null;
+	locale: string | null;
+	problems: string[];
+};
+export type PfMissingAs = 'local' | 'account' | 'skip';
+export type PfSelection = {
+	path?: string | null;
+	playlists: string[];
+	/** PlaylistForge channel id → Forge cookie account id (null: none). Left out: paired automatically. */
+	account_map: Record<string, string | null>;
+	missing_as: PfMissingAs;
+	alerts: boolean;
+	downloads: boolean;
+	settings: boolean;
+	appearance: boolean;
+	data_api: boolean;
+};
+export type PfReport = {
+	playlists_indexed: number;
+	playlists_kept: number;
+	playlists_history: number;
+	local_created: number;
+	local_existing: number;
+	account_queued: number;
+	missing_skipped: number;
+	tracks: number;
+	snapshots: number;
+	alerts: number;
+	videos: number;
+	downloads: number;
+	downloads_available: number;
+	downloads_missing: number;
+	settings: number;
+	settings_skipped: { key: string; reason: string }[];
+	theme: PfThemeChoice | null;
+	locale: string | null;
+	ytdata_accounts: number;
+	jobs: number;
+	job_items: number;
+	quota_entries: number;
+	client_secret_copied: boolean;
+	warnings: string[];
+};
+export type PfApplyResult = {
+	report: PfReport;
+	/** The account playlists went to the import queue (followed by `import-progress`). */
+	import_started: boolean;
+	import_error: string | null;
+};
+export type PfTokenOutcome = {
+	channel_id: string;
+	outcome: 'imported' | 'none' | 'error';
+	code: string | null;
+};
+export type PfProgress = { step: string; done: number; total: number };
+export const pfDetect = () => invoke<PfDetect>('pf_detect');
+export const pfPreview = (path?: string | null) => invoke<PfPreview>('pf_preview', { path: path ?? null });
+export const pfImportApply = (selection: PfSelection) =>
+	invoke<PfApplyResult>('pf_import_apply', { selection });
+/** Only with `consent` (the box the user ticked); Rust refuses otherwise. */
+export const pfImportCredentials = (channelIds: string[], consent: boolean, path?: string | null) =>
+	invoke<PfTokenOutcome[]>('pf_import_credentials', { channelIds, consent, path: path ?? null });
+/** Only after the user confirmed: `schtasks /delete /tn "PlaylistForge Monitor" /f`. */
+export const pfUnregisterTask = (confirmed: boolean) =>
+	invoke<void>('pf_unregister_task', { confirmed });
+export const onPfImportProgress = (cb: (p: PfProgress) => void): Promise<UnlistenFn> =>
+	listen<PfProgress>('pf-import-progress', (e) => cb(e.payload));

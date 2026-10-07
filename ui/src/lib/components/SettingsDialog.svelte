@@ -97,6 +97,7 @@
 	import LocalEchoSlider from '$lib/components/ytdata/LocalEchoSlider.svelte';
 	import BudgetSettings from '$lib/components/ytdata/BudgetSettings.svelte';
 	import ScheduleSettings from '$lib/components/ytdata/ScheduleSettings.svelte';
+	import PfPreview from '$lib/components/import/PfPreview.svelte';
 
 	// `downloads` is only reached from the rail, so it is not one of the tabs others open onto.
 	type TabId = SettingsTab | 'downloads';
@@ -1553,16 +1554,8 @@
 						</section>
 						<section class={GROUP} id="settings-playlistforge">
 							<h3 class={LABEL}>{t('settings.import.playlistforge_title')}</h3>
-							<div class={CARD}>
-								{@render row({
-									title: sources?.playlistforge
-										? t('settings.import.detected')
-										: t('settings.import.not_detected'),
-									desc: sources?.playlistforge
-										? `${sources.playlistforge} · ${t('settings.import.playlistforge_soon')}`
-										: t('settings.import.playlistforge_hint')
-								})}
-							</div>
+							<!-- Detect, preview, import, summary, PlaylistForge's task. -->
+							<PfPreview />
 						</section>
 					{:else if tab === 'about'}
 						<div
