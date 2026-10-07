@@ -48,10 +48,10 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  # Pinned libmpv dev build (shinchiro). Baseline x86_64 — NOT the `-v3-` variant, which requires
-  # AVX2 and would crash on older CPUs. libmpv2 needs mpv >= 0.35 (client API 2.x). Bump
-  # deliberately: a new mpv is a new 117 MB DLL in the installer.
-  MPV_DEV_URL: https://github.com/shinchiro/mpv-winbuild-cmake/releases/download/20260610/mpv-dev-x86_64-20260610-git-304426c.7z
+  # libmpv comes from shinchiro's newest dev build, resolved at build time (see "Build the libmpv
+  # import library"): those are daily builds and old releases get deleted, so a pinned URL 404s
+  # within weeks.
+  MPV_REPO: shinchiro/mpv-winbuild-cmake
   MPV_DIR: ${{ github.workspace }}\.libmpv
 
 jobs:
@@ -237,12 +237,24 @@ jobs:
       # just emits `cargo:rustc-link-lib=mpv` (pregenerated bindings, no headers needed).
       - name: Build the libmpv import library
         shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           $ErrorActionPreference = "Stop"
           New-Item -ItemType Directory -Force -Path "$env:MPV_DIR" | Out-Null
-          curl.exe -fsSL -o "$env:MPV_DIR\mpv-dev.7z" "$env:MPV_DEV_URL"
+          # The newest release's baseline x86_64 dev package: `mpv-dev-x86_64-<date>-git-<sha>.7z`.
+          # NOT the `-v3-` variant, which requires AVX2 and would crash on older CPUs. libmpv2 needs
+          # mpv >= 0.35 (client API 2.x), which every current build is.
+          $assets = gh api "repos/$env:MPV_REPO/releases/latest" --jq '.tag_name as $t | .assets[] | [$t, .name, .browser_download_url] | @tsv'
+          if ($LASTEXITCODE -ne 0) { throw "could not read the latest $env:MPV_REPO release" }
+          $pick = $assets | ForEach-Object { $tag, $name, $url = $_ -split "`t"; [pscustomobject]@{ tag = $tag; name = $name; url = $url } } |
+            Where-Object { $_.name -match '^mpv-dev-x86_64-\d{8}-git-[0-9a-f]+\.7z$' } | Select-Object -First 1
+          if (-not $pick) { throw "no baseline mpv-dev-x86_64 package in the latest $env:MPV_REPO release — did the asset names change?" }
+          Write-Host "libmpv: $($pick.name) (release $($pick.tag))"
+          curl.exe -fsSL -o "$env:MPV_DIR\mpv-dev.7z" "$($pick.url)"
+          if ($LASTEXITCODE -ne 0) { throw "download failed: $($pick.url)" }
           7z x "$env:MPV_DIR\mpv-dev.7z" -o"$env:MPV_DIR" -y | Out-Null
-          if (-not (Test-Path "$env:MPV_DIR\libmpv-2.dll")) { throw "libmpv-2.dll not found in the dev package — did MPV_DEV_URL change shape?" }
+          if (-not (Test-Path "$env:MPV_DIR\libmpv-2.dll")) { throw "libmpv-2.dll not found in $($pick.name) — did the dev package change shape?" }
 
           # dumpbin/lib live in the MSVC toolchain. (cargo itself finds MSVC on its own; this is
           # only so we can run the two tools.)
