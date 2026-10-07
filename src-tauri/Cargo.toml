@@ -113,6 +113,8 @@ windows = { version = "0.61", features = [
   "Win32_Security",
   # OpenMutexW: is upstream LiMusic (or this app) running (migrate_upstream.rs).
   "Win32_System_Threading",
+  # Process snapshot: is PlaylistForge running before its database is copied (pf_import, D35).
+  "Win32_System_Diagnostics_ToolHelp",
   "Win32_UI_Shell",
   "Win32_UI_WindowsAndMessaging",
 ] }

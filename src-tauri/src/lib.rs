@@ -33,6 +33,7 @@ mod nativevideo;
 mod notify;
 mod orchestrator;
 mod paths;
+mod pf_import;
 mod playlist_tools;
 mod potoken;
 mod quota;
