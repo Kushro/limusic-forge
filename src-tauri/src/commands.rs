@@ -10,6 +10,8 @@ use innertube::{
 use tauri::{Emitter, Manager, State};
 
 use crate::blocked::BlockedArtist;
+use crate::playlist_tools::journal::{self, Named, OpRecord, Restore, Summary};
+use crate::playlist_tools::{self, build, dedup, everywhere, export, merge, rows, split, transfer};
 use crate::state::{
     is_local_playlist, AppState, LOCAL_PLAYLIST_PREFIX, ON_REPEAT_ID, ON_REPEAT_LIMIT,
     ON_REPEAT_WINDOW_SECS,
@@ -222,7 +224,7 @@ pub async fn get_queue(state: St<'_>) -> Result<serde_json::Value, String> {
 /// `visitor_data`) and internal blobs (`queue_json`, `queue_index`, `queue_position`) never cross
 /// into the webview: they'd otherwise ship the login credential to the renderer on every open, and
 /// the webview can't overwrite them either.
-const UI_SETTINGS: [&str; 28] = [
+const UI_SETTINGS: [&str; 30] = [
     "volume",
     "proxy",
     "quality",
@@ -251,6 +253,8 @@ const UI_SETTINGS: [&str; 28] = [
     "crossfade",
     "crossfade_secs",
     "locale",
+    "drop_mode",
+    "drop_dupes",
 ];
 
 /// Resolve the music video for `video_id` and hand back a `limusicvideo://` URL the player view
@@ -752,7 +756,7 @@ pub async fn show_main(state: St<'_>, window: tauri::WebviewWindow) -> Result<bo
 
 // --- browse / library (context/08) ---------------------------------------------------------
 
-fn metadata_client(state: &Arc<AppState>) -> Result<&innertube::YouTubeClient, String> {
+pub(crate) fn metadata_client(state: &Arc<AppState>) -> Result<&innertube::YouTubeClient, String> {
     state.clients.get(innertube::METADATA_CLIENT).ok_or_else(|| "metadata client missing".into())
 }
 
@@ -1085,7 +1089,7 @@ pub async fn start_radio(
 
 // --- write actions (context/01 ✎, context/15) ----------------------------------------------
 
-fn require_login(state: &Arc<AppState>) -> Result<&innertube::YouTubeClient, String> {
+pub(crate) fn require_login(state: &Arc<AppState>) -> Result<&innertube::YouTubeClient, String> {
     if !state.it.is_logged_in() {
         return Err("Sign in first to use this.".into());
     }
@@ -1127,7 +1131,7 @@ pub async fn set_album_saved(
 /// Login, plus the guard every playlist edit needs. Two ids never reach `edit_playlist`: On Repeat
 /// has no YouTube playlist behind it, and Liked Music is an auto-playlist YouTube edits through the
 /// rating endpoint instead. Both answer 400 there.
-fn editable_playlist<'a>(
+pub(crate) fn editable_playlist<'a>(
     state: &'a Arc<AppState>,
     playlist_id: &str,
 ) -> Result<&'a innertube::YouTubeClient, String> {
@@ -1149,7 +1153,7 @@ fn editable_playlist<'a>(
 /// us nothing: `search` responses carry no `likeStatus` at all (live-checked 2026-08-28), so
 /// membership of this list is the only way a result can draw its heart filled. Not shown in the
 /// "saved in" chip, though: the thumbs-up already says it (the UI filters it out there).
-const LIKED_MUSIC_ID: &str = "VLLM";
+pub(crate) const LIKED_MUSIC_ID: &str = "VLLM";
 /// How long the membership index is trusted before a re-crawl. Adds and removes made in this app
 /// patch it as they happen, so this window only ever covers edits made somewhere else.
 const PLAYLIST_INDEX_TTL_SECS: i64 = 6 * 3600;
@@ -1183,9 +1187,10 @@ pub async fn sync_playlist_index(
     }
     let fresh_until = state
         .db
-        // `_v2`: the key changed when Liked Music joined the index, so an install with a fresh
-        // stamp re-crawls once instead of showing hearts empty for another six hours.
-        .get_setting("playlist_index_synced_at_v2")
+        // The key changes whenever the index learns to hold something new, so an install with a
+        // fresh stamp re-crawls once: `_v2` when Liked Music joined it, `_v3` when each track's
+        // metadata did (the "in your playlists" view and the monitor read it).
+        .get_setting("playlist_index_synced_at_v3")
         .and_then(|at| at.parse::<i64>().ok())
         .map(|at| at + PLAYLIST_INDEX_TTL_SECS);
     if fresh_until.is_some_and(|until| now_secs() < until) {
@@ -1218,19 +1223,47 @@ pub async fn sync_playlist_index(
         if item.id != LIKED_MUSIC_ID && !page.owned && !page.collaborative {
             continue;
         }
-        let mut video_ids: Vec<String> = page.items.into_iter().map(|song| song.video_id).collect();
+        let mut songs: Vec<SongItem> = page.items;
         let mut token = page.continuation;
+        // Read to the end, not cut short by a failed page or the page cap: only then may the
+        // monitor read a track missing from it as gone.
+        let mut complete = token.is_none();
         for _ in 0..PLAYLIST_INDEX_MAX_PAGES {
-            let Some(next) = token.take() else { break };
+            let Some(next) = token.take() else {
+                complete = true;
+                break;
+            };
             let Ok(more) = state.it.playlist_continuation(client, &next).await else { break };
-            video_ids.extend(more.items.into_iter().map(|song| song.video_id));
+            songs.extend(more.items);
             token = more.continuation;
         }
-        state.db.set_playlist_tracks(&item.id, &video_ids);
+        complete = complete || token.is_none();
+        // Liked Music changes every time you like or unlike something anywhere: not news.
+        if complete && item.id != LIKED_MUSIC_ID {
+            let before = state.db.playlist_songs(&item.id);
+            for c in playlist_tools::monitor::diff(&before, &songs) {
+                let json = c.song.and_then(|s| serde_json::to_string(&s).ok());
+                state.db.add_playlist_alert(
+                    &item.id,
+                    &c.video_id,
+                    c.kind,
+                    json.as_deref(),
+                    now_secs(),
+                );
+            }
+        }
+        let rows: Vec<(String, String)> = songs
+            .into_iter()
+            .map(|s| {
+                let json = serde_json::to_string(&playlist_row(s.clone())).unwrap_or_default();
+                (s.video_id, json)
+            })
+            .collect();
+        state.db.set_playlist_songs(&item.id, &rows);
         indexed.push(item.id);
     }
     state.db.retain_playlists(&indexed);
-    state.db.set_setting("playlist_index_synced_at_v2", &now_secs().to_string());
+    state.db.set_setting("playlist_index_synced_at_v3", &now_secs().to_string());
     Ok(state.db.playlist_memberships())
 }
 
@@ -1553,19 +1586,251 @@ fn custom_cover(state: &Arc<AppState>, playlist_id: &str) -> Option<String> {
 
 #[tauri::command]
 pub async fn delete_playlist(state: St<'_>, playlist_id: String) -> Result<(), String> {
-    if is_local_playlist(&playlist_id) {
-        state.db.delete_local_playlist(local_key(&playlist_id)?).map_err(db_err)?;
+    delete_playlist_inner(&state, &playlist_id).await
+}
+
+/// `delete_playlist`, for the playlist tools' undo of a playlist they created.
+pub(crate) async fn delete_playlist_inner(
+    state: &Arc<AppState>,
+    playlist_id: &str,
+) -> Result<(), String> {
+    if is_local_playlist(playlist_id) {
+        state.db.delete_local_playlist(local_key(playlist_id)?).map_err(db_err)?;
         // Its artwork was a copy made for it, so it goes too.
-        if let Some(cover) = state.db.get_setting(&cover_key(&playlist_id)) {
+        if let Some(cover) = state.db.get_setting(&cover_key(playlist_id)) {
             let _ = std::fs::remove_file(cover);
-            state.db.delete_setting(&cover_key(&playlist_id));
+            state.db.delete_setting(&cover_key(playlist_id));
         }
         return Ok(());
     }
-    let client = editable_playlist(&state, &playlist_id)?;
-    state.it.delete_playlist(client, &playlist_id).await.map_err(|e| e.to_string())?;
-    state.db.forget_playlist(&playlist_id);
+    let client = editable_playlist(state, playlist_id)?;
+    state.it.delete_playlist(client, playlist_id).await.map_err(|e| e.to_string())?;
+    state.db.forget_playlist(playlist_id);
     Ok(())
+}
+
+// --- playlist tools (playlist_tools/) ----------------------------------------------------------
+// Each edit answers its journal entry (`OpRecord`), which the UI turns into an "Undo" toast, and
+// announces the playlists it touched (`playlists-edited`) so any open page re-reads them.
+
+/// Put a playlist in `order` (row handles: `set_video_id`s). `None` when nothing had to move.
+#[tauri::command]
+pub async fn reorder_playlist(
+    state: St<'_>,
+    playlist_id: String,
+    title: String,
+    order: Vec<String>,
+) -> Result<Option<OpRecord>, String> {
+    let (before, moved) = rows::reorder(&state, &playlist_id, &order, &|| false).await?;
+    if moved == 0 {
+        return Ok(None);
+    }
+    journal::announce(&state, std::slice::from_ref(&playlist_id));
+    let summary =
+        Summary { playlists: vec![Named { id: playlist_id.clone(), title }], count: moved };
+    Ok(journal::record(&state, "reorder", &summary, &journal::reorder_undo(&playlist_id, before)))
+}
+
+/// Take rows out of a playlist, undoably. Each row comes with the handle of the row after it that
+/// stays (`before`), which is where an undo puts it back. `kind` names it in the history: a plain
+/// removal, or the duplicate finder's.
+#[tauri::command]
+pub async fn remove_tracks(
+    state: St<'_>,
+    playlist_id: String,
+    title: String,
+    rows: Vec<Restore>,
+    kind: Option<String>,
+) -> Result<Option<OpRecord>, String> {
+    let kind = if kind.as_deref() == Some("dedupe") { "dedupe" } else { "remove" };
+    let songs: Vec<SongItem> = rows.iter().map(|r| r.song.clone()).collect();
+    rows::remove_rows(&state, &playlist_id, &songs, &|| false).await?;
+    journal::announce(&state, std::slice::from_ref(&playlist_id));
+    let summary =
+        Summary { playlists: vec![Named { id: playlist_id.clone(), title }], count: songs.len() };
+    let undo = [journal::restore_step(&playlist_id, &rows)];
+    Ok(journal::record(&state, kind, &summary, &undo))
+}
+
+/// The whole playlist and the duplicate clusters in it (`playlist_tools::dedup`). Reads every page
+/// of an account playlist, so the indices line up with rows the UI may not have scrolled to yet.
+#[derive(serde::Serialize)]
+pub struct DuplicateReport {
+    rows: Vec<SongItem>,
+    clusters: Vec<dedup::Cluster>,
+}
+
+#[tauri::command]
+pub async fn find_duplicates(
+    state: St<'_>,
+    playlist_id: String,
+    options: dedup::Options,
+    keep: dedup::Keep,
+) -> Result<DuplicateReport, String> {
+    let rows = rows::read_all(&state, &playlist_id).await?;
+    let clusters = dedup::find_clusters(&rows, &options, keep);
+    Ok(DuplicateReport { rows, clusters })
+}
+
+/// Copy or move tracks into another playlist: a drop on a sidebar playlist, or "Move to…".
+/// `source` is the playlist they came from (`None` for a list that isn't one, which can only copy).
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn transfer_tracks(
+    state: St<'_>,
+    source: Option<String>,
+    source_title: Option<String>,
+    target: String,
+    target_title: String,
+    rows: Vec<Restore>,
+    mode: transfer::Mode,
+    duplicates: transfer::Duplicates,
+) -> Result<transfer::Transferred, String> {
+    let req = transfer::Request {
+        source: source.map(|id| Named { id, title: source_title.unwrap_or_default() }),
+        target: Named { id: target, title: target_title },
+        rows,
+        mode,
+        duplicates,
+    };
+    transfer::run(&state, req).await
+}
+
+/// A split, worked out but not written: the whole playlist and which rows go into which part.
+#[derive(serde::Serialize)]
+pub struct SplitPlan {
+    rows: Vec<SongItem>,
+    parts: Vec<split::Part>,
+}
+
+#[tauri::command]
+pub async fn plan_split(
+    state: St<'_>,
+    playlist_id: String,
+    by: split::SplitBy,
+    order: split::Order,
+) -> Result<SplitPlan, String> {
+    let rows = rows::read_all(&state, &playlist_id).await?;
+    let parts = split::split(&rows, by, order);
+    Ok(SplitPlan { rows, parts })
+}
+
+/// Several playlists merged into one list, not written yet. `into`: an existing playlist the merge
+/// will be appended to, whose tracks are left out when deduplicating.
+#[tauri::command]
+pub async fn merge_preview(
+    state: St<'_>,
+    ids: Vec<String>,
+    how: merge::Interleave,
+    dedupe: bool,
+    into: Option<String>,
+) -> Result<Vec<SongItem>, String> {
+    let mut lists = Vec::with_capacity(ids.len());
+    for id in &ids {
+        lists.push(rows::read_all(&state, id).await?);
+    }
+    let skip = match (&into, dedupe) {
+        (Some(target), true) => {
+            rows::read_all(&state, target).await?.into_iter().map(|s| s.video_id).collect()
+        }
+        _ => Default::default(),
+    };
+    Ok(merge::merge(&lists, how, dedupe, &skip))
+}
+
+/// Write a split or a merge (`playlist_tools::build`): new playlists, or one existing playlist
+/// appended to. Progress arrives as `playlist-op-progress`; `cancel_playlist_build` stops it.
+#[tauri::command]
+pub async fn build_playlists(
+    state: St<'_>,
+    kind: String,
+    sources: Vec<Named>,
+    lists: Vec<build::NewList>,
+    dest: build::Dest,
+) -> Result<build::Built, String> {
+    let kind = if kind == "merge" { "merge" } else { "split" };
+    build::run(&state, kind, sources, lists, dest).await
+}
+
+#[tauri::command]
+pub fn cancel_playlist_build() {
+    build::cancel();
+}
+
+/// Write the whole playlist to `path` (picked in the save dialog) as CSV, JSON or M3U8. Answers
+/// how many tracks went out.
+#[tauri::command]
+pub async fn export_playlist(
+    state: St<'_>,
+    playlist_id: String,
+    title: String,
+    format: export::Format,
+    path: String,
+) -> Result<usize, String> {
+    let rows = rows::read_all(&state, &playlist_id).await?;
+    let text = export::render(format, &title, &rows)?;
+    std::fs::write(&path, text).map_err(|e| e.to_string())?;
+    Ok(rows.len())
+}
+
+/// Every song in your playlists, once each, with the playlists holding it. From the index: no
+/// network, and empty until the first sync after sign-in has filled in the metadata.
+#[tauri::command]
+pub fn songs_everywhere(state: St<'_>) -> Vec<everywhere::Everywhere> {
+    everywhere::group(state.db.indexed_songs())
+}
+
+/// Keep these songs in `target` only, or with no target, take them out of every playlist.
+#[tauri::command]
+pub async fn keep_only_in(
+    state: St<'_>,
+    songs: Vec<SongItem>,
+    target: Option<Named>,
+    titles: std::collections::HashMap<String, String>,
+) -> Result<everywhere::Kept, String> {
+    everywhere::keep_only_in(&state, songs, target, titles).await
+}
+
+/// A track that left one of your playlists, or turned unavailable in it, since the sync before.
+#[derive(serde::Serialize)]
+pub struct PlaylistAlert {
+    playlist_id: String,
+    video_id: String,
+    kind: String,
+    song: Option<SongItem>,
+    at: i64,
+}
+
+#[tauri::command]
+pub fn playlist_alerts(state: St<'_>) -> Vec<PlaylistAlert> {
+    state
+        .db
+        .playlist_alerts()
+        .into_iter()
+        .map(|(playlist_id, video_id, kind, json, at)| PlaylistAlert {
+            playlist_id,
+            video_id,
+            kind,
+            song: json.and_then(|j| serde_json::from_str(&j).ok()),
+            at,
+        })
+        .collect()
+}
+
+#[tauri::command]
+pub fn dismiss_playlist_alert(state: St<'_>, playlist_id: String, video_id: String, kind: String) {
+    state.db.dismiss_playlist_alert(&playlist_id, &video_id, &kind);
+}
+
+/// The undo history, newest first.
+#[tauri::command]
+pub fn playlist_history(state: St<'_>) -> Vec<OpRecord> {
+    journal::history(&state)
+}
+
+#[tauri::command]
+pub async fn undo_playlist_op(state: St<'_>, id: i64) -> Result<OpRecord, String> {
+    journal::undo(&state, id).await
 }
 
 // --- playlists on this machine (issue #251) --------------------------------------------------
@@ -1577,11 +1842,11 @@ const GONE: &str = "This playlist is no longer on this device.";
 
 /// `LOCALPLAYLIST:<n>` → n. An id with the prefix and no number is still not YouTube's, so it is
 /// an error rather than a fall-through to a browse YouTube would 400.
-fn local_key(id: &str) -> Result<i64, String> {
+pub(crate) fn local_key(id: &str) -> Result<i64, String> {
     id.strip_prefix(LOCAL_PLAYLIST_PREFIX).and_then(|n| n.parse().ok()).ok_or_else(|| GONE.into())
 }
 
-fn db_err(e: rusqlite::Error) -> String {
+pub(crate) fn db_err(e: rusqlite::Error) -> String {
     match e {
         rusqlite::Error::QueryReturnedNoRows => GONE.into(),
         e => e.to_string(),
@@ -2322,5 +2587,50 @@ mod tests {
             SongItem { video_id: "abc".into(), title: "Grace".into(), ..Default::default() }
         );
         assert_eq!(row.title, played.title, "the song itself survives");
+    }
+
+    /// `set_setting` rejects any key outside `UI_SETTINGS`, and the UI swallows most of those
+    /// errors, so a key added on the UI side alone silently never persists (`drop_mode` and
+    /// `drop_dupes` did exactly that). Every literal `setSetting('<key>'` under `ui/src` has to be
+    /// on the list.
+    #[test]
+    fn ui_settings_allow_every_key_the_ui_writes() {
+        fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    walk(&path, out);
+                } else if matches!(path.extension().and_then(|e| e.to_str()), Some("ts" | "svelte"))
+                {
+                    out.push(path);
+                }
+            }
+        }
+        let root = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../ui/src"));
+        let mut files = Vec::new();
+        walk(root, &mut files);
+
+        let needle = "setSetting(";
+        let mut seen = Vec::new();
+        for file in &files {
+            let src = std::fs::read_to_string(file).unwrap();
+            for (at, _) in src.match_indices(needle) {
+                let rest = &src[at + needle.len()..];
+                let Some(quote) = rest.chars().next().filter(|c| *c == '\'' || *c == '"') else {
+                    continue; // a computed key or the definition itself, nothing literal to check
+                };
+                let rest = &rest[1..];
+                let key = &rest[..rest.find(quote).unwrap()];
+                assert!(
+                    UI_SETTINGS.contains(&key),
+                    "{} writes setting `{key}`, which set_setting rejects",
+                    file.display()
+                );
+                seen.push(key.to_owned());
+            }
+        }
+        // Guards the scan itself: a moved ui/src or a renamed call would otherwise pass vacuously.
+        assert!(seen.iter().any(|k| k == "drop_mode"), "scan found no setSetting calls");
+        assert!(seen.iter().any(|k| k == "drop_dupes"));
     }
 }

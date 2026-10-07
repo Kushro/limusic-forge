@@ -13,7 +13,7 @@ import type {
 	SongItem
 } from './api';
 import { applyLtState, lt } from './lt.svelte';
-import { clearCached, invalidateCached, LIBRARY_SONGS_KEY } from './pagecache';
+import { clearCached, invalidateCached, invalidateCachedPrefix, LIBRARY_SONGS_KEY } from './pagecache';
 import * as pl from './personal';
 import type { Personal } from './personal';
 import { appearance } from './theme.svelte';
@@ -66,8 +66,14 @@ export const prefs = $state({
 	ambient: false,
 	/** `autoplay`: the queue keeps going with similar songs. Switched from the queue panel as well
 	 *  as Settings, so both read it here. */
-	autoplay: true
+	autoplay: true,
+	/** `drop_mode`: what dropping tracks on a sidebar playlist does (`transfer.svelte.ts`). */
+	dropMode: 'ask' as DropMode,
+	/** `drop_dupes`: what a copy or move does with a track the target already holds. */
+	dropDupes: 'skip' as DropDupes
 });
+export type DropMode = 'ask' | 'copy' | 'move';
+export type DropDupes = 'skip' | 'allow' | 'consolidate';
 
 /** Rust drops the upcoming autoplay tracks when this goes off, and tops a short queue up when it
  *  comes on, so the queue shows what will actually play. */
@@ -385,6 +391,21 @@ export async function loadSavedIndex() {
 		.syncPlaylistIndex()
 		.then(apply)
 		.catch(() => {});
+}
+
+/** A playlist tool (or its undo) changed these playlists, from wherever it was started. Every cached
+ *  order of them is stale, and so is the saved-in index; the backend already patched its copy of
+ *  that, so re-reading it is a SQLite read, not a crawl. A page showing one re-reads it itself. */
+function playlistsEdited(ids: string[]) {
+	for (const id of ids) invalidateCachedPrefix(`playlist:${id}`);
+	const generation = libraryGeneration;
+	api
+		.playlistIndex()
+		.then((map) => {
+			if (generation === libraryGeneration) savedIn.map = map;
+		})
+		.catch(() => {});
+	if (ids.some(api.isLocalPlaylist)) refreshLocalPlaylists();
 }
 
 /** Every one of `videoIds` is now in `playlistId`, refused duplicates included: YouTube saying the
@@ -1213,28 +1234,51 @@ export function toggleSidebar() {
 	localStorage.setItem('sidebar_collapsed', ui.sidebarCollapsed ? '1' : '0');
 }
 
-export type Toast = { msg: string; kind: 'info' | 'success' | 'error' };
+/** A toast may carry one action (the playlist tools' "Undo"), and then lives longer and shows how
+ *  long it has left. `id` restarts the countdown bar when one action toast replaces another. */
+export type Toast = {
+	msg: string;
+	kind: 'info' | 'success' | 'error';
+	action?: { label: string; run: () => void };
+	ms: number;
+	id: number;
+};
 
 // A counter, not the toast itself: $state proxies the stored object, so `ui.toast === t` is never
 // true and the toast would never clear. It also means a repeated message can't cut its own retry short.
 let seq = 0;
+const TOAST_MS = 2500;
+/** Long enough to read the message, find the button and change your mind. */
+const ACTION_TOAST_MS = 8000;
 
-function show(msg: string, kind: Toast['kind']) {
+function show(msg: string, kind: Toast['kind'], action?: Toast['action']) {
 	const id = ++seq;
+	const ms = action ? ACTION_TOAST_MS : TOAST_MS;
 	// The one chokepoint every `toast.error(String(e))` and every `playback-error` event goes
 	// through, so a dead connection is worded once here instead of at forty call sites. Anything
 	// that isn't a network failure (including every `t()` string passing through) is untouched.
-	ui.toast = { msg: friendlyNetError(msg, t('errors.unreachable')), kind };
+	ui.toast = { msg: friendlyNetError(msg, t('errors.unreachable')), kind, action, ms, id };
 	setTimeout(() => {
 		if (seq === id) ui.toast = null;
-	}, 2500);
+	}, ms);
 }
 
-/** Sonner-shaped. Bare `toast(msg)` is a neutral notice; .success/.error pick the icon. */
+/** Run the visible toast's action once and dismiss it. */
+export function runToastAction() {
+	const action = ui.toast?.action;
+	ui.toast = null;
+	seq++;
+	action?.run();
+}
+
+/** Sonner-shaped. Bare `toast(msg)` is a neutral notice; .success/.error pick the icon.
+ *  `.action` adds a button (for an undo) and keeps the toast up for 8 s. */
 export const toast = Object.assign((msg: string) => show(msg, 'info'), {
 	info: (msg: string) => show(msg, 'info'),
 	success: (msg: string) => show(msg, 'success'),
-	error: (msg: string) => show(msg, 'error')
+	error: (msg: string) => show(msg, 'error'),
+	action: (msg: string, label: string, run: () => void) =>
+		show(msg, 'success', { label, run })
 });
 
 export function openShare(item: BrowseItem) {
@@ -1549,6 +1593,7 @@ export function initApp(mini = false): () => void {
 		api.onPlaybackNotice((msg) => toast(msg)), // auto-skipped an unplayable track
 		api.onCoverError((msg) => toast.error(msg)), // playlist artwork YouTube wouldn't take
 		api.onLocalChanged(forgetLocal), // a local file turned out to be gone — drop it everywhere
+		api.onPlaylistsEdited(playlistsEdited), // a playlist tool or its undo changed these
 		api.onAuthChanged((a) => {
 			auth.account = a;
 			resetLibraryForAccount();
@@ -1606,6 +1651,8 @@ export function initApp(mini = false): () => void {
 			prefs.ambient = s.ambient_light === 'true';
 			prefs.discordRpc = s.discord_rpc === 'true';
 			prefs.autoplay = s.autoplay !== 'false';
+			if (s.drop_mode === 'copy' || s.drop_mode === 'move') prefs.dropMode = s.drop_mode;
+			if (s.drop_dupes === 'allow' || s.drop_dupes === 'consolidate') prefs.dropDupes = s.drop_dupes;
 			// Half of what the app shows is YouTube's own text, and Rust asks for it in the language
 			// this setting holds (#274). It reads the setting at startup, before the SPA exists to
 			// tell it anything, so the two disagree on a fresh install, on a language taken from the

@@ -60,6 +60,8 @@ export interface SongItem {
 	/** One of the user's own YouTube Music uploads. Set by Rust and passed straight back on play:
 	 *  only an authenticated client can stream one, and the row is where that is known. */
 	is_upload?: boolean;
+	/** A playlist row YouTube greys out: taken down, made private, or blocked where you are. */
+	unavailable?: boolean;
 }
 
 export interface NowPlaying {
@@ -689,6 +691,179 @@ export const removeFromPlaylist = (playlistId: string, videoId: string, setVideo
 /** Bulk removal: one request, all or nothing. `tracks` is [videoId, setVideoId] per row. */
 export const removeManyFromPlaylist = (playlistId: string, tracks: [string, string][]) =>
 	invoke<void>('remove_many_from_playlist', { playlistId, tracks });
+
+// --- playlist tools (src-tauri/src/playlist_tools) ---------------------------------------------
+
+/** A row going out of a playlist, with the handle of the row after it that stays: where an undo
+ *  puts it back (`null`: the end). `song.set_video_id` is the row's own handle. */
+export type RowRef = { song: SongItem; before: string | null };
+/** One journal entry: an edit the playlist tools made, and whether it can still be undone. */
+export type PlaylistOp = {
+	id: number;
+	kind: 'reorder' | 'remove' | 'copy' | 'move' | 'dedupe' | 'split' | 'merge' | 'add';
+	summary: { playlists: { id: string; title: string }[]; count: number };
+	createdAt: number;
+	undone: boolean;
+	undoable: boolean;
+};
+type RawPlaylistOp = Omit<PlaylistOp, 'createdAt'> & { created_at: number };
+const op = (r: RawPlaylistOp): PlaylistOp => ({
+	id: r.id,
+	kind: r.kind,
+	summary: r.summary,
+	createdAt: r.created_at,
+	undone: r.undone,
+	undoable: r.undoable
+});
+/** Put a playlist in `order` (row handles). `null` when nothing had to move. */
+export const reorderPlaylist = async (playlistId: string, title: string, order: string[]) => {
+	const r = await invoke<RawPlaylistOp | null>('reorder_playlist', { playlistId, title, order });
+	return r && op(r);
+};
+/** Take rows out of a playlist, undoably (see `RowRef`). `kind` names it in the history. */
+export const removeTracks = async (
+	playlistId: string,
+	title: string,
+	rows: RowRef[],
+	kind: 'remove' | 'dedupe' = 'remove'
+) => {
+	const r = await invoke<RawPlaylistOp | null>('remove_tracks', {
+		playlistId,
+		title,
+		rows: rows.map((r) => ({ song: r.song, before: r.before })),
+		kind
+	});
+	return r && op(r);
+};
+/** Which copy of a duplicate stays: the highest, the lowest, or the audio track over a video. */
+export type DuplicateKeep = 'first' | 'last' | 'prefer_song';
+/** The whole playlist, and the groups of rows (indices into it) that are copies of each other. */
+export type DuplicateReport = {
+	rows: SongItem[];
+	clusters: { rows: number[]; reasons: ('exact' | 'title' | 'similar')[]; keep: number }[];
+};
+export const findDuplicates = (
+	playlistId: string,
+	options: { exact: boolean; title: boolean; similar: boolean },
+	keep: DuplicateKeep
+) => invoke<DuplicateReport>('find_duplicates', { playlistId, options, keep });
+/** What a copy or move did. `duplicates`: already in the target; `refused`: YouTube wouldn't take
+ *  them (or files on this computer bound for an account playlist). */
+export type Transferred = {
+	added: number;
+	duplicates: number;
+	refused: number;
+	removed: number;
+	op: PlaylistOp | null;
+};
+/** Copy or move rows into `target`. `source` is null for a list that isn't a playlist of yours,
+ *  which can only copy. See `playlist_tools/transfer.rs` for the duplicate policies. */
+export const transferTracks = async (args: {
+	source: { id: string; title: string } | null;
+	target: { id: string; title: string };
+	rows: RowRef[];
+	mode: 'copy' | 'move';
+	duplicates: 'skip' | 'allow' | 'consolidate';
+}) => {
+	const r = await invoke<Omit<Transferred, 'op'> & { op: RawPlaylistOp | null }>('transfer_tracks', {
+		source: args.source?.id ?? null,
+		sourceTitle: args.source?.title ?? null,
+		target: args.target.id,
+		targetTitle: args.target.title,
+		rows: args.rows.map((r) => ({ song: r.song, before: r.before })),
+		mode: args.mode,
+		duplicates: args.duplicates
+	});
+	return { ...r, op: r.op && op(r.op) };
+};
+export type SplitBy = { by: 'artist'; min: number } | { by: 'count'; parts: number } | { by: 'size'; max: number };
+export type SplitOrder =
+	| { order: 'playlist' | 'title' | 'artist' | 'duration' }
+	| { order: 'shuffle'; seed: number };
+/** A split worked out but not written: the whole playlist and the rows (indices) of each part.
+ *  `artist` names a per-artist part; null is the pooled one, or a numbered part. */
+export type SplitPlan = { rows: SongItem[]; parts: { artist: string | null; rows: number[] }[] };
+export const planSplit = (playlistId: string, by: SplitBy, order: SplitOrder) =>
+	invoke<SplitPlan>('plan_split', { playlistId, by, order });
+/** Several playlists merged into one list, not written. `into` is an existing target whose tracks
+ *  a dedupe leaves out. */
+export const mergePreview = (
+	ids: string[],
+	how: 'concat' | 'round_robin',
+	dedupe: boolean,
+	into: string | null
+) => invoke<SongItem[]>('merge_preview', { ids, how, dedupe, into });
+export type BuildDest = { to: 'new'; local: boolean } | { to: 'existing'; id: string; title: string };
+export type Built = {
+	created: { id: string; title: string }[];
+	added: number;
+	stopped: boolean;
+	error: string | null;
+	op: PlaylistOp | null;
+};
+/** Write a split or a merge. Progress comes through `onPlaylistOpProgress`. */
+export const buildPlaylists = async (args: {
+	kind: 'split' | 'merge';
+	sources: { id: string; title: string }[];
+	lists: { name: string; songs: SongItem[] }[];
+	dest: BuildDest;
+}) => {
+	const r = await invoke<Omit<Built, 'op'> & { op: RawPlaylistOp | null }>('build_playlists', args);
+	return { ...r, op: r.op && op(r.op) };
+};
+export const cancelPlaylistBuild = () => invoke<void>('cancel_playlist_build');
+/** Write the whole playlist to `path` as CSV, JSON or M3U8. Answers how many tracks went out. */
+export const exportPlaylist = (
+	playlistId: string,
+	title: string,
+	format: 'csv' | 'json' | 'm3u8',
+	path: string
+) => invoke<number>('export_playlist', { playlistId, title, format, path });
+export type BuildProgress = { done: number; total: number; current: string };
+export const onPlaylistOpProgress = (cb: (p: BuildProgress) => void): Promise<UnlistenFn> =>
+	listen<BuildProgress>('playlist-op-progress', (e) => cb(e.payload));
+/** A song in your playlists, once, with the ids of the playlists that hold it. */
+export type Everywhere = { song: SongItem; playlists: string[] };
+/** Every song across your playlists, from the index (no network). */
+export const songsEverywhere = () => invoke<Everywhere[]>('songs_everywhere');
+export type Kept = { added: number; removed: number; failed: string[]; op: PlaylistOp | null };
+/** Keep `songs` only in `target` (added there if missing), or with no target, out of every
+ *  playlist. `titles` names the playlists for the history. */
+export const keepOnlyIn = async (
+	songs: SongItem[],
+	target: { id: string; title: string } | null,
+	titles: Record<string, string>
+) => {
+	const r = await invoke<Omit<Kept, 'op'> & { op: RawPlaylistOp | null }>('keep_only_in', {
+		songs,
+		target,
+		titles
+	});
+	return { ...r, op: r.op && op(r.op) };
+};
+/** A track that left a playlist of yours, or turned unavailable in it, since the sync before. */
+export type PlaylistAlert = {
+	playlist_id: string;
+	video_id: string;
+	kind: 'gone' | 'unavailable';
+	song: SongItem | null;
+	at: number;
+};
+export const playlistAlerts = () => invoke<PlaylistAlert[]>('playlist_alerts');
+export const dismissPlaylistAlert = (a: PlaylistAlert) =>
+	invoke<void>('dismiss_playlist_alert', {
+		playlistId: a.playlist_id,
+		videoId: a.video_id,
+		kind: a.kind
+	});
+export const playlistHistory = async () =>
+	(await invoke<RawPlaylistOp[]>('playlist_history')).map(op);
+export const undoPlaylistOp = async (id: number) =>
+	op(await invoke<RawPlaylistOp>('undo_playlist_op', { id }));
+/** A playlist tool (or its undo) changed these playlists: a page showing one should re-read it. */
+export const onPlaylistsEdited = (cb: (ids: string[]) => void): Promise<UnlistenFn> =>
+	listen<string[]>('playlists-edited', (e) => cb(e.payload));
+
 /** `local` keeps it on this machine instead of the account, the only kind there is signed out.
  *  Answers the new id: a `LOCALPLAYLIST:` browseId for a local one, YouTube's playlist id else. */
 export const createPlaylist = (title: string, local = false) =>

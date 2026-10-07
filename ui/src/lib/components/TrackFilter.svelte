@@ -7,16 +7,18 @@
 -->
 <script module lang="ts">
 	import type { SongItem } from '$lib/api';
+	import { fold } from '$lib/facets';
 
-	/** Substring match over title, artist and album. Empty query returns the list untouched. */
+	/** Substring match over title, artist and album, ignoring case and accents ("cancion" finds
+	 *  "Canción"). Empty query returns the list untouched. */
 	export function filterTracks<T extends SongItem>(items: T[], query: string): T[] {
-		const q = query.trim().toLowerCase();
+		const q = fold(query.trim());
 		if (!q) return items;
 		return items.filter(
 			(t) =>
-				t.title?.toLowerCase().includes(q) ||
-				t.artists?.toLowerCase().includes(q) ||
-				t.album?.toLowerCase().includes(q)
+				fold(t.title ?? '').includes(q) ||
+				fold(t.artists ?? '').includes(q) ||
+				fold(t.album ?? '').includes(q)
 		);
 	}
 </script>

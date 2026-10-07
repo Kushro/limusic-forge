@@ -758,3 +758,44 @@ async fn cipher_registries_cover_the_current_player() {
          VISIONOS alone carries playback meanwhile."
     );
 }
+
+/// `ACTION_MOVE_VIDEO_BEFORE` still reorders an owned playlist, and `playlist_add_many_rows` still
+/// hands back the set ids those moves need. Works on a throwaway private playlist it creates and
+/// deletes again, so nothing of yours is touched, but it does write to the account:
+///   LIMUSIC_COOKIE=… LIMUSIC_VISITOR=… cargo test -p innertube --features integration-tests playlist_move -- --ignored --nocapture
+#[tokio::test]
+#[ignore]
+async fn playlist_move_reorders_an_owned_playlist() {
+    let Some(cookie) = std::env::var("LIMUSIC_COOKIE").ok().filter(|s| !s.is_empty()) else {
+        eprintln!("skipped: set LIMUSIC_COOKIE (+LIMUSIC_VISITOR) to run");
+        return;
+    };
+    let visitor = std::env::var("LIMUSIC_VISITOR").ok().filter(|s| !s.is_empty());
+    let it = InnerTube::new(
+        Session { cookie: Some(cookie), visitor_data: visitor, ..Session::default() },
+        None,
+    )
+    .unwrap();
+    let clients = Clients::bundled();
+    let client = clients.get("WEB_REMIX").expect("WEB_REMIX client");
+
+    let id = it.create_playlist(client, "limusic move test").await.expect("create");
+    let videos: Vec<String> =
+        ["dQw4w9WgXcQ", "xl9cFAOKg_Y", "kJQP7kiw5Fk"].iter().map(|s| s.to_string()).collect();
+    let result = async {
+        let rows = it.playlist_add_many_rows(client, &id, &videos, false).await.expect("add");
+        assert_eq!(rows.len(), 3, "every add should report its set id: {rows:?}");
+        let set = |v: &str| rows.iter().find(|(id, _)| id == v).unwrap().1.clone();
+        // [a, b, c] -> [c, a, b]: c before a, which is the whole reorder in one move.
+        it.playlist_move_many(client, &id, &[(set(&videos[2]), Some(set(&videos[0])))])
+            .await
+            .expect("move");
+        // Then a to the end: [c, b, a].
+        it.playlist_move_many(client, &id, &[(set(&videos[0]), None)]).await.expect("move last");
+        let page = it.playlist(client, &format!("VL{id}"), None).await.expect("read back");
+        page.items.iter().map(|s| s.video_id.clone()).collect::<Vec<_>>()
+    }
+    .await;
+    it.delete_playlist(client, &id).await.expect("delete the test playlist");
+    assert_eq!(result, vec![videos[2].clone(), videos[1].clone(), videos[0].clone()]);
+}

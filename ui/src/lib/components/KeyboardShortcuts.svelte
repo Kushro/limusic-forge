@@ -33,6 +33,14 @@
 				[t('dialogs.shortcuts.reset_zoom'), `${MOD}0`],
 				[t('dialogs.shortcuts.show_this_list'), HELP_COMBO]
 			]
+		},
+		{
+			// On a playlist page of yours, in select mode (`reorder.ts`).
+			title: t('dialogs.shortcuts.group_playlists'),
+			rows: [
+				[t('dialogs.shortcuts.move_selected_up'), 'Alt+↑'],
+				[t('dialogs.shortcuts.move_selected_down'), 'Alt+↓']
+			]
 		}
 	]);
 </script>

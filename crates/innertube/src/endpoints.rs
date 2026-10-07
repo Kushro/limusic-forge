@@ -814,7 +814,39 @@ impl InnerTube {
         playlist_id: &str,
         video_ids: &[String],
     ) -> Result<(), Error> {
-        let actions = video_ids.iter().map(|v| add_video_action(v, false)).collect();
+        self.playlist_add_many_rows(client, playlist_id, video_ids, false).await.map(|_| ())
+    }
+
+    /// `playlist_add_many`, answering with the `(videoId, setVideoId)` of every row the edit
+    /// created, in the order YouTube reports them. The set ids are what a later move or removal of
+    /// those rows needs, so a bulk copy can be undone or placed without re-reading the playlist.
+    /// `allow_duplicates` sends every add with `DEDUPE_OPTION_SKIP` (see `add_video_action`).
+    pub async fn playlist_add_many_rows(
+        &self,
+        client: &YouTubeClient,
+        playlist_id: &str,
+        video_ids: &[String],
+        allow_duplicates: bool,
+    ) -> Result<Vec<(String, String)>, Error> {
+        let actions = video_ids.iter().map(|v| add_video_action(v, allow_duplicates)).collect();
+        let value = self.edit_playlist_value(client, playlist_id, actions).await?;
+        Ok(added_rows(&value))
+    }
+
+    /// Move rows within a playlist you own, in one `browse/edit_playlist` request. Each move puts
+    /// the row `set_video_id` directly before the row `successor`, or at the very end with `None`.
+    /// The actions apply in order, each against the list the previous one left, so the caller
+    /// computes them that way (`playlist_tools::lis::reorder_moves`).
+    pub async fn playlist_move_many(
+        &self,
+        client: &YouTubeClient,
+        playlist_id: &str,
+        moves: &[(String, Option<String>)],
+    ) -> Result<(), Error> {
+        let actions = moves
+            .iter()
+            .map(|(set, successor)| move_video_action(set, successor.as_deref()))
+            .collect();
         self.edit_playlist_actions(client, playlist_id, actions).await
     }
 
@@ -1158,6 +1190,34 @@ fn add_video_action(video_id: &str, allow_duplicates: bool) -> serde_json::Value
     action
 }
 
+/// `ACTION_MOVE_VIDEO_BEFORE`: the row moves to sit just before `successor`. Without a successor
+/// YouTube puts it last, which is the only way to reach the end of the list.
+fn move_video_action(set_video_id: &str, successor: Option<&str>) -> serde_json::Value {
+    let mut action =
+        serde_json::json!({ "action": "ACTION_MOVE_VIDEO_BEFORE", "setVideoId": set_video_id });
+    if let Some(s) = successor {
+        action["movedSetVideoIdSuccessor"] = s.into();
+    }
+    action
+}
+
+/// The rows an add created, off `playlistEditResults`: one `playlistEditVideoAddedResultData`
+/// per added video. A row missing either id is skipped rather than guessed.
+fn added_rows(v: &serde_json::Value) -> Vec<(String, String)> {
+    v.get("playlistEditResults")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|r| {
+            let d = r.get("playlistEditVideoAddedResultData")?;
+            Some((
+                d.get("videoId")?.as_str()?.to_owned(),
+                d.get("setVideoId")?.as_str()?.to_owned(),
+            ))
+        })
+        .collect()
+}
+
 /// `browse/edit_playlist` answers HTTP 200 even when it applies nothing: the refusal is
 /// `"status": "STATUS_FAILED"` in the body. Adding a track the playlist already holds is the
 /// common one, and YouTube marks it by offering an "Add anyway" button whose endpoint repeats the
@@ -1235,6 +1295,37 @@ mod tests {
 
         let failed = json!({ "status": "STATUS_FAILED" });
         assert!(matches!(edit_rejection(&failed), Some(Error::Other(_))));
+    }
+
+    #[test]
+    fn move_video_action_json() {
+        assert_eq!(
+            move_video_action("AAA", Some("BBB")),
+            json!({
+                "action": "ACTION_MOVE_VIDEO_BEFORE",
+                "setVideoId": "AAA",
+                "movedSetVideoIdSuccessor": "BBB"
+            })
+        );
+        // No successor: the row goes last.
+        assert_eq!(
+            move_video_action("AAA", None),
+            json!({ "action": "ACTION_MOVE_VIDEO_BEFORE", "setVideoId": "AAA" })
+        );
+    }
+
+    #[test]
+    fn added_rows_read_from_edit_results() {
+        let resp = json!({ "playlistEditResults": [
+            { "playlistEditVideoAddedResultData": { "setVideoId": "S1", "videoId": "v1" } },
+            { "playlistEditVideoAddedResultData": { "videoId": "v2" } },
+            { "playlistEditVideoAddedResultData": { "setVideoId": "S3", "videoId": "v3" } }
+        ], "status": "STATUS_SUCCEEDED" });
+        assert_eq!(
+            added_rows(&resp),
+            vec![("v1".to_owned(), "S1".to_owned()), ("v3".to_owned(), "S3".to_owned())]
+        );
+        assert!(added_rows(&json!({ "status": "STATUS_SUCCEEDED" })).is_empty());
     }
 
     #[test]

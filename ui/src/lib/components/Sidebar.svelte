@@ -24,10 +24,16 @@
 	import { ON_REPEAT_ID, isLocalPlaylist, type BrowseItem } from '$lib/api';
 	import { thumb } from '$lib/thumb';
 	import PlaylistMenu from './PlaylistMenu.svelte';
-	import { library, personal, ui, openNewPlaylist, toggleSidebar } from '$lib/player.svelte';
+	import { library, personal, prefs, ui, openNewPlaylist, toggleSidebar } from '$lib/player.svelte';
 	import { mergeSaved, orderLibrary } from '$lib/personal';
 	import { t } from '$lib/i18n.svelte';
 	import { imp } from '$lib/import.svelte';
+	import { getDragRows, isDragRows, type TrackRowsDrag } from '$lib/dnd';
+	import { NO_ANCHOR, type Anchor } from '$lib/menu';
+	import { rowDrag } from '$lib/rowdrag.svelte';
+	import { canDropOn, dropModeFor, transfer } from '$lib/transfer.svelte';
+	import DropConfirm from './DropConfirm.svelte';
+	import { building, stopBuild } from '$lib/build.svelte';
 
 	const nav = $derived([
 		{ href: '/', label: t('nav.home'), icon: Home01Icon },
@@ -99,6 +105,46 @@
 		else imp.open = true;
 	}
 	const wide = (cls: string) => (collapsed ? '' : cls);
+
+	// --- tracks dropped on a playlist (playlist_tools/transfer.rs) ----------------------------------
+	// Rows dragged off a playlist page land here: the playlists you can edit light up while the drag
+	// is on, and the one under the pointer takes it. PlaylistForge needed a separate drop dock because
+	// its sidebar listed no playlists; this one already does.
+	let over = $state<string | null>(null);
+	let asking = $state<{ drag: TrackRowsDrag; target: BrowseItem; anchor: Anchor } | null>(null);
+	const droppable = (pl: BrowseItem) => rowDrag.active && canDropOn(pl, rowDrag.from);
+
+	function dragOverRow(e: DragEvent, pl: BrowseItem) {
+		if (!isDragRows(e) || !e.dataTransfer || !droppable(pl)) return;
+		e.preventDefault(); // without this the drop never fires
+		const mode = rowDrag.from ? (e.ctrlKey ? 'copy' : e.shiftKey ? 'move' : null) : 'copy';
+		e.dataTransfer.dropEffect = mode === 'move' ? 'move' : 'copy';
+		over = pl.id;
+	}
+
+	function dragLeaveRow(e: DragEvent, pl: BrowseItem) {
+		// Leaving for a child of the same row is not leaving it.
+		if (over === pl.id && !(e.currentTarget as Node).contains(e.relatedTarget as Node | null))
+			over = null;
+	}
+
+	function dropOnRow(e: DragEvent, pl: BrowseItem) {
+		over = null;
+		const drag = getDragRows(e);
+		if (!drag || !canDropOn(pl, drag.from)) return;
+		e.preventDefault();
+		const mode = dropModeFor(drag, e);
+		if (mode !== 'ask') {
+			transfer(drag, pl, mode, prefs.dropDupes);
+			return;
+		}
+		const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+		asking = {
+			drag,
+			target: pl,
+			anchor: { ...NO_ANCHOR, box: { left: r.right, right: r.right, top: r.top, bottom: r.top }, gap: 0 }
+		};
+	}
 </script>
 
 <aside
@@ -199,6 +245,25 @@
 		</button>
 	{/if}
 
+	{#if building.running}
+		<!-- A split or a merge still writing (the tools dialog may be closed). Click stops it. -->
+		<button
+			onclick={stopBuild}
+			title={t('build.stop')}
+			class="mt-2 flex flex-col gap-1.5 rounded-lg bg-primary/10 px-3 py-2 text-left text-xs font-medium text-primary transition-colors hover:bg-primary/15"
+		>
+			<span class="hidden truncate {wide('lg:inline')}">
+				{t('build.pill', { done: building.done, total: building.total })}
+			</span>
+			<span class="block h-1 w-full overflow-hidden rounded-full bg-primary/15">
+				<span
+					class="block h-full rounded-full bg-primary transition-[width] duration-300"
+					style="width: {building.total ? Math.round((building.done / building.total) * 100) : 0}%"
+				></span>
+			</span>
+		</button>
+	{/if}
+
 	<!-- Playlists. Hidden on the icon rail (needs labels; matches YTM's collapsed rail). flex-1 lets
 	     the list fill the space and scroll. Always there, signed out included: a playlist can be
 	     made on this machine without an account (#251). -->
@@ -206,11 +271,27 @@
 		<Button variant="outline" size="sm" class="mb-2 w-full gap-2" onclick={() => openNewPlaylist()}>
 			<HugeiconsIcon icon={Add01Icon} class="h-4 w-4" /> {t('nav.new_playlist')}
 		</Button>
-		<div class="min-h-0 flex-1 overflow-y-auto">
+		<div class="min-h-0 flex-1 overflow-y-auto" role="list">
 			{#each playlists as pl, i (pl.id)}
 				<!-- The ⋯ is a sibling of the link, not a child: a <button> inside an <a> is invalid
 				     HTML. pr-9 keeps the title clear of the button that overlays the row on hover. -->
-				<div class="group/row relative" data-ctx>
+				<!-- While rows are being dragged, the playlists that can take them are outlined and the
+				     rest step back; the one under the pointer fills. No transition: these are repeated
+				     rows (docs/UI-PERFORMANCE.md). -->
+				<div
+					class="group/row relative rounded-lg {over === pl.id
+						? 'bg-primary/15 ring-2 ring-primary'
+						: droppable(pl)
+							? 'ring-1 ring-primary/30'
+							: rowDrag.active
+								? 'opacity-50'
+								: ''}"
+					data-ctx
+					role="listitem"
+					ondragover={(e) => dragOverRow(e, pl)}
+					ondragleave={(e) => dragLeaveRow(e, pl)}
+					ondrop={(e) => dropOnRow(e, pl)}
+				>
 					<a
 						href={playlistHref(pl)}
 						title={pl.title}
@@ -279,3 +360,12 @@
 		</div>
 	</div>
 </aside>
+
+{#if asking}
+	<DropConfirm
+		drag={asking.drag}
+		target={asking.target}
+		anchor={asking.anchor}
+		onclose={() => (asking = null)}
+	/>
+{/if}

@@ -21,6 +21,7 @@
 	import { t } from '$lib/i18n.svelte';
 	import type { TrackSelection } from '$lib/selection.svelte';
 	import { Checkbox } from './ui/checkbox';
+	import { Badge } from './ui/badge';
 
 	let {
 		song,
@@ -39,7 +40,8 @@
 		inLibraryList = false,
 		selection,
 		selectionKey,
-		lazy = false
+		lazy = false,
+		copies = 1
 	}: {
 		song: SongItem;
 		/** Position badge when set (playlist/queue); omitted for flat search results. */
@@ -86,6 +88,9 @@
 		 * row below.
 		 */
 		lazy?: boolean;
+		/** How many times this track is in the list it is shown in (a playlist page): 2 or more
+		 *  draws a "×2" chip, the hint that the duplicate finder has something to do. */
+		copies?: number;
 	} = $props();
 	const selectionDescriptionId = $props.id();
 
@@ -304,6 +309,9 @@
 				<span class="min-w-0 truncate text-sm font-medium {active ? 'text-primary' : ''}">
 					{song.title}
 				</span>
+				{#if copies > 1}
+					<Badge variant="chip" title={t('dedup.copies_tooltip', { count: copies })}>×{copies}</Badge>
+				{/if}
 				{#if song.queued_by}
 					<span
 						class="shrink-0 rounded-full bg-primary/10 px-1.5 py-0.5 text-[10px] font-medium text-primary"

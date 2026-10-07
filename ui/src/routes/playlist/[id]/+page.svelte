@@ -23,8 +23,15 @@
 		ArrowUpDownIcon,
 		ComputerIcon,
 		SpotifyIcon,
-		Search01Icon
+		Search01Icon,
+		ShuffleSquareIcon,
+		Wrench01Icon,
+		FilterHorizontalIcon,
+		FileExportIcon,
+		ArrowReloadHorizontalIcon,
+		Tick02Icon
 	} from '@hugeicons/core-free-icons';
+	import { Badge } from '$lib/components/ui/badge';
 	import { Button } from '$lib/components/ui/button';
 	import * as RadioGroup from '$lib/components/ui/radio-group';
 	import * as AlertDialog from '$lib/components/ui/alert-dialog';
@@ -45,6 +52,15 @@
 	import { anchorMenu, fitMenu, NO_ANCHOR } from '$lib/menu';
 	import { rowWindow } from '$lib/rows';
 	import { rowScroller } from '$lib/rows.svelte';
+	import { anchorsFor, moveBlock, movedCount, nudge, seededShuffle } from '$lib/reorder';
+	import { dragScroll, isDragRows, setDragRows, TRACK_ROWS_MIME, type TrackRowsDrag } from '$lib/dnd';
+	import MoveToPlaylist from '$lib/components/MoveToPlaylist.svelte';
+	import PlaylistToolsDialog from '$lib/components/PlaylistToolsDialog.svelte';
+	import ExportPlaylist from '$lib/components/ExportPlaylist.svelte';
+	import FilterChips from '$lib/components/FilterChips.svelte';
+	import { applyFacets, facetsActive, NO_FACETS, regexFilter, type Facets } from '$lib/facets';
+	import { endRowDrag, startRowDrag } from '$lib/rowdrag.svelte';
+	import { announceOp } from '$lib/playlistops.svelte';
 	import { t } from '$lib/i18n.svelte';
 	import { imp, updateFromSpotify } from '$lib/import.svelte';
 	import {
@@ -79,7 +95,8 @@
 		patchLibraryPlaylist,
 		forgetPlaylist,
 		lastPlaylistAdd,
-		lastPlaylistRemove
+		lastPlaylistRemove,
+		savedIn
 	} from '$lib/player.svelte';
 
 	// `$state.raw`, not `$state`: a deep proxy makes every read of a row go through a trap and
@@ -206,6 +223,13 @@
 				? (pl.subtitle ?? '').replace(/^[\d,.]+ songs?/i, `${pl.items.length} songs`)
 				: pl?.subtitle
 	);
+	// How many times each video is in this playlist: the ×2 chip on its rows, and the duplicates facet.
+	const copies = $derived.by(() => {
+		const n = new Map<string, number>();
+		for (const s of pl?.items ?? []) n.set(s.video_id, (n.get(s.video_id) ?? 0) + 1);
+		return n;
+	});
+
 	// --- sorting (`$lib/sort`) ---------------------------------------------------------------
 	let sort = $state<SortKey>('default');
 	let desc = $state(false);
@@ -252,13 +276,26 @@
 
 	// The rows actually on screen: the sorted list, narrowed by the header's filter box. Identical
 	// to `sortedItems` with no query typed.
-	const shown = $derived(filterTracks(sortedItems, applied));
+	// Facet chips under the header (`facets.ts`), and the search box as a regex when `.*` is on.
+	let facets = $state<Facets>({ ...NO_FACETS });
+	let regex = $state(false);
+	let filtersOpen = $state(false);
+	const searched = $derived(
+		regex ? regexFilter(sortedItems, applied) : { items: filterTracks(sortedItems, applied), error: false }
+	);
+	const shown = $derived(
+		applyFacets(searched.items, facets, {
+			copies,
+			elsewhere: (v) =>
+				(savedIn.map[v] ?? []).some((p) => p !== id && p !== api.LIKED_MUSIC_ID)
+		})
+	);
 	const selection = trackSelection(() => sortedItems, () => shown,
 		() => `${auth.epoch}:${id}`, () => !pl?.continuation,
 		// A filter's matches are only the loaded ones, and typing one walks the list anyway, so the
 		// header count would be the wrong number to offer there.
 		() => (filtering ? undefined : headerCount), loadAll);
-	const filtering = $derived(!!applied.trim());
+	const filtering = $derived(!!applied.trim() || facetsActive(facets));
 	// The leading number of YouTube's own "190 tracks - 9+ hours", which is what the subtitle under
 	// the title shows until every page is in. An upper bound, not a count: it includes rows that
 	// never arrive (unavailable, region-blocked). A locale that doesn't lead with the number gives
@@ -436,6 +473,11 @@
 		editing = false;
 		expanded = false;
 		sortOpen = false;
+		stagedFrom = null;
+		needsManual = false;
+		facets = { ...NO_FACETS };
+		regex = false;
+		filtersOpen = false;
 		query = '';
 		applied = '';
 		searchOpened = false;
@@ -835,15 +877,17 @@
 				await setRating(track, 'indifferent');
 				toast.success(t('toasts.removed_from_liked'));
 			} else {
-				await api.removeFromPlaylist(id, track.video_id, track.set_video_id!);
+				ownEdits++;
+				const op = await api.removeTracks(id, pl.title ?? '', rowRefs(prev, [track]));
 				bumpLibraryTrackCount(id, -1);
 				noteUnsavedFrom(id, track.video_id);
-				toast.success(t('toasts.removed_from_playlist'));
+				announceOp(op, t('toasts.removed_from_playlist'));
 			}
 			cacheAfterRemoval();
 		} catch (e) {
 			pl = { ...pl, items: prev }; // revert
 			cacheCurrent();
+			if (!isLiked) ownEdits = Math.max(0, ownEdits - 1);
 			toast.error(String(e));
 		}
 	}
@@ -874,13 +918,16 @@
 				if (failed.size) toast.error(String(lastError));
 				else toast.success(t('toasts.removed_from_liked'));
 			} else {
-				await api.removeManyFromPlaylist(
-					id,
-					targets.map((s) => [s.video_id, s.set_video_id!] as [string, string])
-				);
+				ownEdits++;
+				const op = await api.removeTracks(id, pl.title ?? '', rowRefs(prev, targets));
 				bumpLibraryTrackCount(id, -targets.length);
 				for (const s of targets) noteUnsavedFrom(id, s.video_id);
-				toast.success(t('toasts.removed_from_playlist'));
+				announceOp(
+					op,
+					targets.length === 1
+						? t('toasts.removed_from_playlist')
+						: t('toasts.removed_many_from_playlist', { count: targets.length })
+				);
 			}
 			// A partial liked-music removal puts the rows that survived back where they were.
 			if (failed.size)
@@ -890,8 +937,232 @@
 		} catch (e) {
 			pl = { ...pl, items: prev }; // revert
 			cacheCurrent();
+			if (!isLiked) ownEdits = Math.max(0, ownEdits - 1);
 			toast.error(String(e));
 		}
+	}
+
+	// Each row being removed, with the row after it that stays: where an undo puts it back. Read
+	// off `list`, the rows as they were before the optimistic removal.
+	// ponytail: the last loaded row of a long playlist anchors to "the end", so its undo lands after
+	// pages not yet scrolled to rather than before them. Loading the rest first would fix it, at the
+	// cost of up to 50 requests per removal.
+	function rowRefs(list: SongItem[], targets: SongItem[]): api.RowRef[] {
+		const anchors = anchorsFor(list.map(handleOf), new Set(targets.map(handleOf)));
+		return targets.map((song) => ({ song, before: anchors.get(handleOf(song)) ?? null }));
+	}
+
+	// A playlist tool changed this playlist from somewhere else (an undo, from a toast or the
+	// history; a drop onto it in the sidebar): re-read it. Edits made on this page already show,
+	// and each one announces itself exactly once, so those announcements are counted off instead.
+	let ownEdits = 0;
+	$effect(() => {
+		const off = api.onPlaylistsEdited((ids) => {
+			if (!ids.includes(id)) return;
+			if (ownEdits > 0) {
+				ownEdits--;
+				return;
+			}
+			untrack(() => load(id));
+		});
+		return () => void off.then((f) => f());
+	});
+
+	// --- rearranging by hand (playlist_tools; PlaylistForge's staged reorder) ---------------------
+	// Drags and Alt+↑/↓ rearrange the rows here first, and nothing is written until "Save order":
+	// a few drags cost one edit, and can still be thrown away. `stagedFrom` is the order before the
+	// first unsaved move.
+	const reorderable = $derived(!!pl && (editable || isLocalList) && !isLiked && !isOnRepeat);
+	// Only the playlist's own order, unfiltered, is the order a drop would write.
+	const manualView = $derived(sort === 'default' && !desc && !filtering);
+	const handleOf = (s: SongItem) => s.set_video_id ?? '';
+	let stagedFrom = $state.raw<SongItem[] | null>(null);
+	let savingOrder = $state(false);
+	const pendingMoves = $derived(
+		stagedFrom && pl ? movedCount(stagedFrom.map(handleOf), pl.items.map(handleOf)) : 0
+	);
+	// A drag or a nudge that put everything back where it was leaves nothing to save.
+	$effect(() => {
+		if (stagedFrom && pendingMoves === 0) stagedFrom = null;
+	});
+	// Set when a drag starts on a sorted or filtered view, so the page can say why nothing will
+	// land and offer the way back, instead of silently refusing the drop (PlaylistForge does).
+	let needsManual = $state(false);
+	// The rows being dragged (indices into `shown`) and the row they would land in front of.
+	let dragRows = $state<number[] | null>(null);
+	let dropAt = $state<number | null>(null);
+	const reordering = $derived(dragRows !== null && reorderable && manualView);
+
+	function stage(items: SongItem[]) {
+		if (!pl || items === pl.items) return;
+		stagedFrom ??= pl.items;
+		pl = { ...pl, items };
+	}
+
+	// Rows a page load appended after staging began are in neither order's past, so they are
+	// kept, at the end, where they were.
+	function discardOrder() {
+		if (!pl || !stagedFrom) return;
+		const known = new Set(stagedFrom.map(handleOf));
+		pl = { ...pl, items: [...stagedFrom, ...pl.items.filter((s) => !known.has(handleOf(s)))] };
+		stagedFrom = null;
+	}
+
+	/** Write `order` (the whole list, every row) to the playlist. The backend reads the order the
+	 *  playlist really has and moves only what differs. Answers whether it was written. */
+	async function writeOrder(order: SongItem[]): Promise<boolean> {
+		if (!pl) return false;
+		if (order.some((s) => !s.set_video_id)) {
+			toast.error(t('reorder.unconfirmed'));
+			return false;
+		}
+		const moved = stagedFrom
+			? pendingMoves
+			: movedCount(pl.items.map(handleOf), order.map(handleOf));
+		ownEdits++;
+		try {
+			const op = await api.reorderPlaylist(id, pl.title ?? '', order.map(handleOf));
+			if (!op) ownEdits = Math.max(0, ownEdits - 1); // nothing moved, nothing announced
+			announceOp(
+				op,
+				moved === 1 ? t('reorder.applied_one') : t('reorder.applied', { count: moved })
+			);
+			return true;
+		} catch (e) {
+			ownEdits = Math.max(0, ownEdits - 1);
+			toast.error(t('reorder.failed', { error: String(e) }));
+			return false;
+		}
+	}
+
+	async function saveOrder() {
+		if (!pl || !stagedFrom || savingOrder) return;
+		const pid = id;
+		savingOrder = true;
+		try {
+			// The order has to name every row, so a long playlist is walked in first.
+			if (pl.continuation) {
+				toast(t('reorder.loading_rest'));
+				if (!(await loadAll())) return void toast.error(t('toasts.partial_playlist_added'));
+			}
+			if (pid !== id || !pl) return;
+			if (await writeOrder(pl.items)) {
+				stagedFrom = null;
+				// Every other order of this playlist that was fetched is stale now.
+				cacheAfterRemoval();
+			}
+		} finally {
+			savingOrder = false;
+		}
+	}
+
+	/** Shuffle or reverse the whole list, staged like a drag. */
+	async function stageWhole(f: (items: SongItem[]) => SongItem[]) {
+		menuOpen = false;
+		if (!pl || !manualView) return;
+		const pid = id;
+		if (pl.continuation && !(await loadAll()))
+			return void toast.error(t('toasts.partial_playlist_added'));
+		if (pid !== id || !pl) return;
+		stage(f(pl.items));
+	}
+
+	/** Make the sorted order on screen the playlist's own, then show the playlist in it. */
+	async function keepSortAsOrder() {
+		sortOpen = false;
+		if (!pl || savingOrder) return;
+		const pid = id;
+		savingOrder = true;
+		try {
+			if (!(await ready()) || pid !== id || !pl) return;
+			if (pl.continuation && !(await loadAll())) return;
+			if (pid !== id || !pl) return;
+			if (await writeOrder(sortedItems)) {
+				invalidateCachedPrefix(`playlist:${pid}`);
+				desc = false;
+				if (sort !== 'default') chooseSort('default');
+				else applySort();
+			}
+		} finally {
+			savingOrder = false;
+		}
+	}
+
+	/** Back to the order a drop writes: no sort of ours, no filter. */
+	function useManualOrder() {
+		needsManual = false;
+		query = '';
+		if (!desc && sort === 'default') return;
+		desc = false;
+		if (sort !== 'default') chooseSort('default');
+		else applySort();
+	}
+
+	// Rows are drag sources everywhere (a sidebar playlist takes them, see Sidebar), and drop
+	// targets only while the list can be rearranged. Several selected rows move as one block.
+	function rowDragStart(e: DragEvent, n: number) {
+		if (!pl || !e.dataTransfer) return;
+		const key = selection.visibleKeys[n];
+		const picked =
+			selection.active && selection.has(key)
+				? selection.visibleKeys.flatMap((k, i) => (selection.has(k) ? [i] : []))
+				: [n];
+		const songs = picked.map((i) => shown[i]).filter(Boolean);
+		setDragRows(e, {
+			from: reorderable ? id : null,
+			fromTitle: pl.title ?? '',
+			rows: rowRefs(pl.items, songs)
+		});
+		e.dataTransfer.effectAllowed = reorderable ? 'copyMove' : 'copy';
+		dragRows = picked;
+		startRowDrag(songs.length, reorderable ? id : null);
+		if (reorderable && !manualView) needsManual = true;
+	}
+
+	function rowDragOver(e: DragEvent, n: number) {
+		if (!reordering || !isDragRows(e) || !e.dataTransfer) return;
+		e.preventDefault(); // without this the drop never fires
+		e.dataTransfer.dropEffect = 'move';
+		const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+		dropAt = e.clientY < r.top + r.height / 2 ? n : n + 1;
+	}
+
+	function rowDrop(e: DragEvent) {
+		if (reordering && pl && dragRows && dropAt !== null) {
+			e.preventDefault();
+			stage(moveBlock(pl.items, dragRows, dropAt));
+		}
+		endDrag();
+	}
+
+	function endDrag() {
+		dragRows = null;
+		dropAt = null;
+		endRowDrag();
+	}
+
+	// The tools dialog (duplicates, split, merge), and export. Not on On Repeat, which is built from
+	// play counts.
+	let toolsOpen = $state(false);
+	let exportOpen = $state(false);
+
+	// "Move to…" from the selection bar: the same transfer a drop on a sidebar playlist makes.
+	// Not counted as an own edit: the rows leaving this list is what the reload shows.
+	let moveRows = $state<TrackRowsDrag | null>(null);
+	function openMove(songs: SongItem[]) {
+		if (!pl) return;
+		moveRows = { from: id, fromTitle: pl.title ?? '', rows: rowRefs(pl.items, songs) };
+	}
+
+	// Alt+↑/↓ moves the selected rows one step, staged like a drag. Not while typing.
+	function onReorderKey(e: KeyboardEvent) {
+		if (!e.altKey || (e.key !== 'ArrowUp' && e.key !== 'ArrowDown')) return;
+		if (!pl || !reorderable || !manualView || !selection.active || !selection.count) return;
+		if ((e.target as HTMLElement | null)?.closest('input, textarea, [contenteditable="true"]'))
+			return;
+		e.preventDefault();
+		const picked = selection.visibleKeys.flatMap((k, i) => (selection.has(k) ? [i] : []));
+		stage(nudge(pl.items, picked, e.key === 'ArrowUp' ? -1 : 1));
 	}
 
 	// The dialog stays up until the delete lands: a YouTube playlist is a round trip, and the page
@@ -935,7 +1206,11 @@
 	{:else if pl}
 		<!-- One scroller for the whole page: the header scrolls away above the rows, same as the
 		     album page. -->
-		<div class="content-in min-h-0 flex-1 overflow-y-auto" {@attach sc.attach}>
+		<div
+			class="content-in min-h-0 flex-1 overflow-y-auto"
+			{@attach sc.attach}
+			{@attach (node) => dragScroll(node, TRACK_ROWS_MIME)}
+		>
 			<div class="relative flex min-h-[38vh] shrink-0 items-end gap-6 overflow-hidden border-b p-6">
 				{#if backdrop}
 					<img
@@ -965,19 +1240,13 @@
 					<div class="flex items-center gap-2 text-xs font-medium uppercase text-muted-foreground">
 						{t('common.playlist_singular')}
 						{#if isLocalList}
-							<span
-								class="flex items-center gap-1 rounded-full bg-primary/15 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-primary"
-								title={t('library.on_this_device_tooltip')}
-							>
-								<HugeiconsIcon icon={ComputerIcon} class="h-3 w-3" />
+							<Badge title={t('library.on_this_device_tooltip')}>
+								<HugeiconsIcon icon={ComputerIcon} />
 								{t('library.on_this_device')}
-							</span>
+							</Badge>
 						{/if}
 						{#if pl.collaborative}
-							<span
-								class="rounded-full bg-primary/15 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-primary"
-								title={t('library.collab_tooltip')}>{t('library.collab')}</span
-							>
+							<Badge title={t('library.collab_tooltip')}>{t('library.collab')}</Badge>
 						{/if}
 						{#if spotifyUrl && (pl.owned || isLocalList)}
 							<button
@@ -1060,7 +1329,23 @@
 						</div>
 					</div>
 				</div>
-				<div class="absolute right-6 top-6">
+				<div class="absolute right-6 top-6 flex items-center gap-2">
+					<button
+						class="flex h-9 w-9 items-center justify-center rounded-full border bg-background/80 shadow-sm {filtersOpen ||
+						facetsActive(facets) ||
+						regex
+							? 'border-primary/40 text-primary'
+							: 'text-muted-foreground hover:text-foreground'}"
+						onclick={() => {
+							filtersOpen = !filtersOpen;
+							if (filtersOpen) searchOpened = true; // facets cover every page, so walk them in
+						}}
+						aria-pressed={filtersOpen}
+						aria-label={t('facets.label')}
+						title={t('facets.label')}
+					>
+						<HugeiconsIcon icon={FilterHorizontalIcon} class="h-4 w-4" />
+					</button>
 					<TrackFilter
 						bind:value={query}
 						placeholder={t('common.search_this_playlist')}
@@ -1072,7 +1357,41 @@
 				{selection}
 				from={pl.title}
 				onRemove={isLiked || editable ? removeSelected : undefined}
+				onMove={reorderable ? openMove : undefined}
 			/>
+			{#if filtersOpen || facetsActive(facets) || regex}
+				<div class="border-b px-6 py-2">
+					<FilterChips bind:facets bind:regex regexError={searched.error} items={pl.items} />
+				</div>
+			{/if}
+			{#if stagedFrom}
+				<!-- Unsaved order. Sticky, so Save is in reach wherever the last drag ended. -->
+				<div
+					class="sticky top-0 z-20 flex items-center gap-3 border-b bg-card px-6 py-2 text-sm"
+					role="status"
+				>
+					<HugeiconsIcon icon={ArrowReloadHorizontalIcon} class="h-4 w-4 shrink-0 text-primary" />
+					<span class="min-w-0 flex-1 truncate">
+						{pendingMoves === 1
+							? t('reorder.pending_one')
+							: t('reorder.pending', { count: pendingMoves })}
+					</span>
+					<Button variant="ghost" size="sm" onclick={discardOrder} disabled={savingOrder}>
+						{t('reorder.discard')}
+					</Button>
+					<Button size="sm" class="gap-1.5" onclick={saveOrder} disabled={savingOrder}>
+						<HugeiconsIcon icon={Tick02Icon} class="h-4 w-4" />
+						{savingOrder ? t('reorder.applying') : t('reorder.apply')}
+					</Button>
+				</div>
+			{:else if needsManual && reorderable && !manualView}
+				<div class="flex items-center gap-3 border-b px-6 py-2 text-sm text-muted-foreground">
+					<span class="min-w-0 flex-1">{t('reorder.needs_manual')}</span>
+					<Button variant="outline" size="sm" onclick={useManualOrder}>
+						{t('reorder.use_manual')}
+					</Button>
+				</div>
+			{/if}
 			<div
 				class="p-4 transition-opacity {resorting ? 'opacity-50' : ''}"
 				aria-busy={resorting}
@@ -1081,17 +1400,40 @@
 					<!-- The padding stands in for the rows outside the window, so the scrollbar is the
 					     length of the whole playlist even though only ~30 rows exist.
 					     data-rows: what the scroller measures row 0's position from. -->
-					<div data-rows style="padding-top:{win.padTop}px;padding-bottom:{win.padBottom}px">
+					<div data-rows role="list" style="padding-top:{win.padTop}px;padding-bottom:{win.padBottom}px">
 						{#each shown.slice(win.start, win.end) as item, i (JSON.stringify([item.video_id, win.start + i]))}
 							{@const n = win.start + i}
-							<!-- data-row: what the scroller measures a row's real height from. -->
-							<div data-row>
+							<!-- data-row: what the scroller measures a row's real height from. Draggable
+							     everywhere (a sidebar playlist takes the rows); a drop target only while
+							     the list can be rearranged (`reordering`). No transition on the row
+							     (docs/UI-PERFORMANCE.md): the dimmed state just switches. -->
+							<div
+								data-row
+								role="listitem"
+								class="relative {dragRows?.includes(n) ? 'opacity-40' : ''}"
+								draggable={!selection.selectingAll}
+								ondragstart={(e) => rowDragStart(e, n)}
+								ondragover={(e) => rowDragOver(e, n)}
+								ondrop={rowDrop}
+							>
+								<!-- Where the drop lands: a bar across the top of the row it goes in front
+								     of. The last row also draws one below itself for a drop at the end. -->
+								{#if reordering && dropAt === n}
+									<div
+										class="pointer-events-none absolute inset-x-2 top-0 z-10 h-0.5 rounded-full bg-primary"
+									></div>
+								{:else if reordering && dropAt === n + 1 && n === shown.length - 1}
+									<div
+										class="pointer-events-none absolute inset-x-2 bottom-0 z-10 h-0.5 rounded-full bg-primary"
+									></div>
+								{/if}
 								<TrackRow
 									song={item}
 									{selection}
 									selectionKey={selection.visibleKeys[n]}
 									index={n}
 									showPlayCount
+									copies={copies.get(item.video_id)}
 									active={item.video_id === nowId}
 									onplay={() => playAll(n)}
 									onAdd={() => openAddToPlaylist(item)}
@@ -1147,6 +1489,20 @@
 	{/if}
 </div>
 
+<svelte:window ondragend={endDrag} onkeydown={onReorderKey} />
+
+<MoveToPlaylist bind:drag={moveRows} ondone={() => selection.clear()} />
+
+{#if pl && !isOnRepeat}
+	<PlaylistToolsDialog
+		bind:open={toolsOpen}
+		playlistId={id}
+		title={pl.title ?? t('common.playlist_singular')}
+		editable={reorderable}
+	/>
+	<ExportPlaylist bind:open={exportOpen} playlistId={id} title={pl.title ?? t('common.playlist_singular')} />
+{/if}
+
 {#if sortOpen}
 	<button
 		class="fixed inset-0 z-40 cursor-default"
@@ -1172,6 +1528,17 @@
 				</label>
 			{/each}
 		</RadioGroup.Root>
+		{#if reorderable && (sort !== 'default' || desc)}
+			<div class="my-1 h-px bg-border"></div>
+			<button
+				class="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm hover:bg-accent/10 disabled:opacity-50"
+				onclick={keepSortAsOrder}
+				disabled={savingOrder}
+			>
+				<HugeiconsIcon icon={Tick02Icon} class="h-4 w-4" />
+				{t('reorder.keep_sort')}
+			</button>
+		{/if}
 	</div>
 {/if}
 
@@ -1274,6 +1641,39 @@
 					{t('library.remove_from_library')}
 				</button>
 			{/if}
+		{/if}
+		{#if !isOnRepeat}
+			<div class="my-1 h-px bg-border"></div>
+			<button
+				class="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm hover:bg-accent/10"
+				onclick={() => run(() => (toolsOpen = true))}
+				disabled={!pl?.items.length}
+			>
+				<HugeiconsIcon icon={Wrench01Icon} class="h-4 w-4" /> {t('tools.open')}
+			</button>
+			<button
+				class="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm hover:bg-accent/10"
+				onclick={() => run(() => (exportOpen = true))}
+				disabled={!pl?.items.length}
+			>
+				<HugeiconsIcon icon={FileExportIcon} class="h-4 w-4" /> {t('export.open')}
+			</button>
+		{/if}
+		{#if reorderable && manualView}
+			<button
+				class="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm hover:bg-accent/10"
+				onclick={() => stageWhole((items) => seededShuffle(items, Date.now()))}
+				disabled={!pl?.items.length || savingOrder}
+			>
+				<HugeiconsIcon icon={ShuffleSquareIcon} class="h-4 w-4" /> {t('reorder.shuffle')}
+			</button>
+			<button
+				class="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm hover:bg-accent/10"
+				onclick={() => stageWhole((items) => items.slice().reverse())}
+				disabled={!pl?.items.length || savingOrder}
+			>
+				<HugeiconsIcon icon={ArrowReloadHorizontalIcon} class="h-4 w-4" /> {t('reorder.reverse')}
+			</button>
 		{/if}
 		{#if editable}
 			<button
