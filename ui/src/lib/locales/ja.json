@@ -361,7 +361,6 @@
 			"updates": "アップデート",
 			"report": "問題を報告",
 			"whats_new": "新着情報",
-			"support": "サポート",
 			"discord_status": "ステータス",
 			"discord_card": "カード",
 			"discord_links": "クリック可能",
@@ -371,7 +370,6 @@
 			"language": "表示言語",
 			"language_hint": "インターフェースの表示言語を選択します。",
 			"language_search": "言語を検索",
-			"language_contribute": "LiMusic Forgeの翻訳に参加する",
 			"shortcuts_hint": "{key} でキーボードショートカットを開く",
 			"autostart": "システム起動時に自動実行",
 			"autostart_hint": "パソコンの起動時にLiMusic Forgeを自動的に開始します。",
@@ -554,10 +552,7 @@
 			"diagnostics_saved": "保存しました",
 			"report_issue": "バグ報告フォームを開く",
 			"report_issue_hint": "ブラウザでGitHubを開き、バージョンとシステム情報を事前入力します。",
-			"report_issue_button": "報告する",
-			"kofi": "Ko-fiで開発者を支援",
-			"kofi_hint": "LiMusic Forgeは完全無料です。もし応援していただける場合は、Ko-fiから支援できます。",
-			"kofi_button": "Ko-fiを開く"
+			"report_issue_button": "報告する"
 		},
 		"discord": {
 			"enable": "リッチプレゼンス",

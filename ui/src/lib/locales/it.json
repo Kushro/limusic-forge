@@ -303,7 +303,6 @@
 			"whats_new": "Novità",
 			"blocked": "Artisti bloccati",
 			"scrobbling": "Scrobbling",
-			"support": "Supporto",
 			"discord_status": "Stato",
 			"discord_card": "Scheda",
 			"discord_links": "Collegamenti cliccabili",
@@ -327,7 +326,6 @@
 			"stream_clients": "Client di streaming",
 			"stream_clients_hint": "Disattiva un client per ignorarlo durante la risoluzione degli stream. Sovrascritto dalla variabile d'ambiente {var}.",
 			"language_search": "Cerca lingue",
-			"language_contribute": "Aiuta a tradurre LiMusic Forge",
 			"track_notifications": "Notifiche dei brani",
 			"track_notifications_hint": "Mostra una notifica quando inizia un nuovo brano mentre LiMusic Forge è in background.",
 			"start_minimized": "Avvia ridotto nell'area di notifica",
@@ -457,10 +455,7 @@
 			"update_packaged": "Questa versione è stata installata tramite un gestore di pacchetti, aggiornala utilizzando lo stesso metodo.",
 			"rollback_available": "Viene eseguito il ripristino alla versione {version}, l'ultima release sicuramente funzionante.",
 			"beta": "Versioni beta",
-			"beta_hint": "Ricevi le nuove versioni con qualche giorno di anticipo rispetto a tutti gli altri. Sono testate meno a fondo. Se disattivato, manterrai la versione corrente fino al rilascio di un aggiornamento stabile successivo.",
-			"kofi": "Offrimi un caffè",
-			"kofi_hint": "LiMusic Forge è gratuito e rimarrà sempre tale. Ko-fi è a disposizione se desideri sostenere il progetto.",
-			"kofi_button": "Apri Ko-fi"
+			"beta_hint": "Ricevi le nuove versioni con qualche giorno di anticipo rispetto a tutti gli altri. Sono testate meno a fondo. Se disattivato, manterrai la versione corrente fino al rilascio di un aggiornamento stabile successivo."
 		},
 		"hotkeys": {
 			"title": "Scorciatoie globali",

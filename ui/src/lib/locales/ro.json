@@ -243,8 +243,7 @@
 			"updates": "Actualizări",
 			"report": "Raportează o problemă",
 			"whats_new": "Ce este nou",
-			"blocked": "Blochează artiștii",
-			"support": "Sprijină"
+			"blocked": "Blochează artiștii"
 		},
 		"general": {
 			"language": "Limba interfaței",
@@ -357,10 +356,7 @@
 			"diagnostics_saved": "Salvat",
 			"report_issue": "Deschide formularul pentru raportarea erorilor",
 			"report_issue_hint": "Deschide GitHub în browser, cu versiunea și sistemul deja adaugăt în raport.",
-			"report_issue_button": "Raportează",
-			"kofi": "Cumpără-mi o cafea",
-			"kofi_hint": "LiMusic Forge este gratis și v-a rămâne gratis. Ko-fi este acolo dacă îți dorești să contribui.",
-			"kofi_button": "Deschide Ko-fi"
+			"report_issue_button": "Raportează"
 		}
 	},
 	"dialogs": {

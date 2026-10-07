@@ -253,8 +253,7 @@
 			"updates": "Pembaruan",
 			"report": "Laporkan masalah",
 			"whats_new": "Apa yang baru",
-			"blocked": "Artis yang diblokir",
-			"support": "Dukung"
+			"blocked": "Artis yang diblokir"
 		},
 		"general": {
 			"language": "Bahasa antarmuka",
@@ -367,10 +366,7 @@
 			"report_issue_hint": "Membuka GitHub di peramban Anda dengan versi dan sistem yang terisi otomatis.",
 			"report_issue_button": "Laporkan",
 			"update_check_failed": "Cek update gagal: {error}",
-			"update_packaged": "Versi ini dipasang menggunakan manajer paket, perbarui dengan cara yang sama.",
-			"kofi": "Belikan saya kopi",
-			"kofi_hint": "LiMusic Forge gratis dan akan selalu gratis. Tersedia Ko-fi jika Anda ingin memberikan dukungan.",
-			"kofi_button": "Buka Ko-fi"
+			"update_packaged": "Versi ini dipasang menggunakan manajer paket, perbarui dengan cara yang sama."
 		}
 	},
 	"dialogs": {
