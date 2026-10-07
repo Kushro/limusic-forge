@@ -1,0 +1,25 @@
+{
+  "items": [
+    {
+      "id": "UExmaXh0dXJlLWl0ZW0tMw",
+      "snippet": {
+        "title": "Private video",
+        "position": 2,
+        "resourceId": { "kind": "youtube#video", "videoId": "vidPriv0003" },
+        "publishedAt": "2024-03-03T09:15:00Z"
+      }
+    },
+    {
+      "id": "UExmaXh0dXJlLWl0ZW0tNA",
+      "snippet": {
+        "title": "Fixture Song Four",
+        "position": 3,
+        "resourceId": { "kind": "youtube#video", "videoId": "vidRegion04" },
+        "videoOwnerChannelTitle": "Fixture Label",
+        "videoOwnerChannelId": "UCfixtureLabel00000000004",
+        "publishedAt": "2024-03-04T18:45:00Z"
+      },
+      "contentDetails": { "videoPublishedAt": "2021-01-01T00:00:00Z" }
+    }
+  ]
+}

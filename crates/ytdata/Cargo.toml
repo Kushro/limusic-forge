@@ -1,0 +1,31 @@
+[package]
+name = "ytdata"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Thin YouTube Data API v3 client: OAuth installed-app flow (loopback + PKCE), typed errors, quota costs, multi-account."
+
+[dependencies]
+# Authorization-code + PKCE against Google's endpoints. Its default features ("reqwest",
+# "rustls-tls") implement the async HTTP client against reqwest 0.12, which is why reqwest below
+# stays on 0.12 (a 0.13 Client does not satisfy oauth2's `AsyncHttpClient`).
+oauth2 = "5.0.0"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+# Loopback redirect server for the installed-app flow (bound to 127.0.0.1 only).
+tiny_http = "0.12"
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true }
+rand = { workspace = true }
+url = "2.5"
+chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
+
+[dev-dependencies]
+wiremock = "0.6"
+tempfile = "3"
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
+# PKCE verification in tests: S256 challenge = base64url(sha256(verifier)).
+sha2 = "0.10"
+base64 = "0.22"

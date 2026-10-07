@@ -1,0 +1,28 @@
+{
+  "items": [
+    {
+      "id": "UExmaXh0dXJlLWl0ZW0tMQ",
+      "snippet": {
+        "title": "Fixture Song One",
+        "position": 0,
+        "resourceId": { "kind": "youtube#video", "videoId": "vidAvail001" },
+        "videoOwnerChannelTitle": "Fixture Artist - Topic",
+        "videoOwnerChannelId": "UCfixtureArtist0000000001",
+        "publishedAt": "2024-03-01T10:00:00Z",
+        "thumbnails": { "medium": { "url": "https://i.ytimg.com/vi/vidAvail001/mqdefault.jpg" } }
+      },
+      "contentDetails": { "videoPublishedAt": "2019-06-15T00:00:00Z" }
+    },
+    {
+      "id": "UExmaXh0dXJlLWl0ZW0tMg",
+      "snippet": {
+        "title": "Deleted video",
+        "position": 1,
+        "resourceId": { "kind": "youtube#video", "videoId": "vidGone0002" },
+        "publishedAt": "2024-03-02T11:30:00Z"
+      },
+      "contentDetails": {}
+    }
+  ],
+  "nextPageToken": "FIXTURE_ITEMS_PAGE_2"
+}

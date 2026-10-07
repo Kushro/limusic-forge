@@ -1,0 +1,35 @@
+{
+  "items": [
+    {
+      "id": "vidAvail001",
+      "snippet": {
+        "title": "Fixture Song One",
+        "channelId": "UCfixtureArtist0000000001",
+        "channelTitle": "Fixture Artist - Topic",
+        "publishedAt": "2019-06-15T00:00:00Z",
+        "thumbnails": { "medium": { "url": "https://i.ytimg.com/vi/vidAvail001/mqdefault.jpg" } }
+      },
+      "contentDetails": { "duration": "PT3M33S" },
+      "status": { "privacyStatus": "public", "uploadStatus": "processed" }
+    },
+    {
+      "id": "vidPriv0003",
+      "contentDetails": { "duration": "PT4M1S" },
+      "status": { "privacyStatus": "private", "uploadStatus": "processed" }
+    },
+    {
+      "id": "vidRegion04",
+      "snippet": {
+        "title": "Fixture Song Four",
+        "channelId": "UCfixtureLabel00000000004",
+        "channelTitle": "Fixture Label",
+        "publishedAt": "2021-01-01T00:00:00Z"
+      },
+      "contentDetails": {
+        "duration": "PT1H2M3S",
+        "regionRestriction": { "blocked": ["AR", "DE"] }
+      },
+      "status": { "privacyStatus": "public", "uploadStatus": "processed" }
+    }
+  ]
+}

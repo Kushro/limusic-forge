@@ -1,0 +1,21 @@
+{
+  "items": [
+    {
+      "id": "PLfixture0001",
+      "snippet": {
+        "title": "Road Trip",
+        "description": "Songs for the highway",
+        "thumbnails": { "medium": { "url": "https://i.ytimg.com/vi/fixtureA/mqdefault.jpg" } }
+      },
+      "contentDetails": { "itemCount": 42 },
+      "status": { "privacyStatus": "public" }
+    },
+    {
+      "id": "PLfixture0002",
+      "snippet": { "title": "Late Night", "description": "" },
+      "contentDetails": { "itemCount": 7 },
+      "status": { "privacyStatus": "unlisted" }
+    }
+  ],
+  "nextPageToken": "FIXTURE_PAGE_2"
+}
