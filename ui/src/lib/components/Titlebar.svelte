@@ -23,7 +23,8 @@
 		Loading03Icon,
 		HotspotOfflineIcon,
 		UserGroup02Icon,
-		Link04Icon
+		Link04Icon,
+		Settings02Icon
 	} from '@hugeicons/core-free-icons';
 	import LastFmIcon from './LastFmIcon.svelte';
 	import DiscordIcon from './DiscordIcon.svelte';
@@ -36,6 +37,7 @@
 	import { anchorMenu, fitMenu, NO_ANCHOR } from '$lib/menu';
 	import { t } from '$lib/i18n.svelte';
 	import { APP_NAME } from '$lib/brand';
+	import { connectLastfm, disconnectLastfm, lastfm, watchLastfm } from '$lib/lastfm.svelte';
 
 	// `w` is this window; `win` (imported) is the shared frame state.
 	const w = getCurrentWindow();
@@ -52,11 +54,14 @@
 		else deepest = depth += 1;
 	});
 
-	// Last.fm connection state. `connecting` is UI-local: set on click, cleared by the
-	// `lastfm-state` event (success, failure, or timeout) — the backend always answers.
-	let connected = $state(false);
-	let username = $state<string | null>(null);
-	let connecting = $state(false);
+	// Last.fm connection state lives in `lastfm.svelte.ts`: the Scrobbling settings tab connects
+	// and disconnects too.
+	const connected = $derived(lastfm.connected);
+	const username = $derived(lastfm.username);
+	const connecting = $derived(lastfm.connecting);
+	// Like Discord's: a build compiled without Last.fm API credentials can't connect, so the button
+	// stays, greyed out, and its tooltip says why.
+	const lastfmAvailable = $derived(lastfm.configured);
 	let menuOpen = $state(false);
 	let anchor = $state(NO_ANCHOR);
 
@@ -86,25 +91,11 @@
 		api.getSettings()
 			.then((s) => (discordAvailable = s.discord_available !== 'false'))
 			.catch(() => {});
-		api.lastfmStatus()
-			.then((s) => {
-				connected = s.connected;
-				username = s.username ?? null;
-			})
-			.catch(() => {});
-		const sub = api.onLastfmState((s) => {
-			const wasConnecting = connecting;
-			connecting = false;
-			connected = s.connected;
-			username = s.username ?? null;
-			if (s.error) toast.error(s.error);
-			else if (s.connected) toast.success(t('integrations.lastfm_scrobbling_as', { user: s.username ?? '' }));
-			else if (!wasConnecting) toast.success(t('integrations.lastfm_disconnected'));
-		});
-		return () => sub.then((u) => u());
+		return watchLastfm();
 	});
 
-	async function onScrobblerClick(e: MouseEvent) {
+	function onScrobblerClick(e: MouseEvent) {
+		if (!lastfmAvailable) return;
 		if (connecting) {
 			// A second click cancels the pending browser authorization. The `lastfm-state` event it
 			// triggers clears the spinner (and, arriving while `connecting`, stays toast-silent).
@@ -115,14 +106,7 @@
 			openMenu(e);
 			return;
 		}
-		connecting = true;
-		try {
-			await api.lastfmConnect();
-			toast(t('integrations.lastfm_approve_in_browser'));
-		} catch (err) {
-			connecting = false;
-			toast.error(String(err));
-		}
+		connectLastfm();
 	}
 
 	function openMenu(e: MouseEvent) {
@@ -132,15 +116,24 @@
 
 	function disconnect() {
 		menuOpen = false;
-		api.lastfmDisconnect().catch((e) => toast.error(String(e)));
+		disconnectLastfm();
+	}
+
+	// #327: this menu is where people look for scrobbling settings.
+	function openScrobbleSettings() {
+		menuOpen = false;
+		ui.settingsFocus = { tab: 'scrobbling' };
+		ui.settingsOpen = true;
 	}
 
 	const scrobblerTitle = $derived(
-		connecting
-			? t('integrations.lastfm_connecting')
-			: connected
-				? t('integrations.lastfm_scrobbling_as', { user: username ?? '' })
-				: t('integrations.lastfm_scrobble_to')
+		!lastfmAvailable
+			? t('integrations.lastfm_unavailable')
+			: connecting
+				? t('integrations.lastfm_connecting')
+				: connected
+					? t('integrations.lastfm_scrobbling_as', { user: username ?? '' })
+					: t('integrations.lastfm_scrobble_to')
 	);
 </script>
 
@@ -268,10 +261,13 @@
 		</button>
 
 		<button
-			class="flex h-full w-8 items-center justify-center text-muted-foreground transition-colors hover:bg-accent/10 hover:text-foreground {connected
-				? 'text-foreground'
-				: ''}"
+			class="flex h-full w-8 items-center justify-center text-muted-foreground transition-colors {!lastfmAvailable
+				? 'cursor-not-allowed opacity-50'
+				: connected
+					? 'text-foreground hover:bg-accent/10'
+					: 'hover:bg-accent/10 hover:text-foreground'}"
 			onclick={onScrobblerClick}
+			aria-disabled={!lastfmAvailable}
 			title={scrobblerTitle}
 			aria-label={scrobblerTitle}
 		>
@@ -371,6 +367,12 @@
 			</div>
 		</div>
 		<div class="mx-1 my-1 h-px bg-border"></div>
+		<button
+			class="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm hover:bg-accent/10"
+			onclick={openScrobbleSettings}
+		>
+			<HugeiconsIcon icon={Settings02Icon} class="h-4 w-4" /> {t('integrations.lastfm_settings')}
+		</button>
 		<button
 			class="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm text-destructive hover:bg-destructive/10"
 			onclick={disconnect}

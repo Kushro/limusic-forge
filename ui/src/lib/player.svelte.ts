@@ -21,6 +21,7 @@ import type { Personal } from './personal';
 import { appearance } from './theme.svelte';
 import { currentLocale, pushLocaleToRust, t } from './i18n.svelte';
 import { friendlyNetError } from './neterr';
+import { parseScrobbleConfig } from './scrobble';
 
 export const playback = $state({
 	now: null as NowPlaying | null,
@@ -72,7 +73,10 @@ export const prefs = $state({
 	/** `drop_mode`: what dropping tracks on a sidebar playlist does (`transfer.svelte.ts`). */
 	dropMode: 'ask' as DropMode,
 	/** `drop_dupes`: what a copy or move does with a track the target already holds. */
-	dropDupes: 'skip' as DropDupes
+	dropDupes: 'skip' as DropDupes,
+	/** The Scrobbling tab's on switch (`lastfm_config.enabled`). The track menu offers "Edit
+	 *  scrobble" only while it is on, so a user who paused scrobbling isn't shown it. */
+	scrobbling: true
 });
 /** The settings modal's tabs (SettingsDialog). */
 export type SettingsTab =
@@ -81,6 +85,7 @@ export type SettingsTab =
 	| 'playback'
 	| 'hotkeys'
 	| 'discord'
+	| 'scrobbling'
 	| 'data'
 	| 'ytdata'
 	| 'import'
@@ -1249,6 +1254,8 @@ export const ui = $state({
 	settingsFocus: null as SettingsFocus | 'lyrics' | null,
 	// The last upstream migration's outcome, read once at startup for Settings ▸ Import & migrate.
 	importResult: null as api.MigrateReport | null,
+	// "Edit scrobble" from a track menu: the track to edit on the Scrobbling tab.
+	scrobbleTrack: null as SongItem | null,
 	ltOpen: false, // the Listen Together modal
 	linkOpen: false, // the "open a pasted link" modal
 	paletteOpen: false, // the Ctrl+K search palette
@@ -1713,6 +1720,7 @@ export function initApp(mini = false): () => void {
 			prefs.autoplay = s.autoplay !== 'false';
 			if (s.drop_mode === 'copy' || s.drop_mode === 'move') prefs.dropMode = s.drop_mode;
 			if (s.drop_dupes === 'allow' || s.drop_dupes === 'consolidate') prefs.dropDupes = s.drop_dupes;
+			prefs.scrobbling = parseScrobbleConfig(s.lastfm_config).enabled;
 			// Half of what the app shows is YouTube's own text, and Rust asks for it in the language
 			// this setting holds (#274). It reads the setting at startup, before the SPA exists to
 			// tell it anything, so the two disagree on a fresh install, on a language taken from the
