@@ -41,7 +41,9 @@ export const playback = $state({
 	// Rating of the current track — seeded from its real `likeStatus` on each change, then
 	// optimistic on toggle. Owned here rather than in `ratings` below because the mini player is a
 	// separate webview with its own module instance: the backend reseed is what keeps them agreeing.
-	rating: 'indifferent' as Rating
+	rating: 'indifferent' as Rating,
+	/** What mpv is decoding, for the quality readout. `null` until the first report. */
+	audioFormat: null as api.AudioFormat | null
 });
 
 /**
@@ -1573,6 +1575,17 @@ export function notePlaylistAdd(playlistId: string, songs: SongItem[]) {
 let started = false;
 
 /**
+ * mpv reports a new file's codec, sample rate and sample format as separate property changes, so a
+ * track change arrives as a burst of half-updated formats ("FLAC • 32-bit • 48 kHz" on its way to
+ * "FLAC • 24-bit • 96 kHz"). Apply only the one the burst settles on.
+ */
+let audioFormatTimer: ReturnType<typeof setTimeout> | undefined;
+function settleAudioFormat(f: api.AudioFormat): void {
+	clearTimeout(audioFormatTimer);
+	audioFormatTimer = setTimeout(() => (playback.audioFormat = f), 150);
+}
+
+/**
  * Wire the Tauri event listeners once and seed initial state. Returns a teardown fn.
  *
  * `mini` is the floating-widget window (mini.rs): it runs this same module, and the events are
@@ -1643,6 +1656,7 @@ export function initApp(mini = false): () => void {
 			playback.positionAt = performance.now();
 		}),
 		api.onDuration((d) => (playback.duration = d)),
+		api.onAudioFormat(settleAudioFormat),
 		api.onPlaybackState((s) => (playback.paused = s === 'paused')),
 		api.onVolume((v) => {
 			// Not while our own drag is in flight: the echo is a value the pointer has already
@@ -1701,6 +1715,7 @@ export function initApp(mini = false): () => void {
 	api.getPlayback()
 		.then((s) => {
 			playback.volume = s.volume; // before the guard below: the slider is stale either way
+			playback.audioFormat ??= s.audioFormat;
 			if (playback.now) return; // a real now-playing event beat us to it
 			playback.now = s.now;
 			playback.rating = s.now?.rating ?? 'indifferent';

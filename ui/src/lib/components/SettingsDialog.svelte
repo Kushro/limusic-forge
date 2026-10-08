@@ -75,7 +75,11 @@
 		addFontFile,
 		removeFontFile,
 		registerFontFiles,
+		FORMAT_INFO_BAR,
+		FORMAT_INFO_MINI,
 		type Custom,
+		type FormatInfoBar,
+		type FormatInfoMini,
 		type ThemeId
 	} from '$lib/theme.svelte';
 	import {
@@ -1176,6 +1180,18 @@
 									tall: true
 								})}
 								{@render row({
+									title: t('settings.themes.format_info_bar'),
+									desc: t('settings.themes.format_info_bar_hint'),
+									control: formatInfoBarSelect,
+									tall: true
+								})}
+								{@render row({
+									title: t('settings.themes.format_info_mini'),
+									desc: t('settings.themes.format_info_mini_hint'),
+									control: formatInfoMiniSelect,
+									tall: true
+								})}
+								{@render row({
 									title: t('settings.themes.reset_theme'),
 									desc: t('settings.themes.reset_theme_hint'),
 									control: resetButton
@@ -1868,6 +1884,44 @@
 			{effective.radius.toFixed(2)}
 		</span>
 	</div>
+{/snippet}
+
+{#snippet formatInfoBarSelect()}
+	<Select.Root
+		type="single"
+		value={appearance.formatInfoBar}
+		onValueChange={(v) => setAppearance({ formatInfoBar: v as FormatInfoBar })}
+	>
+		<Select.Trigger class="w-44 shrink-0" aria-label={t('settings.themes.format_info_bar')}>
+			<span class="flex-1 text-left">{t(`settings.themes.format_info_at.${appearance.formatInfoBar}`)}</span>
+		</Select.Trigger>
+		<Select.Content>
+			{#each FORMAT_INFO_BAR as at (at)}
+				<Select.Item value={at} label={t(`settings.themes.format_info_at.${at}`)}
+					>{t(`settings.themes.format_info_at.${at}`)}</Select.Item
+				>
+			{/each}
+		</Select.Content>
+	</Select.Root>
+{/snippet}
+
+{#snippet formatInfoMiniSelect()}
+	<Select.Root
+		type="single"
+		value={appearance.formatInfoMini}
+		onValueChange={(v) => setAppearance({ formatInfoMini: v as FormatInfoMini })}
+	>
+		<Select.Trigger class="w-44 shrink-0" aria-label={t('settings.themes.format_info_mini')}>
+			<span class="flex-1 text-left">{t(`settings.themes.format_info_at.${appearance.formatInfoMini}`)}</span>
+		</Select.Trigger>
+		<Select.Content>
+			{#each FORMAT_INFO_MINI as at (at)}
+				<Select.Item value={at} label={t(`settings.themes.format_info_at.${at}`)}
+					>{t(`settings.themes.format_info_at.${at}`)}</Select.Item
+				>
+			{/each}
+		</Select.Content>
+	</Select.Root>
 {/snippet}
 
 {#snippet dropModeSelect()}

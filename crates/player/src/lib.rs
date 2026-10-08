@@ -13,7 +13,9 @@ use libmpv2::mpv_node::MpvNode;
 use libmpv2::{Format, Mpv};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 
+mod format;
 mod video;
+pub use format::AudioFormat;
 pub use video::{GlDisplay, Thumbnail, VideoRenderer};
 
 #[derive(Debug, thiserror::Error)]
@@ -65,6 +67,9 @@ pub enum PlayerEvent {
     /// worth trying. The open is a network round trip, so a skip or a crossfade can land first,
     /// and the file named is then no longer the one playing.
     VideoFailed(String),
+    /// What the track being heard is encoded as (see [`AudioFormat`]). Sent when it changes, and
+    /// when a crossfade brings in a deck whose own changes went unheard while it was idle.
+    AudioFormat(AudioFormat),
     Error(String),
 }
 
@@ -171,6 +176,8 @@ struct Decks {
     /// The native window mpv draws the picture into, 0 for none (the render API). See
     /// [`Player::set_video_window`].
     wid: AtomicI64,
+    /// Each deck's last [`AudioFormat`], whether or not it was live to send it.
+    audio_formats: [Mutex<Option<AudioFormat>>; 2],
 }
 
 impl Decks {
@@ -303,6 +310,7 @@ fn spawn_deck_events(mpv: &Arc<Mpv>, deck: usize, decks: Arc<Decks>) -> Result<(
     ev.observe_property("duration", Format::Double, 1)?;
     ev.observe_property("pause", Format::Flag, 2)?;
     ev.observe_property("idle-active", Format::Flag, 3)?;
+    format::observe(&ev)?;
     std::thread::Builder::new()
         .name(format!("mpv-events-{deck}"))
         .spawn(move || event_loop(ev, deck, decks))
@@ -345,6 +353,7 @@ impl Player {
             video_visible: AtomicBool::new(false),
             on_new_deck: OnceLock::new(),
             wid: AtomicI64::new(0),
+            audio_formats: Default::default(),
         });
         spawn_deck_events(&a, 0, decks.clone())?;
         Ok(Player { decks, events: Some(rx), af: Mutex::new((None, 0)) })
@@ -791,6 +800,7 @@ fn event_loop(mut ev: EventContext, deck: usize, decks: Arc<Decks>) {
     let mut paused = false;
     let mut idle = true;
     let mut playing = false;
+    let mut audio_format = format::Tracker::default();
     loop {
         match ev.wait_event(1.0) {
             Some(Ok(event)) => {
@@ -830,6 +840,14 @@ fn event_loop(mut ev: EventContext, deck: usize, decks: Arc<Decks>) {
                         idle = i;
                         None
                     }
+                    Event::PropertyChange { name, change, .. }
+                        if format::is_format_property(name) =>
+                    {
+                        audio_format.apply(name, &change).map(|f| {
+                            *decks.audio_formats[deck].lock().unwrap() = Some(f.clone());
+                            PlayerEvent::AudioFormat(f)
+                        })
+                    }
                     // mpv's own log, at whatever level `request_mpv_log` asked for. Its `prefix`
                     // is the subsystem ("mkv", "ffmpeg/demuxer", "cplayer"), which is the part
                     // that says where a stall is.
@@ -852,6 +870,7 @@ fn event_loop(mut ev: EventContext, deck: usize, decks: Arc<Decks>) {
                     // A cancelled preload gets here too (mpv delivers the event before the
                     // `stop`), which is what the generation check is for.
                     Event::FileLoaded => {
+                        audio_format.new_file();
                         video::file_loaded(&decks, deck);
                         if !live()
                             && decks.preload_armed.load(Ordering::SeqCst)
@@ -1023,6 +1042,10 @@ fn start_crossfade(decks: &Arc<Decks>, from: usize, fade: f64) {
             let _ = decks.tx.send(PlayerEvent::Duration(secs));
             fade = fade.min(secs / 2.0);
         }
+    }
+    // Same as the duration: the incoming deck reported its format while it was idle.
+    if let Some(f) = decks.audio_formats[1 - from].lock().unwrap().clone() {
+        let _ = decks.tx.send(PlayerEvent::AudioFormat(f));
     }
     tracing::info!(from, fade, "crossfading");
     let (ramp, fade_out, fade_in) = (decks.clone(), out.clone(), incoming.clone());

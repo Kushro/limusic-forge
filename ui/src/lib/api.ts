@@ -428,6 +428,8 @@ export interface PlaybackSnapshot {
 	duration: number;
 	/** The level restored from last run (or the one another window already set). */
 	volume: number;
+	/** `null` until mpv has reported the first track's format. */
+	audioFormat: AudioFormat | null;
 }
 export const getPlayback = () => invoke<PlaybackSnapshot>('get_playback');
 
@@ -1496,6 +1498,19 @@ export const onPosition = (cb: (p: number) => void): Promise<UnlistenFn> =>
 	listen<{ position: number }>('position', (e) => cb(e.payload.position));
 export const onDuration = (cb: (d: number) => void): Promise<UnlistenFn> =>
 	listen<{ duration: number }>('duration', (e) => cb(e.payload.duration));
+/** What the track being heard is encoded as, as mpv decoded it (Rust `player::AudioFormat`).
+ *  Raw facts; `audioformat.ts` turns them into the readout. */
+export interface AudioFormat {
+	/** ffmpeg's decoder name: `opus`, `aac`, `flac`, `pcm_s24le`, `mp3float`. */
+	codec: string | null;
+	sampleRate: number | null;
+	/** Lossless only. */
+	bitDepth: number | null;
+	bitrateKbps: number | null;
+	lossless: boolean;
+}
+export const onAudioFormat = (cb: (f: AudioFormat) => void): Promise<UnlistenFn> =>
+	listen<AudioFormat>('audio-format', (e) => cb(e.payload));
 /** Echo of every `set_volume`, so a second window's slider can't drift from what you hear. */
 export const onVolume = (cb: (v: number) => void): Promise<UnlistenFn> =>
 	listen<number>('volume', (e) => cb(e.payload));

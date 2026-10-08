@@ -120,8 +120,17 @@ export const appearance = $state({
 	artworkAccent: false,
 	/** Theater mode's second and third columns (#297). Sticky, like every view toggle. */
 	theaterLyrics: true,
-	theaterQueue: false
+	theaterQueue: false,
+	/** Where the player bar shows the quality readout (codec, bit depth, sample rate, bitrate). */
+	formatInfoBar: 'volume' as FormatInfoBar,
+	/** Same, for the mini player's full layout. The compact one has no room for it. */
+	formatInfoMini: 'artist' as FormatInfoMini
 });
+
+export const FORMAT_INFO_BAR = ['volume', 'artist', 'title', 'time', 'off'] as const;
+export type FormatInfoBar = (typeof FORMAT_INFO_BAR)[number];
+export const FORMAT_INFO_MINI = ['artist', 'top', 'hover', 'off'] as const;
+export type FormatInfoMini = (typeof FORMAT_INFO_MINI)[number];
 
 export function setAppearance(patch: Partial<typeof appearance>): void {
 	Object.assign(appearance, patch);
@@ -471,6 +480,8 @@ export function initTheme(): void {
 		] as const) {
 			if (typeof saved?.[k] === 'boolean') appearance[k] = saved[k];
 		}
+		if (FORMAT_INFO_BAR.includes(saved?.formatInfoBar)) appearance.formatInfoBar = saved.formatInfoBar;
+		if (FORMAT_INFO_MINI.includes(saved?.formatInfoMini)) appearance.formatInfoMini = saved.formatInfoMini;
 	} catch {
 		// unparseable — keep the defaults
 	}

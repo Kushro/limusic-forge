@@ -81,6 +81,9 @@ pub struct AppState {
     /// Mirror of mpv's pause flag (set in `media_set_playing`). Position ticks must consult this
     /// instead of assuming "playing" — mpv fires `time-pos` on seeks while paused too.
     is_playing: AtomicBool,
+    /// The last `audio-format` event's payload, for a window that opens mid-song (the mini player)
+    /// and so missed it. See [`audio_format_json`].
+    audio_format: std::sync::Mutex<serde_json::Value>,
     /// Latest mpv position (f64 bits) + wall-clock secs of the last DB write, for throttled
     /// resume-position persistence.
     latest_position: AtomicU64,
@@ -490,6 +493,7 @@ impl AppState {
             auth: tokio::sync::Mutex::default(),
             history_pinged: AtomicBool::new(false),
             is_playing: AtomicBool::new(false),
+            audio_format: std::sync::Mutex::new(serde_json::Value::Null),
             generation: AtomicU64::new(0),
             rate_epoch: AtomicU64::new(0),
             pending_seek: std::sync::Mutex::new(None),
@@ -2375,7 +2379,12 @@ impl AppState {
             "position": self.current_position(),
             "duration": duration,
             "volume": saved_volume(&self.db),
+            "audioFormat": self.audio_format.lock().unwrap().clone(),
         })
+    }
+
+    pub fn set_audio_format(&self, json: serde_json::Value) {
+        *self.audio_format.lock().unwrap() = json;
     }
 
     /// Ask YouTube what the current track's rating actually is, and tell every window if it
@@ -4384,6 +4393,18 @@ fn backfill_metadata(
 pub fn saved_volume(db: &Db) -> i64 {
     let v = db.get_setting("volume").and_then(|s| s.parse().ok());
     v.filter(|v| (0..=100).contains(v)).unwrap_or(100)
+}
+
+/// The `audio-format` event's payload: raw facts, camelCase. The UI does the labelling
+/// (`audioformat.ts`), so the codec stays ffmpeg's own name here.
+pub fn audio_format_json(f: &player::AudioFormat) -> serde_json::Value {
+    serde_json::json!({
+        "codec": f.codec,
+        "sampleRate": f.sample_rate,
+        "bitDepth": f.bit_depth,
+        "bitrateKbps": f.bitrate_kbps,
+        "lossless": f.lossless,
+    })
 }
 
 /// Crossfade length in seconds, or `None` when it's off. Experimental, so off unless asked for,
