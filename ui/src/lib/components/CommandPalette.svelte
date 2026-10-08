@@ -135,7 +135,7 @@
 			.catch((e) => (String(e) === 'busy' ? toast(t('monitor.busy')) : toast.error(String(e))));
 	}
 
-	function openSettings(tab?: 'import') {
+	function openSettings(tab?: 'import' | 'scrobbling') {
 		ui.settingsFocus = tab ? { tab } : null;
 		ui.settingsOpen = true;
 	}
@@ -211,6 +211,13 @@
 			label: t('settings.tabs.import'),
 			keywords: ['migrate', 'import', 'playlistforge', 'limusic', 'settings'],
 			run: close(() => openSettings('import'))
+		},
+		{
+			id: 'action:scrobbling',
+			group: 'actions',
+			label: t('settings.tabs.scrobbling'),
+			keywords: ['last.fm', 'lastfm', 'scrobble', 'rules', 'edits', 'settings'],
+			run: close(() => openSettings('scrobbling'))
 		},
 		// Signed out there is nothing of yours to check, so the action isn't offered.
 		...(auth.account?.signedIn
