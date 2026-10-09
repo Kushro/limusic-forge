@@ -10,9 +10,11 @@ name: Linux release binaries
 # Fedora 44 / Arch / rawhide have. Building here on a pinned, deliberately older runner puts the
 # floor at glibc 2.39: Ubuntu 24.04+, Debian 13+, Fedora 40+, current Arch.
 #
-# `runs-on` is PINNED ON PURPOSE. Never change it to `ubuntu-latest` — that tracks the newest
-# Ubuntu and would silently reintroduce exactly the bug this workflow exists to fix. The
-# "Check the glibc floor" step below fails the build if someone does it anyway.
+# `runs-on` is PINNED ON PURPOSE, to Ubuntu 24.04: it comes from runner.yml's `linux` output,
+# which is either avrea-ubuntu-24.04-4-vcpu or ubuntu-24.04. Never change either label (or this
+# job) to `ubuntu-latest` — that tracks the newest Ubuntu and would silently reintroduce exactly
+# the bug this workflow exists to fix. The "Check the glibc floor" step below fails the build if
+# someone does it anyway.
 #
 # The .deb is here for exactly the same reason, and needs it more. Tauri writes a deb's Depends
 # verbatim from tauri.conf.json and never runs dpkg-shlibdeps, so nothing in the package records a
@@ -61,8 +63,14 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Avrea or GitHub-hosted labels, per the RUNNER_PROVIDER repo variable (see runner.yml). Both
+  # `linux` labels it can return are Ubuntu 24.04 images, which is what the glibc floor needs.
+  runner:
+    uses: ./.github/workflows/runner.yml
+
   build:
-    runs-on: ubuntu-24.04 # glibc 2.39 — see the header. NOT ubuntu-latest.
+    needs: runner
+    runs-on: ${{ needs.runner.outputs.linux }} # Ubuntu 24.04, glibc 2.39 — see the header. NOT ubuntu-latest.
     # A healthy run is 9-12 min. The default is six hours, which is what a hung docker/Xvfb check or
     # a wedged package download would burn while the release sits half-published and unmarked.
     # The headroom over 12 is for the upload step: GitHub's asset endpoint had a bad afternoon
@@ -84,6 +92,13 @@ jobs:
           TAG="${{ inputs.tag }}"
           [ -n "$TAG" ] || { echo "::error::no tag to build for"; exit 1; }
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      # Dry runs only validate packaging, so trade runtime speed for build speed: 16 codegen units
+      # instead of the profile's 1. Published releases keep `codegen-units = 1` (Cargo.toml). Set
+      # before rust-cache, which keys on CARGO_* env, so dry-run artifacts never mix with release ones.
+      - name: Dry run, faster codegen
+        if: ${{ inputs.dry_run }}
+        run: echo "CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16" >> "$GITHUB_ENV"
 
       # Actions are pinned to commit SHAs, not tags: `@v4` and `@v2` are mutable, and
       # `dtolnay/rust-toolchain@stable` is a *branch*. This job holds TAURI_SIGNING_PRIVATE_KEY and

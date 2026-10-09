@@ -64,7 +64,8 @@ cargo tauri build --bundles deb   # → target/release/bundle/deb/*.deb
 ## Windows
 
 > **You normally don't need to do any of this.** Windows installers are built in CI —
-> `.github/workflows/windows-release.yml` runs these exact steps on a `windows-latest` runner when a
+> `.github/workflows/windows-release.yml` runs these exact steps on a Windows Server 2025 runner (Avrea or GitHub-hosted, see
+> `runner.yml`) when a
 > release is published (and can be re-run by hand against any tag). This section is for debugging a
 > Windows-specific problem locally.
 
@@ -151,8 +152,10 @@ zip. Microsoft allows that app-local deployment; the UCRT itself ships with Wind
 `tauri.windows.conf.json` builds **NSIS only**, `installMode: "currentUser"` (no elevation, installs
 under `%LOCALAPPDATA%`), in English and Spanish, with the WebView2 **bootstrapper**
 (`downloadBootstrapper`). The updater downloads that same setup, so it stays small; CI makes a
-separate offline setup in a second pass with
-`--config '{"bundle":{"windows":{"webviewInstallMode":{"type":"offlineInstaller"}}}}'`.
+separate offline setup in a second pass, `tauri bundle` (re-packages the first pass's exe, no
+recompile) with
+`--config '{"bundle":{"windows":{"webviewInstallMode":{"type":"offlineInstaller"},"nsis":{"compression":"zlib"}}}}'`
+(zlib for that installer only; the online setup keeps lzma).
 `windows_bundle_config_is_forge` in `src-tauri/src/lib.rs` pins these keys.
 
 There is **no MSI** while the version carries a prerelease-style suffix (`1.2.0-forge.1`): WiX only

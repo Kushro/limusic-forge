@@ -135,6 +135,14 @@ mayúsculas. Así `1.3.0-rc.1`, `1.2.0-RC.1` y `1.3.0-beta.2+b.5` son prerelease
 Los scripts se invocan con bash (`bash scripts/…`); GitButler en Windows no conserva el bit +x.
 El job `rustfmt` de `checks.yml` falla si un workflow llama a `scripts/*.sh` sin `bash` delante.
 
+Runners: `checks.yml`, `linux-release.yml`, `windows-release.yml` y `stream-health.yml` eligen el
+runner con `.github/workflows/runner.yml`. La variable de repositorio `RUNNER_PROVIDER` decide:
+`avrea` fuerza Avrea, `github` fuerza los runners de GitHub, y sin definir (o `auto`) usa Avrea
+salvo que su página de estado reporte una caída mayor o no responda (los PR desde forks van siempre
+a GitHub). `macos-release.yml` queda siempre en `macos-14` de GitHub. Un `dry_run` de los workflows
+de release compila con `CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16` para validar el empaquetado más
+rápido; los releases publicados mantienen `codegen-units = 1`.
+
 ## 6. Qué pasa si falta cada cosa
 
 | Falta | Efecto en el build | Cómo se ve en la app |

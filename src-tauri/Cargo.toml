@@ -10,7 +10,11 @@ rust-version = "1.88"
 
 [lib]
 name = "app_lib"
-crate-type = ["staticlib", "cdylib", "rlib"]
+# Desktop only: main.rs links the rlib, so a staticlib and a cdylib would be two extra artifacts
+# (and two extra LTO links in a release build) that nothing ever uses. If Android or iOS is ever
+# added (`tauri android/ios init`), restore ["staticlib", "cdylib", "rlib"]: the mobile targets
+# load the library through `mobile_entry_point` (lib.rs) and need those crate types.
+crate-type = ["rlib"]
 
 [dev-dependencies]
 # Temp dirs for the portable-mode detection tests (paths.rs, winstate.rs). Already in the lockfile.
