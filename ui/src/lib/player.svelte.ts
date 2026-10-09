@@ -67,6 +67,9 @@ export const prefs = $state({
 	/** Linux: mpv draws the music video under the page (nativevideo.rs) instead of a `<video>`
 	 *  element. Cleared if it turns out there is no GL surface, which hands the picture back. */
 	nativeVideo: false,
+	/** `mini_video`: the mini player shows the music video in place of its cover (MiniPlayer).
+	 *  Only counts on top of `musicVideos`, which every reader checks as well. */
+	miniVideo: false,
 	/** `ambient_light`: the player view glows with the music video's colours (Ambient.svelte). */
 	ambient: false,
 	/** `autoplay`: the queue keeps going with similar songs. Switched from the queue panel as well
@@ -1606,8 +1609,9 @@ export function initApp(mini = false): () => void {
 			savePersonal();
 			// Warm the music video now rather than when the view opens: the resolve is a round trip
 			// to YouTube, and paid here it overlaps the track starting instead of the user's click.
-			// Not in the mini player, which has no player view to show it in.
-			if (!mini && prefs.musicVideos && !prefs.nativeVideo && n.isVideo) videoUrlFor(n.videoId);
+			// In the mini player only while it shows the video in place of its cover (`mini_video`).
+			if ((!mini || prefs.miniVideo) && prefs.musicVideos && !prefs.nativeVideo && n.isVideo)
+				videoUrlFor(n.videoId);
 		}),
 		// YouTube's own answer for a track whose row never stated one (issue #93). Into the
 		// override map as well as the player bar: the same song is on screen as a list row too,
@@ -1725,10 +1729,26 @@ export function initApp(mini = false): () => void {
 			playback.duration = s.duration;
 		})
 		.catch(() => {});
-	if (mini) return teardown;
+	if (mini) {
+		// The widget's music video (`mini_video`) is always a `<video>` element: mpv draws its
+		// picture under the main window only (nativevideo.rs), so the native path stays off here.
+		prefs.nativeVideo = false;
+		api.getSettings()
+			.then((s) => {
+				prefs.musicVideos = s.music_videos === 'true';
+				prefs.miniVideo = s.mini_video === 'true';
+				// The widget is usually created mid-song, so the now-playing event that warms the
+				// video above already fired. Warm the current one here instead.
+				const n = playback.now;
+				if (prefs.musicVideos && prefs.miniVideo && n?.isVideo) videoUrlFor(n.videoId);
+			})
+			.catch(() => {});
+		return teardown;
+	}
 	api.getSettings()
 		.then((s) => {
 			prefs.musicVideos = s.music_videos === 'true';
+			prefs.miniVideo = s.mini_video === 'true';
 			prefs.nativeVideo = s.native_video === 'true';
 			prefs.ambient = s.ambient_light === 'true';
 			prefs.discordRpc = s.discord_rpc === 'true';

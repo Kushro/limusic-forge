@@ -1082,7 +1082,17 @@ export type RowRef = { song: SongItem; before: string | null };
 /** One journal entry: an edit the playlist tools made, and whether it can still be undone. */
 export type PlaylistOp = {
 	id: number;
-	kind: 'reorder' | 'remove' | 'copy' | 'move' | 'dedupe' | 'split' | 'merge' | 'extract' | 'add';
+	kind:
+		| 'reorder'
+		| 'remove'
+		| 'copy'
+		| 'move'
+		| 'dedupe'
+		| 'split'
+		| 'merge'
+		| 'extract'
+		| 'add'
+		| 'recover';
 	summary: { playlists: { id: string; title: string }[]; count: number };
 	createdAt: number;
 	undone: boolean;
@@ -1242,6 +1252,19 @@ export const keepOnlyIn = async (
 	});
 	return { ...r, op: r.op && op(r.op) };
 };
+/** One copy of a song in one playlist. `position` is 0-based, from the latest snapshot (null when
+ *  there is none); `set_video_id` is the handle seen then, only a hint; `nth` counts the copies of
+ *  the song in that playlist from 0, so a fresh read can find the same one. */
+export type Occurrence = {
+	playlist_id: string;
+	position: number | null;
+	set_video_id: string | null;
+	nth: number;
+};
+/** Every copy of a song across your playlists (Liked Music left out), from the index and the
+ *  snapshots: no network. */
+export const songOccurrences = (videoId: string) =>
+	invoke<Occurrence[]>('song_occurrences', { videoId });
 export type AlertKind = 'added' | 'removed' | 'moved' | 'unavailable' | 'restored';
 /** A change the monitor found in a playlist of yours since the sync before. `from`/`to` are the
  *  0-based positions a row went between, where known (always on `moved`). */
@@ -1257,6 +1280,8 @@ export type PlaylistAlert = {
 	to?: number;
 	/** Dismissed from Library ▸ In your playlists (only ever true with `all`). */
 	dismissed?: boolean;
+	/** An `unavailable` alert a later `restored` of the same playlist and track answers. */
+	resolved?: boolean;
 };
 /** The alerts not dismissed, newest first, one per playlist, track and kind (the newest of its
  *  repeats). `all` is the alerts page: every row ever filed, repeats and dismissed ones included,
@@ -1438,6 +1463,135 @@ export const importUpdate = (playlistId: string) =>
 	invoke<ImportSnapshot>('import_update', { playlistId });
 export const importResolve = (link: string) => invoke<ImportResolved>('import_resolve', { link });
 
+// --- recover tracks (playlist_tools/recover.rs, wayback.rs) ------------------------------------
+// The Tools ▸ Recover tracks assistant. Rows travel snake_case, as Rust names them. Rejections are
+// short codes: `busy`, `cooldown:<unix second>`, `gone`, `invalid_id`.
+
+/** Where a candidate came from: (a) a dead row still in the playlist, (b) an `unavailable` alert
+ *  no `restored` answered, (c) a `removed` alert of a track that did not come back. */
+export type RecoverSource = 'unavailable' | 'alert_unavailable' | 'alert_removed';
+/** One dead track in one playlist, once however many sources name it. `key` is
+ *  `recoverKey(playlist_id, video_id)`. */
+export interface RecoverCandidate {
+	key: string;
+	playlist_id: string;
+	video_id: string;
+	sources: RecoverSource[];
+	/** The alerts behind it, newest first: dismissed and marked seen once it is recovered. */
+	alert_ids: number[];
+	/** Still listed in the playlist, dead. */
+	in_playlist: boolean;
+	/** 0-based; null when unknown. */
+	position: number | null;
+	set_video_id: string | null;
+	/** The handle of the row after it: what its replacement goes in front of. */
+	next_handle: string | null;
+	title: string | null;
+	artists: string | null;
+	duration: string | null;
+	thumbnail: string | null;
+	/** Every alert behind it is dismissed (only listed with `includeDismissed`). */
+	dismissed: boolean;
+}
+export type RecoverTitleSource =
+	| 'snapshot'
+	| 'alert'
+	| 'history'
+	| 'download'
+	| 'index'
+	| 'wayback'
+	| 'manual';
+export type RecoverStatus = 'idle' | 'done' | 'failed' | 'already_present';
+/** One candidate's progress through the assistant (the session lasts as long as the app). */
+export interface RecoverRow {
+	key: string;
+	/** What it was called, as far as known: the search's input. */
+	title: string | null;
+	artists: string | null;
+	title_source: RecoverTitleSource | null;
+	/** `pending` until searched. */
+	tier: ImportTier;
+	/** The replacement chosen: the search's best, or the user's. */
+	pick: SongItem | null;
+	candidates: SongItem[];
+	/** The user confirmed `pick`. */
+	approved: boolean;
+	status: RecoverStatus;
+	error: string | null;
+}
+export type RecoverPhase =
+	| 'idle'
+	| 'titles'
+	| 'searching'
+	| 'applying'
+	| 'done'
+	| 'cancelled'
+	| 'failed';
+/** The assistant's progress, as `recover-progress` carries it. */
+export interface RecoverSnapshot {
+	phase: RecoverPhase;
+	done: number;
+	total: number;
+	/** What it is on now (a title or a videoId). */
+	current: string | null;
+	/** Pausing for a rate limit or the hourly search budget: the unix second it goes on. */
+	waiting_until: number | null;
+	message: string | null;
+}
+/** What applying did, per playlist: its journal entries, the rows done, and each failed row. */
+export interface RecoverApplied {
+	playlists: {
+		playlist_id: string;
+		ops: PlaylistOp[];
+		done: number;
+		failed: [key: string, error: string][];
+	}[];
+}
+
+/** A candidate's key, as Rust's `recover::key_of` builds it. */
+export const recoverKey = (playlistId: string, videoId: string) => `${playlistId}\u001f${videoId}`;
+/** Every candidate (dismissed alerts' only with `includeDismissed`, D5). Also opens or refreshes
+ *  the session, one row per candidate. */
+export const recoverCandidates = (includeDismissed = false) =>
+	invoke<RecoverCandidate[]>('recover_candidates', { includeDismissed });
+/** The session's rows: these keys, or all of them. */
+export const recoverRows = (keys?: string[]) =>
+	invoke<RecoverRow[]>('recover_rows', { keys: keys ?? null });
+/** Look up the titles these rows lack, locally and then (with `wayback`) on the Wayback Machine.
+ *  Runs in the background: follow `onRecoverProgress`. */
+export const recoverTitles = (keys: string[], wayback: boolean) =>
+	invoke<RecoverSnapshot>('recover_titles', { keys, wayback });
+/** Search YouTube for a replacement of each of these rows. Runs in the background. */
+export const recoverSearch = (keys: string[]) =>
+	invoke<RecoverSnapshot>('recover_search', { keys });
+/** Choose a row's replacement (`null`: none) and whether it is approved. */
+export const recoverPick = (key: string, song: SongItem | null, approved: boolean) =>
+	invoke<RecoverRow>('recover_pick', { key, song, approved });
+/** Name a row by hand (its search input). */
+export const recoverSetTitle = (key: string, title: string, artists: string | null = null) =>
+	invoke<RecoverRow>('recover_set_title', { key, title, artists });
+/** A song from its videoId (a pasted link), or null when YouTube has none. */
+export const recoverSong = (videoId: string) =>
+	invoke<SongItem | null>('recover_song', { videoId });
+/** Stop the running title lookup or search. */
+export const recoverCancel = () => invoke<void>('recover_cancel');
+/** Forget the session's rows and progress. */
+export const recoverReset = () => invoke<void>('recover_reset');
+/** Put the approved replacements of these rows in: `replace` in the dead row's place (the default),
+ *  or `append` at the end. No `engine` takes the current choice (`setEngineChoice`), and none
+ *  there leaves it to `playlist_engine`. */
+export const recoverApply = async (
+	keys: string[],
+	action: 'replace' | 'append',
+	engine?: PlaylistEngine | null
+): Promise<RecoverApplied> => {
+	type Raw = {
+		playlists: (Omit<RecoverApplied['playlists'][number], 'ops'> & { ops: RawPlaylistOp[] })[];
+	};
+	const r = await invoke<Raw>('recover_apply', { keys, action, engine: engine ?? engineChoice });
+	return { playlists: r.playlists.map((p) => ({ ...p, ops: p.ops.map(op) })) };
+};
+
 // --- events (context/11). Each returns an unlisten fn; call it on component teardown. --------
 export const onNowPlaying = (cb: (n: NowPlaying) => void): Promise<UnlistenFn> =>
 	listen<NowPlaying>('now-playing', (e) => cb(e.payload));
@@ -1526,6 +1680,8 @@ export const onCoverError = (cb: (msg: string) => void): Promise<UnlistenFn> =>
 	listen<{ message: string }>('cover-error', (e) => cb(e.payload.message));
 export const onImportProgress = (cb: (s: ImportSnapshot) => void): Promise<UnlistenFn> =>
 	listen<ImportSnapshot>('import-progress', (e) => cb(e.payload));
+export const onRecoverProgress = (cb: (s: RecoverSnapshot) => void): Promise<UnlistenFn> =>
+	listen<RecoverSnapshot>('recover-progress', (e) => cb(e.payload));
 export const onAuthChanged = (cb: (a: Account) => void): Promise<UnlistenFn> =>
 	listen<Account>('auth-changed', (e) => cb(e.payload));
 export const onAccountSelectionRequired = (cb: () => void): Promise<UnlistenFn> =>

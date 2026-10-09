@@ -69,6 +69,7 @@
 	import { reveal } from '$lib/reveal.svelte';
 	import { t } from '$lib/i18n.svelte';
 	import { openImport } from '$lib/import.svelte';
+	import { isResolved } from '$lib/alerts';
 	import ExperimentalBadge from '$lib/components/ExperimentalBadge.svelte';
 
 	// `?tab=local` so anything that sends you back here (an album whose files were deleted) lands
@@ -91,7 +92,7 @@
 	let alertCount = $state(0);
 	onMount(() => {
 		api.playlistAlerts()
-			.then((a) => (alertCount = a.length))
+			.then((a) => (alertCount = a.filter((x) => !isResolved(x)).length))
 			.catch(() => {});
 	});
 	// Artists splits like YouTube Music's: the artists behind your songs, or the ones you subscribe

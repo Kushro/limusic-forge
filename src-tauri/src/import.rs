@@ -133,7 +133,7 @@ fn versions(dressing: &str) -> Vec<&'static str> {
 }
 
 /// "3:45" or "1:02:03" in seconds.
-fn secs(d: &str) -> Option<f64> {
+pub(crate) fn secs(d: &str) -> Option<f64> {
     d.split(':').try_fold(0.0, |acc, p| p.trim().parse::<f64>().ok().map(|n| acc * 60.0 + n))
 }
 
@@ -318,7 +318,7 @@ fn is_bot_check(reason: &str) -> bool {
 }
 
 /// Why a step stopped short.
-enum Halt {
+pub(crate) enum Halt {
     /// Stopped by the user, or replaced by a newer import: nothing to say.
     Cancelled,
     /// YouTube pushed back, now or within the cooldown. The unix second it ends.
@@ -328,7 +328,7 @@ enum Halt {
 
 impl Halt {
     /// What the UI is told: a code it words (`cooldown:<until>`), or the message as it is.
-    fn code(self) -> String {
+    pub(crate) fn code(self) -> String {
         match self {
             Halt::Cancelled => "gone".into(),
             Halt::Cooldown(until) => format!("cooldown:{until}"),
@@ -398,15 +398,36 @@ fn budget(state: &AppState) -> (i64, i64) {
         .unwrap_or((0, 0))
 }
 
+/// Who is waiting on [`before_youtube`], so the wait can stop and say what it waits for: an
+/// import's job, or the recovery assistant's search (`playlist_tools::recover`), which shares the
+/// request slot, the hourly budget and the cooldown with it.
+pub(crate) struct Gate<'a> {
+    /// Polled around every wait: true once the caller was stopped or replaced.
+    pub(crate) cancelled: &'a (dyn Fn() -> bool + Sync),
+    /// Told the unix second the hourly budget frees up while waiting it out, and `None` after.
+    pub(crate) waiting: &'a (dyn Fn(Option<i64>) + Sync),
+}
+
 /// Wait until the next request to YouTube is welcome, or say why there won't be one. Every
 /// import request goes through here: the matching searches, the playlist writes, an update, a
 /// pasted Spotify link. `gen` ties the wait to a job, so a stopped import stops waiting.
 async fn before_youtube(state: &AppState, gen: Option<u64>, ask: Ask) -> Result<(), Halt> {
+    let cancelled = move || gen.is_some_and(|g| !alive(g));
+    let waiting = move |until: Option<i64>| {
+        if let Some(g) = gen {
+            set_waiting(state, g, until);
+        }
+    };
+    before_youtube_gated(state, &Gate { cancelled: &cancelled, waiting: &waiting }, ask).await
+}
+
+/// [`before_youtube`] for any caller, `gate` standing in for the import's job.
+async fn before_youtube_gated(state: &AppState, gate: &Gate<'_>, ask: Ask) -> Result<(), Halt> {
     let check = || -> Result<(), Halt> {
         if let Some(until) = cooldown(state) {
             return Err(Halt::Cooldown(until));
         }
-        if gen.is_some_and(|g| !alive(g)) {
+        if (gate.cancelled)() {
             return Err(Halt::Cancelled);
         }
         Ok(())
@@ -414,15 +435,11 @@ async fn before_youtube(state: &AppState, gen: Option<u64>, ask: Ask) -> Result<
     check()?;
     if ask == Ask::Search {
         while let Some(at) = over_budget(budget(state), now_secs()) {
-            if let Some(g) = gen {
-                set_waiting(state, g, Some(at));
-            }
+            (gate.waiting)(Some(at));
             tokio::time::sleep(Duration::from_secs(5)).await;
             check()?;
         }
-        if let Some(g) = gen {
-            set_waiting(state, g, None);
-        }
+        (gate.waiting)(None);
     }
     let at = {
         let mut p = PACER.lock().unwrap();
@@ -494,19 +511,20 @@ pub(crate) fn playlist_write_error(state: &AppState, e: innertube::Error) -> Str
 /// Search for one track: songs first, then videos when no song is even a plausible guess
 /// (covers, live sets and releases that never got an official upload only exist as videos; the
 /// video search answers nothing when the user hides music videos). Best first, at most six.
-async fn search(
+/// Paced, budgeted and cooled down through [`before_youtube_gated`], `gate` saying who waits.
+pub(crate) async fn search(
     state: &AppState,
-    gen: Option<u64>,
+    gate: &Gate<'_>,
     src: &SourceTrack,
 ) -> Result<Vec<(f64, SongItem)>, Halt> {
     let client = metadata_client(state).map_err(Halt::Failed)?;
     let q = query(src);
     let mut out = Vec::new();
-    before_youtube(state, gen, Ask::Search).await?;
+    before_youtube_gated(state, gate, Ask::Search).await?;
     let songs = state.it.search_songs(client, &q, false).await.map_err(|e| halt_for(state, e))?;
     rank(src, songs.items, &mut out);
     if out.iter().all(|(s, _)| *s < CHECK) {
-        before_youtube(state, gen, Ask::Search).await?;
+        before_youtube_gated(state, gate, Ask::Search).await?;
         match state.it.search_videos(client, &q).await {
             Ok(r) => rank(src, r.items, &mut out),
             Err(e) if pushed_back(&e) => return Err(halt_for(state, e)),
@@ -580,7 +598,9 @@ fn direct(t: &SourceTrack) -> Option<Answer> {
     Some((Tier::Matched, Some(song), Vec::new()))
 }
 
-fn classify(ranked: Vec<(f64, SongItem)>) -> (Tier, Option<SongItem>, Vec<SongItem>) {
+/// The tier of a ranked list (best first): [`MATCHED`] (0.80) and up is matched, [`CHECK`] (0.55)
+/// and up is a guess to check, below is missing. The pick is the best, unless missing.
+pub(crate) fn classify(ranked: Vec<(f64, SongItem)>) -> (Tier, Option<SongItem>, Vec<SongItem>) {
     let best = ranked.first().map_or(0.0, |(s, _)| *s);
     let tier = if best >= MATCHED {
         Tier::Matched
@@ -597,9 +617,9 @@ fn classify(ranked: Vec<(f64, SongItem)>) -> (Tier, Option<SongItem>, Vec<SongIt
 /// A song YouTube Music didn't have a week ago may be there now.
 const MISSING_TTL: i64 = 7 * 86_400;
 
-type Answer = (Tier, Option<SongItem>, Vec<SongItem>);
+pub(crate) type Answer = (Tier, Option<SongItem>, Vec<SongItem>);
 
-fn cached(state: &AppState, key: &str) -> Option<Answer> {
+pub(crate) fn cached(state: &AppState, key: &str) -> Option<Answer> {
     let m = state.db.get_import_match(key)?;
     let tier = Tier::parse(&m.tier)?;
     if tier == Tier::Missing && !m.manual && now_secs() - m.updated_at > MISSING_TTL {
@@ -615,7 +635,12 @@ fn cached(state: &AppState, key: &str) -> Option<Answer> {
     Some((tier, pick, candidates))
 }
 
-fn remember(state: &AppState, key: &str, (tier, pick, candidates): &Answer, manual: bool) {
+pub(crate) fn remember(
+    state: &AppState,
+    key: &str,
+    (tier, pick, candidates): &Answer,
+    manual: bool,
+) {
     let song_json = pick.as_ref().and_then(|p| serde_json::to_string(p).ok());
     let candidates_json = (*tier != Tier::Matched && !candidates.is_empty())
         .then(|| serde_json::to_string(candidates).ok())
@@ -1019,9 +1044,12 @@ async fn run_matching(state: Arc<AppState>, gen: u64) {
     }
     emit(&state, gen, true);
 
+    let cancelled = || !alive(gen);
+    let waiting = |until: Option<i64>| set_waiting(&state, gen, until);
+    let gate = Gate { cancelled: &cancelled, waiting: &waiting };
     let mut failures = 0;
     for (i, key, track) in network {
-        match search(&state, Some(gen), &track).await {
+        match search(&state, &gate, &track).await {
             Ok(ranked) => {
                 failures = 0;
                 let answer = classify(ranked);
@@ -1636,7 +1664,10 @@ pub async fn resolve(state: &AppState, link: &str) -> Result<Resolved, String> {
             let answer = match cached(state, &k) {
                 Some(a) => a,
                 None => {
-                    let a = classify(search(state, None, &track).await.map_err(Halt::code)?);
+                    // No job: nothing to cancel it, nowhere to show a wait.
+                    let (never, unseen) = (|| false, |_: Option<i64>| {});
+                    let gate = Gate { cancelled: &never, waiting: &unseen };
+                    let a = classify(search(state, &gate, &track).await.map_err(Halt::code)?);
                     remember(state, &k, &a, false);
                     a
                 }
@@ -1826,6 +1857,28 @@ mod tests {
             Tier::Missing
         );
         assert_eq!(best(&s, vec![]).0, Tier::Missing);
+    }
+
+    #[test]
+    fn tiers_at_the_thresholds() {
+        let ranked = |best: f64| {
+            let (a, b) = (song("a", "A", "X", None, "3:00"), song("b", "B", "X", None, "3:00"));
+            vec![(best, a), (0.1, b)]
+        };
+        let tier = |best: f64| classify(ranked(best)).0;
+        assert_eq!(tier(1.0), Tier::Matched);
+        assert_eq!(tier(0.80), Tier::Matched);
+        assert_eq!(tier(0.7999), Tier::Check);
+        assert_eq!(tier(0.55), Tier::Check);
+        assert_eq!(tier(0.5499), Tier::Missing);
+        // The pick is the best unless missing; the candidates are all of them, in order.
+        let (_, pick, candidates) = classify(ranked(0.6));
+        assert_eq!(pick.map(|p| p.video_id).as_deref(), Some("a"));
+        assert_eq!(candidates.iter().map(|c| c.video_id.as_str()).collect::<Vec<_>>(), ["a", "b"]);
+        let (_, pick, candidates) = classify(ranked(0.2));
+        assert!(pick.is_none());
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(classify(Vec::new()), (Tier::Missing, None, Vec::new()));
     }
 
     #[test]

@@ -1,5 +1,6 @@
 // The alerts page's logic (routes/alerts): filtering the monitor's alerts, grouping them by day and
-// counting them by kind, plus the one-line sums the timeline shows. Pure and rune-free on purpose —
+// counting them by kind, telling the resolved `unavailable` ones from the open ones, plus the
+// one-line sums the timeline shows. Pure and rune-free on purpose —
 // `alerts.check.ts` runs it under plain node (`node --experimental-strip-types`).
 import type { AlertKind, PlaylistAlert, TimelineEntry } from './api';
 
@@ -45,6 +46,53 @@ export function countByKind(alerts: readonly PlaylistAlert[]): Record<AlertKind,
 	const out = Object.fromEntries(ALERT_KINDS.map((k) => [k, 0])) as Record<AlertKind, number>;
 	for (const a of alerts) if (a.kind in out) out[a.kind]++;
 	return out;
+}
+
+/** What tells one alert row from another: its id, or its fields on a row without one. */
+export const alertKey = (a: PlaylistAlert): string =>
+	a.id !== undefined ? `#${a.id}` : `${a.playlist_id}\u001f${a.video_id}\u001f${a.kind}\u001f${a.at}`;
+
+/** The keys (`alertKey`) of the `unavailable` alerts among `alerts` that a later `restored` of the
+ *  same playlist and track answers. The backend's `EXISTS` (`db::ALERT_ROW_COLUMNS`) over what is
+ *  loaded: later is a greater `at`, or the same one and a greater id. Only a later one, so a track
+ *  that came back and went again is open once more. */
+export function resolvedKeys(alerts: readonly PlaylistAlert[]): Set<string> {
+	const pair = (a: PlaylistAlert) => `${a.playlist_id}\u001f${a.video_id}`;
+	const after = (x: { at: number; id?: number }, y: { at: number; id?: number }) =>
+		x.at > y.at || (x.at === y.at && (x.id ?? -1) > (y.id ?? -1));
+	// The latest restore of each track is the only one that matters: any later one is later still.
+	const latest = new Map<string, PlaylistAlert>();
+	for (const a of alerts) {
+		if (a.kind !== 'restored') continue;
+		const l = latest.get(pair(a));
+		if (!l || after(a, l)) latest.set(pair(a), a);
+	}
+	const out = new Set<string>();
+	for (const a of alerts) {
+		const r = a.kind === 'unavailable' ? latest.get(pair(a)) : undefined;
+		if (r && after(r, a)) out.add(alertKey(a));
+	}
+	return out;
+}
+
+/** Whether `a` is an `unavailable` alert since answered. The backend's flag where the row has one
+ *  (it sees every row, not just the loaded pages); otherwise `keys` from `resolvedKeys`. */
+export const isResolved = (a: PlaylistAlert, keys?: ReadonlySet<string>): boolean =>
+	a.kind === 'unavailable' && (a.resolved ?? keys?.has(alertKey(a)) ?? false);
+
+/** The `unavailable` alerts split into the ones still open and the ones resolved. */
+export function unavailableCounts(
+	alerts: readonly PlaylistAlert[],
+	keys?: ReadonlySet<string>
+): { open: number; resolved: number } {
+	let open = 0;
+	let resolved = 0;
+	for (const a of alerts) {
+		if (a.kind !== 'unavailable') continue;
+		if (isResolved(a, keys)) resolved++;
+		else open++;
+	}
+	return { open, resolved };
 }
 
 /** The playlists alerts were filed for, most alerts first (ties by id, so the order is stable). */

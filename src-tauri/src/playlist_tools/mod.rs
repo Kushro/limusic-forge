@@ -13,6 +13,7 @@ pub mod journal;
 pub mod lis;
 pub mod merge;
 pub mod monitor;
+pub mod recover;
 pub mod rows;
 pub mod split;
 pub mod transfer;

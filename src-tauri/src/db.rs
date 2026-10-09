@@ -68,6 +68,23 @@ pub struct ImportMatch {
     pub updated_at: i64,
 }
 
+/// One row of `recover_titles`: what a dead video was called. `found = false` is a negative
+/// verdict ("looked, no usable title"), with `title` normally `None`; [`Db::recover_title_get`]
+/// stops returning it after [`RECOVER_NEGATIVE_TTL_SECS`]. `source` names where the title came
+/// from (`"wayback"`, `"manual"`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CachedTitle {
+    pub title: Option<String>,
+    pub artists: Option<String>,
+    pub source: String,
+    pub found: bool,
+    pub checked_at: i64,
+}
+
+/// How long a negative `recover_titles` row is believed: 30 days. Wayback keeps crawling, so
+/// "nothing archived" is worth asking again eventually; a found title never goes stale.
+pub const RECOVER_NEGATIVE_TTL_SECS: i64 = 30 * 24 * 60 * 60;
+
 /// A cached stream URL with its expiry. Never a source of truth — purely a latency cache.
 pub struct CachedStream {
     pub url: String,
@@ -273,6 +290,18 @@ impl Db {
                 manual          INTEGER NOT NULL DEFAULT 0,
                 updated_at      INTEGER NOT NULL
             );
+            -- The recovery assistant's title lookups (F4): what a dead video was called, from the
+            -- Wayback Machine or another source, keyed by videoId. A cache: `found = 0` rows are
+            -- "looked, nothing there" and are ignored once older than 30 days, so a later snapshot
+            -- gets its chance. `artists` is free text, as the source gave it.
+            CREATE TABLE IF NOT EXISTS recover_titles (
+                video_id   TEXT PRIMARY KEY,
+                title      TEXT,
+                artists    TEXT,
+                source     TEXT NOT NULL,
+                found      INTEGER NOT NULL,
+                checked_at INTEGER NOT NULL
+            );
             "#,
         )?;
         // Migrate pre-Phase-4 DBs that predate the loudness_db column. Errors ("duplicate column")
@@ -364,6 +393,14 @@ impl Db {
                 tracing::error!("schema v4 migration failed, rolled back: {e}");
                 migration_error = Some(format!("schema v4 migration failed: {e}"));
             }
+        }
+        // The lookup behind `AlertRow::resolved` (a `restored` of the same playlist and track,
+        // filed later). Only an index, so no version bump; and only once v3 has built the table.
+        if has_table(&conn, "playlist_alert") {
+            let _ = conn.execute_batch(
+                "CREATE INDEX IF NOT EXISTS playlist_alert_pvk \
+                 ON playlist_alert(playlist_id, video_id, kind, at)",
+            );
         }
         // One-time migration of the pre-multi-account single session into `accounts`. The legacy
         // settings rows stay in place as projections of the active account (see `StoredAccount`).
@@ -827,6 +864,50 @@ impl Db {
                 m.manual as i64,
                 m.updated_at
             ],
+        );
+    }
+
+    /// The cached title lookup for a video, or `None` when there is none or it is a negative
+    /// verdict older than [`RECOVER_NEGATIVE_TTL_SECS`] (worth asking again). Read by the recovery
+    /// assistant (`playlist_tools::recover`).
+    pub fn recover_title_get(&self, video_id: &str) -> Option<CachedTitle> {
+        self.recover_title_get_at(video_id, now_secs())
+    }
+
+    /// [`Db::recover_title_get`] against a given clock, so the expiry is testable.
+    fn recover_title_get_at(&self, video_id: &str, now: i64) -> Option<CachedTitle> {
+        let conn = self.0.lock().unwrap();
+        let row = conn
+            .query_row(
+                "SELECT title, artists, source, found, checked_at
+                 FROM recover_titles WHERE video_id = ?1",
+                [video_id],
+                |r| {
+                    Ok(CachedTitle {
+                        title: r.get(0)?,
+                        artists: r.get(1)?,
+                        source: r.get(2)?,
+                        found: r.get::<_, i64>(3)? != 0,
+                        checked_at: r.get(4)?,
+                    })
+                },
+            )
+            .optional()
+            .ok()
+            .flatten()?;
+        (row.found || now - row.checked_at <= RECOVER_NEGATIVE_TTL_SECS).then_some(row)
+    }
+
+    /// Store (or replace) a video's title lookup.
+    pub fn recover_title_put(&self, video_id: &str, t: &CachedTitle) {
+        let conn = self.0.lock().unwrap();
+        let _ = conn.execute(
+            "INSERT INTO recover_titles(video_id, title, artists, source, found, checked_at)
+                VALUES(?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(video_id) DO UPDATE SET title = excluded.title,
+                artists = excluded.artists, source = excluded.source, found = excluded.found,
+                checked_at = excluded.checked_at",
+            rusqlite::params![video_id, t.title, t.artists, t.source, t.found as i64, t.checked_at],
         );
     }
 
@@ -2047,6 +2128,9 @@ pub struct AlertRow {
     pub to_pos: Option<i64>,
     pub seen: bool,
     pub dismissed: bool,
+    /// An `unavailable` row a later `restored` of the same playlist and track answers. Never
+    /// true for any other kind.
+    pub resolved: bool,
 }
 
 /// One playlist row as a snapshot keeps it, compact because a snapshot is taken on every change
@@ -2352,6 +2436,52 @@ pub fn rfc3339_utc(secs: i64) -> String {
     )
 }
 
+/// What is stored about some videos' titles, for the recovery assistant
+/// ([`Db::local_title_rows`]), each list newest first where its source has an order.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct LocalTitleRows {
+    /// `(videoId, title, artists)` of the snapshot rows that still played when taken.
+    pub snapshots: Vec<(String, String, String)>,
+    /// `(videoId, song_json)` of alerts.
+    pub alerts: Vec<(String, String)>,
+    /// `(videoId, song_json)` of the play history.
+    pub plays: Vec<(String, String)>,
+    /// `(videoId, title, channel)` from `videos` (downloads, the PlaylistForge import).
+    pub videos: Vec<(String, String, Option<String>)>,
+    /// `(videoId, song_json)` of the membership index.
+    pub index: Vec<(String, String)>,
+}
+
+/// The rows of `sql`, whose only parameter (`?1`) is `wanted`. A failed query is no rows.
+fn wanted_rows<T>(
+    conn: &Connection,
+    sql: &str,
+    wanted: &str,
+    f: impl FnMut(&rusqlite::Row<'_>) -> rusqlite::Result<T>,
+) -> Vec<T> {
+    let mut out = Vec::new();
+    if let Ok(mut stmt) = conn.prepare(sql) {
+        if let Ok(rows) = stmt.query_map([wanted], f) {
+            out.extend(rows.flatten());
+        }
+    }
+    out
+}
+
+fn id_and_json(r: &rusqlite::Row<'_>) -> rusqlite::Result<(String, String)> {
+    Ok((r.get(0)?, r.get(1)?))
+}
+
+/// The columns an [`AlertRow`] is read from, over `playlist_alert a`. The last one is `resolved`:
+/// an `unavailable` row a `restored` of the same playlist and track filed after it answers. Only
+/// a later one: a track that came back and then went again is open once more. Ties on `at` fall
+/// to the id, the order they were filed in. `playlist_alert_pvk` keeps the lookup cheap.
+const ALERT_ROW_COLUMNS: &str = "a.id, a.playlist_id, a.video_id, a.kind, a.song_json, a.at, \
+    a.from_pos, a.to_pos, a.seen, a.dismissed, \
+    a.kind = 'unavailable' AND EXISTS(SELECT 1 FROM playlist_alert r \
+    WHERE r.playlist_id = a.playlist_id AND r.video_id = a.video_id AND r.kind = 'restored' \
+    AND (r.at > a.at OR (r.at = a.at AND r.id > a.id)))";
+
 #[allow(dead_code)] // the monitor, backups, alerts and downloads (commits 13-21)
 impl Db {
     // --- alerts (v3) --------------------------------------------------------------------------
@@ -2384,9 +2514,8 @@ impl Db {
     pub fn alert_rows(&self, include_dismissed: bool) -> Vec<AlertRow> {
         let conn = self.0.lock().unwrap();
         let sql = format!(
-            "SELECT id, playlist_id, video_id, kind, song_json, at, from_pos, to_pos, seen, \
-             dismissed FROM playlist_alert {} ORDER BY at DESC, id DESC",
-            if include_dismissed { "" } else { "WHERE dismissed = 0" }
+            "SELECT {ALERT_ROW_COLUMNS} FROM playlist_alert a {} ORDER BY a.at DESC, a.id DESC",
+            if include_dismissed { "" } else { "WHERE a.dismissed = 0" }
         );
         let mut out = Vec::new();
         if let Ok(mut stmt) = conn.prepare(&sql) {
@@ -2402,6 +2531,7 @@ impl Db {
                     to_pos: r.get(7)?,
                     seen: r.get::<_, i64>(8)? != 0,
                     dismissed: r.get::<_, i64>(9)? != 0,
+                    resolved: r.get::<_, i64>(10)? != 0,
                 })
             }) {
                 out.extend(rows.flatten());
@@ -2421,12 +2551,11 @@ impl Db {
     ) -> Vec<AlertRow> {
         let conn = self.0.lock().unwrap();
         let mut out = Vec::new();
-        if let Ok(mut stmt) = conn.prepare(
-            "SELECT id, playlist_id, video_id, kind, song_json, at, from_pos, to_pos, seen, \
-             dismissed FROM playlist_alert WHERE (?1 OR dismissed = 0) \
-             AND (?2 IS NULL OR at < ?2 OR (at = ?2 AND id < ?3)) \
-             ORDER BY at DESC, id DESC LIMIT ?4",
-        ) {
+        if let Ok(mut stmt) = conn.prepare(&format!(
+            "SELECT {ALERT_ROW_COLUMNS} FROM playlist_alert a WHERE (?1 OR a.dismissed = 0) \
+             AND (?2 IS NULL OR a.at < ?2 OR (a.at = ?2 AND a.id < ?3)) \
+             ORDER BY a.at DESC, a.id DESC LIMIT ?4"
+        )) {
             let (at, id) = (before.map(|b| b.0), before.map(|b| b.1));
             let limit = limit.map_or(-1, i64::from);
             let params = rusqlite::params![include_dismissed, at, id, limit];
@@ -2442,6 +2571,7 @@ impl Db {
                     to_pos: r.get(7)?,
                     seen: r.get::<_, i64>(8)? != 0,
                     dismissed: r.get::<_, i64>(9)? != 0,
+                    resolved: r.get::<_, i64>(10)? != 0,
                 })
             }) {
                 out.extend(rows.flatten());
@@ -2573,6 +2703,105 @@ impl Db {
             }
         }
         out
+    }
+
+    // --- the recovery assistant (playlist_tools::recover) --------------------------------------
+
+    /// Each playlist's newest snapshot, by playlist id, in one query.
+    pub fn latest_snapshots(&self) -> std::collections::HashMap<String, Snapshot> {
+        let conn = self.0.lock().unwrap();
+        let sql = "SELECT id, playlist_id, account_id, title, taken_at, item_count, hash, \
+             items_json FROM (SELECT *, ROW_NUMBER() OVER (PARTITION BY playlist_id \
+             ORDER BY taken_at DESC, id DESC) AS n FROM playlist_snapshot) WHERE n = 1";
+        let mut out = std::collections::HashMap::new();
+        if let Ok(mut stmt) = conn.prepare(sql) {
+            if let Ok(rows) = stmt.query_map([], snapshot_row) {
+                out.extend(rows.flatten().map(|s| (s.playlist_id.clone(), s)));
+            }
+        }
+        out
+    }
+
+    /// A playlist's newest snapshot taken strictly before `at`: the "before" an alert filed at `at`
+    /// was found against (the monitor files it at the time of the read that took the next one).
+    pub fn snapshot_before(&self, playlist_id: &str, at: i64) -> Option<Snapshot> {
+        let conn = self.0.lock().unwrap();
+        let sql = format!(
+            "{SNAPSHOT_SELECT} WHERE playlist_id = ?1 AND taken_at < ?2 {SNAPSHOT_ORDER} LIMIT 1"
+        );
+        conn.query_row(&sql, rusqlite::params![playlist_id, at], snapshot_row).ok()
+    }
+
+    /// `(playlist id, videoId, song_json)` of every index row whose song is marked unavailable.
+    pub fn unavailable_index_rows(&self) -> Vec<(String, String, String)> {
+        let conn = self.0.lock().unwrap();
+        let mut out = Vec::new();
+        if let Ok(mut stmt) = conn.prepare(
+            "SELECT playlist_id, video_id, song_json FROM playlist_track \
+             WHERE json_extract(song_json, '$.unavailable') = 1",
+        ) {
+            if let Ok(rows) = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))) {
+                out.extend(rows.flatten());
+            }
+        }
+        out
+    }
+
+    /// Everything stored that names one of `video_ids`, for
+    /// [`best_local_titles`](crate::playlist_tools::recover::best_local_titles): one query per
+    /// source under one lock, the ids passed as a single JSON array.
+    pub fn local_title_rows(&self, video_ids: &[String]) -> LocalTitleRows {
+        let Ok(wanted) = serde_json::to_string(video_ids) else { return LocalTitleRows::default() };
+        let conn = self.0.lock().unwrap();
+        let pair = id_and_json;
+        LocalTitleRows {
+            snapshots: wanted_rows(
+                &conn,
+                "SELECT json_extract(j.value, '$.v'), json_extract(j.value, '$.t'), \
+                 json_extract(j.value, '$.a') \
+                 FROM playlist_snapshot s, json_each(s.items_json) j \
+                 WHERE json_extract(j.value, '$.v') IN (SELECT value FROM json_each(?1)) \
+                 AND json_extract(j.value, '$.u') IS NOT 1 \
+                 ORDER BY s.taken_at DESC, s.id DESC",
+                &wanted,
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, Option<String>>(1)?.unwrap_or_default(),
+                        r.get::<_, Option<String>>(2)?.unwrap_or_default(),
+                    ))
+                },
+            ),
+            alerts: wanted_rows(
+                &conn,
+                "SELECT video_id, song_json FROM playlist_alert WHERE song_json IS NOT NULL \
+                 AND video_id IN (SELECT value FROM json_each(?1)) ORDER BY at DESC, id DESC",
+                &wanted,
+                pair,
+            ),
+            plays: wanted_rows(
+                &conn,
+                "SELECT video_id, song_json FROM plays \
+                 WHERE video_id IN (SELECT value FROM json_each(?1)) \
+                 ORDER BY played_at DESC, id DESC",
+                &wanted,
+                pair,
+            ),
+            videos: wanted_rows(
+                &conn,
+                "SELECT video_id, title, channel FROM videos WHERE title IS NOT NULL \
+                 AND video_id IN (SELECT value FROM json_each(?1))",
+                &wanted,
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            ),
+            index: wanted_rows(
+                &conn,
+                "SELECT video_id, song_json FROM playlist_track WHERE song_json IS NOT NULL \
+                 AND video_id IN (SELECT value FROM json_each(?1))",
+                &wanted,
+                pair,
+            ),
+        }
     }
 
     // --- monitor runs and per-playlist sync -----------------------------------------------------
@@ -4352,6 +4581,55 @@ mod tests {
     }
 
     #[test]
+    fn only_a_later_restored_resolves_an_unavailable_alert() {
+        let d = db();
+        let file = |playlist: &str, video: &str, kind: &str, at: i64| {
+            let key = alert_dedupe_key(playlist, video, kind, Some(&at.to_string()));
+            d.insert_alert(&NewAlert {
+                playlist_id: playlist,
+                video_id: video,
+                kind,
+                song_json: None,
+                at,
+                from_pos: None,
+                to_pos: None,
+                dedupe_key: &key,
+            })
+            .unwrap()
+        };
+        let back = file("VL1", "a", "unavailable", 10); // then restored: resolved
+        file("VL1", "a", "restored", 20);
+        let before = file("VL1", "b", "restored", 10); // restored before it: still open
+        let open = file("VL1", "b", "unavailable", 20);
+        let tie = file("VL1", "c", "unavailable", 30); // same `at`, filed first: resolved
+        file("VL1", "c", "restored", 30);
+        let elsewhere = file("VL2", "a", "unavailable", 15); // another playlist's restore
+        let resolved = |rows: Vec<AlertRow>| -> Vec<i64> {
+            rows.into_iter().filter(|a| a.resolved).map(|a| a.id).collect()
+        };
+        let want = vec![tie, back]; // newest first
+        assert_eq!(resolved(d.alert_rows(true)), want);
+        assert_eq!(resolved(d.alert_rows_page(true, Some(100), None)), want);
+        for id in [before, open, elsewhere] {
+            assert!(!want.contains(&id));
+        }
+        // The track going again opens a new alert, which the old restore does not answer.
+        file("VL1", "a", "unavailable", 40);
+        assert_eq!(resolved(d.alert_rows(true)), want);
+
+        let conn = d.0.lock().unwrap();
+        let index: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' \
+                 AND name = 'playlist_alert_pvk'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(index, 1);
+    }
+
+    #[test]
     fn first_seen_survives_rewrites_and_starts_with_the_second_sync() {
         let d = db();
         let songs = |ids: &[&str]| -> Vec<(String, String)> {
@@ -4918,6 +5196,111 @@ mod tests {
         assert_eq!(Privacy::parse("secret"), None);
         let json = serde_json::to_value(d.playlist_syncs()["VL1"]).unwrap();
         assert_eq!(json["privacy"], "public");
+    }
+
+    #[test]
+    fn recover_titles_round_trip_and_replace() {
+        let d = db();
+        assert_eq!(d.recover_title_get("dQw4w9WgXcQ"), None, "nothing cached yet");
+        let found = CachedTitle {
+            title: Some("Never Gonna Give You Up".into()),
+            artists: Some("Rick Astley".into()),
+            source: "wayback".into(),
+            found: true,
+            checked_at: 1_000,
+        };
+        d.recover_title_put("dQw4w9WgXcQ", &found);
+        assert_eq!(d.recover_title_get("dQw4w9WgXcQ"), Some(found.clone()));
+        // A found title never goes stale, however old.
+        assert_eq!(
+            d.recover_title_get_at("dQw4w9WgXcQ", 1_000 + 10 * RECOVER_NEGATIVE_TTL_SECS),
+            Some(found)
+        );
+        let replaced = CachedTitle {
+            title: Some("Other".into()),
+            artists: None,
+            source: "manual".into(),
+            found: true,
+            checked_at: 2_000,
+        };
+        d.recover_title_put("dQw4w9WgXcQ", &replaced);
+        assert_eq!(d.recover_title_get("dQw4w9WgXcQ"), Some(replaced));
+    }
+
+    #[test]
+    fn recover_titles_negative_verdicts_expire_after_thirty_days() {
+        let d = db();
+        let now = 100 * RECOVER_NEGATIVE_TTL_SECS;
+        let negative = |checked_at| CachedTitle {
+            title: None,
+            artists: None,
+            source: "wayback".into(),
+            found: false,
+            checked_at,
+        };
+        d.recover_title_put("aaaaaaaaaaa", &negative(now - 29 * 24 * 60 * 60));
+        d.recover_title_put("bbbbbbbbbbb", &negative(now - 31 * 24 * 60 * 60));
+        let fresh = d.recover_title_get_at("aaaaaaaaaaa", now).expect("fresh negative is kept");
+        assert!(!fresh.found);
+        assert_eq!(fresh.title, None);
+        assert_eq!(d.recover_title_get_at("bbbbbbbbbbb", now), None, "stale negative is ignored");
+    }
+
+    #[test]
+    fn the_recovery_reads_snapshots_dead_index_rows_and_stored_titles() {
+        let d = db();
+        let mut dead = snap("x");
+        dead.u = true;
+        dead.t = "Deleted video".into();
+        d.put_snapshot_if_changed("VL1", None, None, 10, &[snap("a"), snap("x")]).unwrap();
+        d.put_snapshot_if_changed("VL1", None, None, 20, &[snap("a"), dead]).unwrap();
+        d.put_snapshot_if_changed("VL2", None, None, 15, &[snap("b")]).unwrap();
+        let latest = d.latest_snapshots();
+        assert_eq!(latest.len(), 2);
+        assert_eq!(latest["VL1"].taken_at, 20, "the newest per playlist");
+        assert_eq!(latest["VL2"].items, vec![snap("b")]);
+        assert_eq!(d.snapshot_before("VL1", 20).map(|s| s.taken_at), Some(10), "strictly before");
+        assert_eq!(d.snapshot_before("VL1", 10), None);
+
+        let dead_json = r#"{"video_id":"x","title":"","artists":"","unavailable":true}"#;
+        d.put_playlist_song("VL3", "x", dead_json);
+        d.put_playlist_song("VL3", "a", r#"{"video_id":"a","title":"A","artists":""}"#);
+        let index = d.unavailable_index_rows();
+        assert_eq!(index, vec![("VL3".to_owned(), "x".to_owned(), dead_json.to_owned())]);
+
+        let key = alert_dedupe_key("VL1", "x", "unavailable", None);
+        d.insert_alert(&NewAlert {
+            playlist_id: "VL1",
+            video_id: "x",
+            kind: "unavailable",
+            song_json: Some(r#"{"alert":1}"#),
+            at: 20,
+            from_pos: None,
+            to_pos: None,
+            dedupe_key: &key,
+        })
+        .unwrap();
+        d.record_play("x", r#"{"play":1}"#, 30, 1_000);
+        d.record_play("other", r#"{"play":2}"#, 30, 1_000);
+        d.conn()
+            .execute(
+                "INSERT INTO videos(video_id, title, channel, updated_at) \
+                 VALUES('x', 'Vid X', 'Band - Topic', 1)",
+                [],
+            )
+            .unwrap();
+        let rows = d.local_title_rows(&["x".to_owned()]);
+        let s = |a: &str, b: &str| (a.to_owned(), b.to_owned());
+        assert_eq!(
+            rows.snapshots,
+            vec![("x".to_owned(), "X".to_owned(), "Artist".to_owned())],
+            "only the rows where it still played"
+        );
+        assert_eq!(rows.alerts, vec![s("x", r#"{"alert":1}"#)]);
+        assert_eq!(rows.plays, vec![s("x", r#"{"play":1}"#)], "only the ids asked for");
+        assert_eq!(rows.videos, vec![("x".into(), "Vid X".into(), Some("Band - Topic".into()))]);
+        assert_eq!(rows.index, vec![s("x", dead_json)]);
+        assert_eq!(d.local_title_rows(&[]), LocalTitleRows::default());
     }
 }
 

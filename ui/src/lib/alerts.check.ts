@@ -13,7 +13,10 @@ import {
 	filterAlerts,
 	groupByDay,
 	isAlertKind,
+	isResolved,
+	resolvedKeys,
 	timelineSums,
+	unavailableCounts,
 	unseenIds,
 	utcDay,
 	ytmSongUrl
@@ -92,6 +95,42 @@ same(
 );
 same(unseenIds(list), [1, 3, 5], 'unseen ids');
 same(unseenIds([{ ...list[0], id: undefined }]), [], 'a row without an id has nothing to mark');
+
+// --- resolvedKeys / isResolved / unavailableCounts ----------------------------------------------
+{
+	const on = (kind: AlertKind, video: string, at: number, extra: Partial<PlaylistAlert> = {}) =>
+		alert(kind, 'PL_R', at, { video_id: video, ...extra });
+	const goneThenBack = on('unavailable', 'x', 10);
+	const back = on('restored', 'x', 20);
+	const backFirst = on('restored', 'y', 10);
+	const goneAfter = on('unavailable', 'y', 20); // its restore came before it: still open
+	const alone = on('unavailable', 'z', 10);
+	const tie = on('unavailable', 'w', 30); // same `at`, the restore filed after it
+	const tieBack = on('restored', 'w', 30);
+	const elsewhere = alert('unavailable', 'PL_S', 5, { video_id: 'x' }); // another playlist
+	const rows = [tieBack, tie, goneAfter, back, goneThenBack, backFirst, alone, elsewhere];
+	const keys = resolvedKeys(rows);
+	same(
+		rows.filter((a) => isResolved(a, keys)).map((a) => a.id),
+		[tie.id, goneThenBack.id],
+		'an unavailable followed by a restore is resolved, alone or restored before it is not'
+	);
+	ok(!isResolved(back, keys) && !isResolved(alone, keys), 'restores and lone unavailables stay open');
+	same(unavailableCounts(rows, keys), { open: 3, resolved: 2 }, 'open and resolved unavailables');
+	same(unavailableCounts(list), { open: 1, resolved: 0 }, 'without a restore, every one is open');
+	// The backend's flag wins over what the loaded rows say (it sees past the loaded pages).
+	ok(isResolved({ ...alone, resolved: true }, keys), 'the backend says resolved');
+	ok(!isResolved({ ...goneThenBack, resolved: false }, keys), 'the backend says open');
+	ok(!isResolved({ ...back, resolved: true }), 'only an unavailable can be resolved');
+	same(unavailableCounts([{ ...alone, resolved: true }]), { open: 0, resolved: 1 }, 'flag counted');
+	// Gone again after coming back: the new alert is open, the old one stays resolved.
+	const again = on('unavailable', 'x', 40);
+	same(
+		[...resolvedKeys([again, ...rows])].sort(),
+		[...keys].sort(),
+		'a restore only answers the unavailables before it'
+	);
+}
 
 // --- groupByDay / daysAgo -----------------------------------------------------------------------
 const days = groupByDay(list, utcDay);

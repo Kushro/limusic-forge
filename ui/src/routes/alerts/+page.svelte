@@ -35,8 +35,10 @@
 		daysAgo,
 		filterAlerts,
 		groupByDay,
+		isResolved,
 		localDay,
 		timelineSums,
+		unavailableCounts,
 		unseenIds,
 		ytmSongUrl
 	} from '$lib/alerts';
@@ -138,6 +140,9 @@
 	// --- alerts -----------------------------------------------------------------------------------
 	const byPlaylist = $derived(playlist ? filterAlerts(alerts, { playlist }) : alerts);
 	const counts = $derived(countByKind(byPlaylist));
+	// The "Unavailable" chip counts the open ones, the resolved beside them (the backend's flag, so
+	// a restore past the loaded pages still counts).
+	const unavailable = $derived(unavailableCounts(byPlaylist));
 	const shown = $derived(filterAlerts(alerts, { kinds, playlist: playlist || null, unseenOnly }));
 	const days = $derived(groupByDay(shown));
 	const today = $derived(localDay(Date.now() / 1000));
@@ -178,8 +183,11 @@
 	}
 
 	// A song can be played unless it went unavailable, which is the one thing YouTube says it can't.
-	const playable = (a: { kind: AlertKind; song: SongItem | null }) =>
-		!!a.song && a.kind !== 'unavailable' && !a.song.unavailable;
+	// A resolved one came back, so it plays (its snapshot still says unavailable: `asPlayable`).
+	const playable = (a: { kind: AlertKind; song: SongItem | null; resolved?: boolean }) =>
+		!!a.song && (!!a.resolved || (a.kind !== 'unavailable' && !a.song.unavailable));
+	const asPlayable = (s: SongItem | null, resolved: boolean) =>
+		s && resolved ? { ...s, unavailable: false } : s;
 	const play = (s: SongItem) => playSong(s).catch((e) => toast.error(String(e)));
 	const openYtm = (videoId: string) =>
 		api.openExternal(ytmSongUrl(videoId)).catch((e) => toast.error(String(e)));
@@ -257,8 +265,8 @@
 	</span>
 {/snippet}
 
-{#snippet songActions(song: SongItem | null, kind: AlertKind, videoId: string)}
-	{#if song && playable({ kind, song })}
+{#snippet songActions(song: SongItem | null, kind: AlertKind, videoId: string, resolved: boolean)}
+	{#if song && playable({ kind, song, resolved })}
 		<Button variant="ghost" size="icon-sm" onclick={() => play(song)} title={t('alerts.play')} aria-label={t('alerts.play')}>
 			<HugeiconsIcon icon={PlayIcon} class="h-4 w-4" />
 		</Button>
@@ -320,7 +328,16 @@
 								: 'hover:bg-accent/10'}"
 						>
 							{kindLabel(k)}
-							<span class="text-xs tabular-nums text-muted-foreground">{counts[k]}</span>
+							{#if k === 'unavailable'}
+								<span class="text-xs tabular-nums text-muted-foreground">{unavailable.open}</span>
+								{#if unavailable.resolved}
+									<span class="text-xs tabular-nums text-muted-foreground/70">
+										{t('alerts.resolved_count', { count: unavailable.resolved })}
+									</span>
+								{/if}
+							{:else}
+								<span class="text-xs tabular-nums text-muted-foreground">{counts[k]}</span>
+							{/if}
 						</button>
 					{/each}
 					<PlaylistSelect
@@ -361,8 +378,11 @@
 							<!-- Plain rows, no transition (docs/UI-PERFORMANCE.md). -->
 							<ul>
 								{#each d.items as a (a.id ?? `${a.playlist_id}:${a.video_id}:${a.kind}:${a.at}`)}
+									{@const resolved = isResolved(a)}
+									<!-- A resolved `unavailable` (the track came back) says so instead of its kind. -->
 									<li
-										class="flex items-center gap-3 rounded-lg px-2 py-1.5 [content-visibility:auto] [contain-intrinsic-size:auto_3.5rem] hover:bg-accent/10 {a.dismissed
+										class="flex items-center gap-3 rounded-lg px-2 py-1.5 [content-visibility:auto] [contain-intrinsic-size:auto_3.5rem] hover:bg-accent/10 {a.dismissed ||
+										resolved
 											? 'opacity-60'
 											: ''}"
 									>
@@ -374,7 +394,11 @@
 										</span>
 										{@render songCell(a.song, a.video_id)}
 										<span class="hidden shrink-0 items-center gap-1.5 md:flex">
-											<Badge variant={kindVariant(a.kind)}>{kindLabel(a.kind)}</Badge>
+											{#if resolved}
+												<Badge variant="outline" title={t('alerts.resolved_hint')}>{t('alerts.resolved')}</Badge>
+											{:else}
+												<Badge variant={kindVariant(a.kind)}>{kindLabel(a.kind)}</Badge>
+											{/if}
 											{#if a.kind === 'moved' && a.from !== undefined && a.to !== undefined}
 												<span class="text-xs tabular-nums text-muted-foreground">
 													{t('alerts.moved_to', { from: a.from + 1, to: a.to + 1 })}
@@ -389,7 +413,7 @@
 										</a>
 										<span class="w-14 shrink-0 text-right text-xs tabular-nums text-muted-foreground">{timeOf(a.at)}</span>
 										<span class="flex shrink-0 items-center">
-											{@render songActions(a.song, a.kind, a.video_id)}
+											{@render songActions(asPlayable(a.song, resolved), a.kind, a.video_id, resolved)}
 											<Button
 												variant="ghost"
 												size="icon-sm"
@@ -516,7 +540,7 @@
 												</span>
 											{/if}
 											<span class="flex shrink-0 items-center">
-												{@render songActions(c.song, c.kind, c.video_id)}
+												{@render songActions(c.song, c.kind, c.video_id, false)}
 											</span>
 										</li>
 									{/each}

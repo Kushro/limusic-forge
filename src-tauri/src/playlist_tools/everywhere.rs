@@ -72,6 +72,83 @@ pub fn group(rows: Vec<(String, String, String, Option<i64>)>) -> Vec<Everywhere
     out
 }
 
+/// One copy of a song in one playlist: what the "+N" dialog lists, one line per copy.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct Occurrence {
+    pub playlist_id: String,
+    /// 0-based, from the playlist's latest snapshot (or the local table); null when there is none.
+    pub position: Option<u32>,
+    /// The row's handle as last seen. Only a hint for matching: the edits read the list fresh.
+    pub set_video_id: Option<String>,
+    /// Which copy of the song in that playlist this is, from 0, so a fresh read can find it again
+    /// when the handle has changed.
+    pub nth: u32,
+}
+
+/// Every copy of `video_id` in the playlists that hold it. `playlists` is the index's list for the
+/// song (duplicates and Liked Music are skipped); `rows_of` answers a playlist's rows as
+/// `(videoId, handle)` in order, or `None` when nothing is stored for it, which gives one copy at
+/// an unknown position. Playlists keep the index's order, copies go by position.
+pub fn occurrences_of(
+    video_id: &str,
+    playlists: &[String],
+    mut rows_of: impl FnMut(&str) -> Option<Vec<(String, Option<String>)>>,
+) -> Vec<Occurrence> {
+    let mut seen: HashSet<&str> = HashSet::new();
+    let mut out = Vec::new();
+    for pid in playlists {
+        if pid == LIKED_MUSIC_ID || !seen.insert(pid.as_str()) {
+            continue;
+        }
+        let Some(rows) = rows_of(pid) else {
+            out.push(Occurrence {
+                playlist_id: pid.clone(),
+                position: None,
+                set_video_id: None,
+                nth: 0,
+            });
+            continue;
+        };
+        let mut nth = 0;
+        for (i, (v, s)) in rows.into_iter().enumerate() {
+            if v == video_id {
+                out.push(Occurrence {
+                    playlist_id: pid.clone(),
+                    position: Some(i as u32),
+                    set_video_id: s,
+                    nth,
+                });
+                nth += 1;
+            }
+        }
+    }
+    out
+}
+
+/// [`occurrences_of`] over what's stored: the membership index, each account playlist's latest
+/// snapshot, and the local table for a playlist on this machine. No network.
+pub fn song_occurrences(db: &crate::db::Db, video_id: &str) -> Vec<Occurrence> {
+    let playlists = db.playlist_memberships().remove(video_id).unwrap_or_default();
+    occurrences_of(video_id, &playlists, |pid| {
+        if is_local_playlist(pid) {
+            let key = crate::commands::local_key(pid).ok()?;
+            return Some(
+                db.local_playlist_tracks(key)
+                    .into_iter()
+                    .map(|(row, json)| {
+                        let v = serde_json::from_str::<SongItem>(&json)
+                            .map(|s| s.video_id)
+                            .unwrap_or_default();
+                        (v, Some(row.to_string()))
+                    })
+                    .collect(),
+            );
+        }
+        let snap = db.latest_snapshot(pid)?;
+        Some(snap.items.into_iter().map(|it| (it.v, it.s)).collect())
+    })
+}
+
 /// The rows of `list` whose handle is in `gone`, each with the next row that stays: where an undo
 /// puts it back.
 fn restore_rows(list: &[SongItem], gone: &HashSet<String>) -> Vec<Restore> {
@@ -269,5 +346,31 @@ mod tests {
         let got: Vec<(String, Option<String>)> =
             restore_rows(&list, &gone).into_iter().map(|r| (r.song.video_id, r.before)).collect();
         assert_eq!(got, [("b".into(), Some("sc".into())), ("d".into(), None)]);
+    }
+
+    fn occ(pid: &str, position: Option<u32>, s: Option<&str>, nth: u32) -> Occurrence {
+        Occurrence { playlist_id: pid.into(), position, set_video_id: s.map(Into::into), nth }
+    }
+
+    #[test]
+    fn occurrences_one_per_copy_in_order_and_unknown_without_snapshot() {
+        let playlists: Vec<String> =
+            ["VL1", "VLLM", "VL2", "VL1", "VL3"].iter().map(|s| s.to_string()).collect();
+        let row = |v: &str, s: &str| (v.to_string(), Some(s.to_string()));
+        let got = occurrences_of("a", &playlists, |pid| match pid {
+            "VL1" => Some(vec![row("x", "s0"), row("a", "s1"), row("y", "s2"), row("a", "s3")]),
+            "VL2" => Some(vec![("a".into(), None)]),
+            "VLLM" => panic!("Liked Music is never read"),
+            _ => None,
+        });
+        assert_eq!(
+            got,
+            [
+                occ("VL1", Some(1), Some("s1"), 0),
+                occ("VL1", Some(3), Some("s3"), 1),
+                occ("VL2", Some(0), None, 0),
+                occ("VL3", None, None, 0),
+            ]
+        );
     }
 }
