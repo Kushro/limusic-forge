@@ -11,6 +11,7 @@
 	import {
 		Alert02Icon,
 		Cancel01Icon,
+		DataRecoveryIcon,
 		MusicNote01Icon,
 		Search01Icon,
 		SquareArrowRightDoubleIcon,
@@ -23,6 +24,7 @@
 	import { mergeSaved, orderLibrary } from '$lib/personal';
 	import { canDropOn } from '$lib/transfer.svelte';
 	import { announceOp } from '$lib/playlistops.svelte';
+	import { openRecover } from '$lib/recover.svelte';
 	import {
 		applyFacets,
 		fold,
@@ -34,6 +36,7 @@
 		type FacetContext,
 		type Facets
 	} from '$lib/facets';
+	import { isResolved } from '$lib/alerts';
 	import { isDownloaded, track as trackDownloads } from '$lib/downloads.svelte';
 	import { setDragRows } from '$lib/dnd';
 	import { endRowDrag, startRowDrag } from '$lib/rowdrag.svelte';
@@ -47,6 +50,8 @@
 	import * as Select from './ui/select';
 	import TrackFilter from './TrackFilter.svelte';
 	import FilterChips from './FilterChips.svelte';
+	import PlaylistChips from './PlaylistChips.svelte';
+	import OccurrencesDialog from './OccurrencesDialog.svelte';
 	import YtDataWarning from './YtDataWarning.svelte';
 
 	let { onalerts }: { onalerts?: (n: number) => void } = $props();
@@ -68,11 +73,15 @@
 
 	async function load() {
 		try {
-			[songs, alerts, addedDates] = await Promise.all([
+			let all: PlaylistAlert[];
+			[songs, all, addedDates] = await Promise.all([
 				api.songsEverywhere(),
 				api.playlistAlerts(),
 				api.playlistAddedDates()
 			]);
+			// A track that went unavailable and came back has nothing left to do here; the alerts
+			// page still lists it, as resolved.
+			alerts = all.filter((a) => !isResolved(a));
 			onalerts?.(alerts.length);
 		} catch (e) {
 			toast.error(String(e));
@@ -211,6 +220,22 @@
 		}
 	}
 
+	// "+N" (or Alt/Shift+click on a chip): every copy of the song, one line each, in a dialog. Read
+	// before it opens, so it never shows a half-filled list.
+	let occOpen = $state(false);
+	let occSong = $state.raw<SongItem | null>(null);
+	let occList = $state.raw<api.Occurrence[]>([]);
+	async function showOccurrences(song: SongItem) {
+		try {
+			const list = await api.songOccurrences(song.video_id);
+			occSong = song;
+			occList = list;
+			occOpen = true;
+		} catch (e) {
+			toast.error(String(e));
+		}
+	}
+
 	async function dismiss(a: PlaylistAlert) {
 		await api.dismissPlaylistAlert(a).catch(() => {});
 		alerts = alerts.filter((x) => x !== a);
@@ -237,6 +262,12 @@
 
 	const findIt = (s: SongItem | null) =>
 		s && goto(`/search?q=${encodeURIComponent(`${s.title} ${s.artists ?? ''}`.trim())}`);
+	// What Tools ▸ Recover tracks offers: dead and removed tracks, never in a playlist on this
+	// computer or Liked Music (its candidates leave those out).
+	const recoverable = (a: PlaylistAlert) =>
+		(a.kind === 'unavailable' || a.kind === 'removed') &&
+		a.playlist_id !== api.LIKED_MUSIC_ID &&
+		!api.isLocalPlaylist(a.playlist_id);
 
 	// One step at a time down the list, like Library ▸ Songs: a few thousand rows at once is a
 	// stall on open, and nobody reads past the first screen without scrolling there.
@@ -279,6 +310,18 @@
 							{#if a.song}
 								<Button variant="ghost" size="icon-sm" onclick={() => findIt(a.song)} title={t('everywhere.find')} aria-label={t('everywhere.find')}>
 									<HugeiconsIcon icon={Search01Icon} class="h-4 w-4" />
+								</Button>
+							{/if}
+							{#if recoverable(a)}
+								<!-- Even with no song to search by: the assistant can recover its title. -->
+								<Button
+									variant="ghost"
+									size="icon-sm"
+									onclick={() => openRecover(api.recoverKey(a.playlist_id, a.video_id))}
+									title={t('recover.from_alert')}
+									aria-label={t('recover.from_alert')}
+								>
+									<HugeiconsIcon icon={DataRecoveryIcon} class="h-4 w-4" />
 								</Button>
 							{/if}
 							{#if a.kind === 'unavailable' && a.song?.set_video_id}
@@ -398,17 +441,14 @@
 							<span class="block truncate text-xs text-muted-foreground">{s.artists}</span>
 						</span>
 					</button>
-					<!-- Two chips and a count, PlaylistForge's rule: enough to recognise, never a wall. -->
-					<span class="hidden shrink-0 items-center gap-1 sm:flex">
-						{#each e.playlists.slice(0, 2) as p (p)}
-							<a href="/playlist/{encodeURIComponent(p)}" class="max-w-36">
-								<Badge variant="muted" class="max-w-36"><span class="truncate">{nameOf(p)}</span></Badge>
-							</a>
-						{/each}
-						{#if e.playlists.length > 2}
-							<Badge variant="outline" title={e.playlists.slice(2).map(nameOf).join(', ')}>+{e.playlists.length - 2}</Badge>
-						{/if}
-					</span>
+					<!-- Two chips and a count, PlaylistForge's rule: enough to recognise, never a wall;
+					     hovering reveals the rest. "+N", or Alt/Shift+click on a chip, lists every copy. -->
+					<PlaylistChips
+						ids={e.playlists}
+						{nameOf}
+						onmore={() => showOccurrences(s)}
+						onchipalt={() => showOccurrences(s)}
+					/>
 					<span class="w-12 shrink-0 text-right text-xs text-muted-foreground tabular-nums">{s.duration ?? ''}</span>
 				</div>
 			{/each}
@@ -418,3 +458,5 @@
 		{/if}
 	{/if}
 {/if}
+
+<OccurrencesDialog bind:open={occOpen} song={occSong} occurrences={occList} {nameOf} />

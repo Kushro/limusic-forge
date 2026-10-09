@@ -38,10 +38,13 @@
 		dragVolume,
 		toggleMute,
 		toggleNowPlayingRating,
+		prefs,
 		wheelVolume
 	} from '$lib/player.svelte';
 	import { thumb } from '$lib/thumb';
+	import { claimVideo, hasVideo, parkVideo, showVideo } from '$lib/video.svelte';
 	import AudioFormatInfo from './AudioFormatInfo.svelte';
+	import VideoSurface from './VideoSurface.svelte';
 	import LyricsView from './LyricsView.svelte';
 	import Marquee from './Marquee.svelte';
 	import { t } from '$lib/i18n.svelte';
@@ -57,6 +60,24 @@
 	const repeat = $derived(playback.queue.repeat ?? 'off');
 	// A local file has no YouTube identity, so there is nothing to like (see api.isLocalId).
 	const likeable = $derived(!!now && !api.isLocalId(now.videoId));
+
+	// The music video in place of the cover (`mini_video`, experimental), only on top of the main
+	// window's `music_videos`. initApp(true) reads both and keeps mpv's picture off in this window,
+	// so this is always the `<video>` element VideoSurface owns, fed from the same stream and kept
+	// on the music by the same sync loop as the player view's.
+	const miniVideo = $derived(prefs.musicVideos && prefs.miniVideo);
+	// The cover gives way to the picture only once there is one to show: no URL (a plain song, or a
+	// resolve or a load that failed) leaves the artwork where it is.
+	const videoUp = $derived(miniVideo && showVideo());
+
+	/** Borrow the picture into the cover area while there is one. Synchronous both ways, as
+	 *  claimVideo/parkVideo require, and re-run whenever `hasVideo()` changes: a track change clears
+	 *  the URL, which parks it, and the next URL claims it again. */
+	function holdVideo(box: HTMLElement) {
+		if (!hasVideo()) return;
+		claimVideo(box);
+		return parkVideo;
+	}
 
 	// Zoom never applies to this window, so CSS pixels are the logical size Rust set: 560 or 320.
 	let width = $state(window.innerWidth);
@@ -125,12 +146,24 @@
 	data-tauri-drag-region="deep"
 	class="group relative flex h-screen w-screen select-none overflow-hidden rounded-2xl border border-border/60 bg-card text-foreground"
 >
+	<!-- Owns the music video's element, outside both layouts so switching between them moves the
+	     picture instead of rebuilding it. Renders only its zero-sized parking spot. -->
+	{#if miniVideo}<VideoSurface fit="cover" />{/if}
 	{#if compact}
 		<!-- Compact: what's playing and the transport, nothing else. The cover runs edge to edge on the
 		     left and dissolves into the card like the full widget's, and the text beside it sits on the
 		     card itself, in theme colours. -->
+		{#if miniVideo}
+			<div
+				class="pointer-events-none absolute inset-y-0 left-0 w-[88px] overflow-hidden"
+				style="mask-image:linear-gradient(to right,#000 0,#000 65%,transparent 100%);-webkit-mask-image:linear-gradient(to right,#000 0,#000 65%,transparent 100%)"
+				{@attach holdVideo}
+			></div>
+		{/if}
 		{#key now?.videoId}
-			{#if now?.thumbnail}
+			{#if videoUp}
+				<!-- The music video above is the cover. -->
+			{:else if now?.thumbnail}
 				<!-- 480, same as the full layout: switching is a cache hit, not a second download. -->
 				<img
 					src={thumb(now.thumbnail, 480)}
@@ -221,8 +254,17 @@
 	{:else}
 		<!-- Cover art under the left half, masked so it dissolves into the card instead of ending on a
 		     seam. Keyed so a track change cross-fades. -->
+		<!-- The music video, when it is on: the same masked area as the cover, which it replaces
+		     once there is a picture. -->
+		{#if miniVideo}
+			<div
+				class="pointer-events-none absolute inset-y-0 left-0 w-[56%] overflow-hidden"
+				style="mask-image:linear-gradient(to right,#000 0,#000 70%,transparent 100%);-webkit-mask-image:linear-gradient(to right,#000 0,#000 70%,transparent 100%)"
+				{@attach holdVideo}
+			></div>
+		{/if}
 		{#key now?.videoId}
-			{#if now?.thumbnail}
+			{#if now?.thumbnail && !videoUp}
 				<img
 					src={thumb(now.thumbnail, 480)}
 					alt=""

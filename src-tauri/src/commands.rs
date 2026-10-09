@@ -246,6 +246,9 @@ const UI_SETTINGS: &[&str] = &[
     "update_channel",
     "lyrics_providers",
     "music_videos",
+    // The music video in the mini player too (mini.rs, MiniPlayer.svelte). Only on top of
+    // `music_videos`: see `setting_prerequisite`.
+    "mini_video",
     "ambient_light",
     "sticky_shuffle",
     "shuffle_whole_queue",
@@ -358,6 +361,22 @@ pub(crate) fn validate_setting(key: &str, value: &str) -> Result<(), String> {
         SettingRule::EchoSlider => format!("one of {}", echo_slider_values().join(", ")),
     };
     Err(format!("invalid value {value:?} for {key}: expected {expected}"))
+}
+
+/// A setting that only means something on top of another one, checked against what is stored now
+/// (`stored` reads a key). `mini_video` plays the music video in the mini player, so it cannot be
+/// switched on while `music_videos` is off: the UI greys the toggle, and this refuses it with a code
+/// the UI can name. Turning it off is always allowed, and so is turning `music_videos` off under it:
+/// every reader takes both (mini.rs, `initApp`), so a stale `mini_video=true` does nothing.
+fn setting_prerequisite(
+    key: &str,
+    value: &str,
+    stored: impl Fn(&str) -> Option<String>,
+) -> Result<(), String> {
+    if key == "mini_video" && value == "true" && stored("music_videos").as_deref() != Some("true") {
+        return Err("needs_music_videos".into());
+    }
+    Ok(())
 }
 
 /// Resolve the music video for `video_id` and hand back a `limusicvideo://` URL the player view
@@ -496,6 +515,7 @@ pub async fn set_setting(
         return Err(format!("unknown setting: {key}"));
     }
     validate_setting(&key, &value)?;
+    setting_prerequisite(&key, &value, |k| state.db.get_setting(k))?;
     // Registers/removes the login autostart entry on toggle; the OS persists it from there, and
     // startup repoints an existing entry at the running binary (lib.rs). Before the write, so a
     // failure leaves the setting as it was. A dev build would register itself, and at login its
@@ -2944,7 +2964,7 @@ const QUEUED_WAIT: std::time::Duration = std::time::Duration::from_secs(300);
 /// Where a write to `playlists` goes: `Some` to queue it (engine, channel, account, priority),
 /// `None` to run it directly as before (a local playlist, or InnerTube with the Data-API-only
 /// queue). See `jobs::engine::resolve_engine`.
-fn queue_target(
+pub(crate) fn queue_target(
     state: &Arc<AppState>,
     jobs: &crate::jobs::JobsState,
     playlists: &[&str],
@@ -3057,7 +3077,7 @@ pub async fn estimate_op(
 }
 
 /// Queues `new`, wakes the runner, and waits for the job to settle (or [`QUEUED_WAIT`]).
-async fn enqueue_and_wait(
+pub(crate) async fn enqueue_and_wait(
     state: &Arc<AppState>,
     jobs: &crate::jobs::JobsState,
     new: &crate::jobs::NewJob,
@@ -3074,7 +3094,10 @@ async fn enqueue_and_wait(
 
 /// The journal entry a settled job left (`jobs::control::on_job_finished`). The runner writes it
 /// just after the job's status, so a job that ended without one yet gets a moment for it.
-async fn job_op(state: &Arc<AppState>, job: Option<&crate::jobs::Job>) -> Option<OpRecord> {
+pub(crate) async fn job_op(
+    state: &Arc<AppState>,
+    job: Option<&crate::jobs::Job>,
+) -> Option<OpRecord> {
     let id = job?.id;
     for _ in 0..20 {
         let job = crate::jobs::repo::get_job(&state.db, id).ok().flatten()?;
@@ -3196,6 +3219,131 @@ pub async fn keep_only_in(
     everywhere::keep_only_in(&state, songs, target, titles).await
 }
 
+/// Every copy of a song across your playlists, for the "+N" dialog. From the index and the latest
+/// snapshots: no network. The edits it leads to read each playlist fresh.
+#[tauri::command]
+pub fn song_occurrences(state: St<'_>, video_id: String) -> Vec<everywhere::Occurrence> {
+    everywhere::song_occurrences(&state.db, &video_id)
+}
+
+/// The recovery assistant's list (F4): every dead track of your account playlists worth replacing,
+/// once per playlist and track, with the title the app has seen for it where its row lost it
+/// (`playlist_tools::recover`). Dismissed alerts count only with `include_dismissed`. Reads the
+/// database only, off the async workers, and opens or refreshes the assistant's session with a row
+/// per candidate (a row already there keeps its progress).
+#[tauri::command]
+pub async fn recover_candidates(
+    state: St<'_>,
+    include_dismissed: Option<bool>,
+) -> Result<Vec<crate::playlist_tools::recover::RecoverCandidate>, String> {
+    let db = state.db.clone();
+    let include = include_dismissed.unwrap_or(false);
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::playlist_tools::recover::load_candidates(&db, include)
+    })
+    .await
+    .map_err(|e| e.to_string())
+}
+
+/// The assistant session's rows: these keys (unknown ones skipped), or every row.
+#[tauri::command]
+pub fn recover_rows(keys: Option<Vec<String>>) -> Vec<crate::playlist_tools::recover::RecoverRow> {
+    crate::playlist_tools::recover::rows(keys.as_deref())
+}
+
+/// Look up a title for each of these rows that has none: the stored lookups first, then, with
+/// `wayback`, the Wayback Machine, slowly. In the background: `recover-progress` follows it.
+/// `busy` while another step runs.
+#[tauri::command]
+pub fn recover_titles(
+    state: St<'_>,
+    keys: Vec<String>,
+    wayback: bool,
+) -> Result<crate::playlist_tools::recover::RecoverSnapshot, String> {
+    crate::playlist_tools::recover::start_titles(&state, keys, wayback)
+}
+
+/// Search YouTube Music for a replacement of each of these rows that has a title and was not
+/// searched yet, paced and budgeted with the Spotify import. In the background:
+/// `recover-progress` follows it. `busy`, or `cooldown:<until>` while YouTube is left alone.
+#[tauri::command]
+pub fn recover_search(
+    state: St<'_>,
+    keys: Vec<String>,
+) -> Result<crate::playlist_tools::recover::RecoverSnapshot, String> {
+    crate::playlist_tools::recover::start_search(&state, keys)
+}
+
+/// The user's replacement for a row (`None` for none) and whether it is approved. `gone` when the
+/// row is not in the session.
+#[tauri::command]
+pub fn recover_pick(
+    state: St<'_>,
+    key: String,
+    song: Option<SongItem>,
+    approved: bool,
+) -> Result<crate::playlist_tools::recover::RecoverRow, String> {
+    crate::playlist_tools::recover::pick(&state, &key, song, approved)
+}
+
+/// A title typed in for a row; its search starts over. `gone` when the row is not in the session.
+#[tauri::command]
+pub fn recover_set_title(
+    state: St<'_>,
+    key: String,
+    title: String,
+    artists: Option<String>,
+) -> Result<crate::playlist_tools::recover::RecoverRow, String> {
+    crate::playlist_tools::recover::set_title(&state, &key, &title, artists.as_deref())
+}
+
+/// The song a pasted videoId is, for a row's replacement: the first entry of its "watch next"
+/// panel, which is the video itself. `None` when YouTube has nothing playable under it;
+/// `invalid_id` for anything that is not an 11-character id (nothing is sent).
+#[tauri::command]
+pub async fn recover_song(state: St<'_>, video_id: String) -> Result<Option<SongItem>, String> {
+    let video_id = video_id.trim();
+    if !crate::wayback::valid_id(video_id) {
+        return Err("invalid_id".into());
+    }
+    let client = state.clients.get(innertube::METADATA_CLIENT).ok_or("metadata client missing")?;
+    let next = state.it.next(client, Some(video_id), None).await.map_err(|e| e.to_string())?;
+    Ok(next.items.into_iter().find(|s| s.video_id == video_id && !s.unavailable))
+}
+
+/// Stop the assistant's running step (titles or search). What it did stays.
+#[tauri::command]
+pub fn recover_cancel(state: St<'_>) {
+    crate::playlist_tools::recover::cancel(&state);
+}
+
+/// Forget the assistant's session: rows, picks and progress.
+#[tauri::command]
+pub fn recover_reset(state: St<'_>) {
+    crate::playlist_tools::recover::reset(&state);
+}
+
+/// Put the approved replacement of each of these rows in (F4), one playlist at a time: `replace`
+/// puts it where the dead track sits (or sat) and takes the dead one out once the new one is in;
+/// `append` only adds it at the end. On InnerTube it writes directly, one journal entry per
+/// playlist; on the Data API (`engine`, else `playlist_engine`) it queues an insert job and then a
+/// removal job, two entries. Progress goes out as `recover-progress` (`applying`), and a cancel
+/// stops it between playlists. `busy` while another step runs, `cooldown:<until>` while YouTube
+/// is left alone.
+#[tauri::command]
+pub async fn recover_apply(
+    state: St<'_>,
+    jobs: Jobs<'_>,
+    keys: Vec<String>,
+    action: String,
+    engine: Option<String>,
+) -> Result<crate::playlist_tools::recover::RecoverApplied, String> {
+    use crate::playlist_tools::recover;
+    let action =
+        recover::Action::parse(&action).ok_or_else(|| format!("unknown action: {action}"))?;
+    recover::apply(&state, &jobs, keys, action, engine.as_deref()).await
+}
+
 /// A change the monitor found in one of your playlists since the sync before: a track added,
 /// removed, moved, turned unavailable or restored (playlist_tools::monitor).
 #[derive(serde::Serialize)]
@@ -3214,6 +3362,8 @@ pub struct PlaylistAlert {
     to: Option<i64>,
     /// Dismissed from Library ▸ In your playlists. Only ever true with `all`.
     dismissed: bool,
+    /// An `unavailable` alert a later `restored` of the same track answers (`AlertRow::resolved`).
+    resolved: bool,
 }
 
 /// `rows` (newest first) as the UI gets them. Without `all`: the ones not dismissed, one per
@@ -3236,6 +3386,7 @@ fn alerts_of(rows: Vec<crate::db::AlertRow>, all: bool) -> Vec<PlaylistAlert> {
             from: a.from_pos,
             to: a.to_pos,
             dismissed: a.dismissed,
+            resolved: a.resolved,
         })
         .collect()
 }
@@ -4757,6 +4908,7 @@ mod tests {
             to_pos: None,
             seen: false,
             dismissed,
+            resolved: false,
         }
     }
 
@@ -4952,6 +5104,30 @@ mod tests {
         // Guards the scan itself: a moved ui/src or a renamed call would otherwise pass vacuously.
         assert!(seen.iter().any(|k| k == "drop_mode"), "scan found no setSetting calls");
         assert!(seen.iter().any(|k| k == "drop_dupes"));
+        // The mini player's video toggle (SettingsDialog), written only from the UI side.
+        assert!(seen.iter().any(|k| k == "mini_video"));
+    }
+
+    /// `mini_video` only switches on over `music_videos` (F3, invariant 5): refused with the code
+    /// the settings dialog names while the main setting is off or was never written, and allowed
+    /// to go off whatever the main setting says. Other keys never depend on anything.
+    #[test]
+    fn set_setting_refuses_mini_video_without_music_videos() {
+        fn stored(music_videos: Option<&'static str>) -> impl Fn(&str) -> Option<String> {
+            move |k: &str| if k == "music_videos" { music_videos.map(str::to_owned) } else { None }
+        }
+        for music_videos in [None, Some("false"), Some("")] {
+            assert_eq!(
+                setting_prerequisite("mini_video", "true", stored(music_videos)),
+                Err("needs_music_videos".to_string()),
+                "music_videos = {music_videos:?}"
+            );
+            assert_eq!(setting_prerequisite("mini_video", "false", stored(music_videos)), Ok(()));
+            assert_eq!(setting_prerequisite("music_videos", "false", stored(music_videos)), Ok(()));
+        }
+        assert_eq!(setting_prerequisite("mini_video", "true", stored(Some("true"))), Ok(()));
+        assert_eq!(setting_prerequisite("music_videos", "false", stored(Some("true"))), Ok(()));
+        assert_eq!(setting_prerequisite("ambient_light", "true", stored(None)), Ok(()));
     }
 
     /// The Downloads tab writes its selects through a computed key, which the scan above skips.

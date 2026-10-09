@@ -10,6 +10,10 @@
 	// This component owns the element and is always mounted (see +layout), so closing the player
 	// view no longer destroys the picture. The state the view also reads lives in $lib/video.
 
+	/** How the picture fills the box it is claimed into: whole, letterboxed (the player view), or
+	 *  cropped to fill it (the mini player's cover area). */
+	let { fit = 'contain' }: { fit?: 'contain' | 'cover' } = $props();
+
 	// How the picture is kept in step with mpv. Measured against mpv actually playing the same
 	// track, because the guesses before it were all wrong in the same direction:
 	//
@@ -378,8 +382,15 @@
 		// No shadow, unlike the artwork: WebKitGTK re-blurs a resting box-shadow over the whole tile
 		// on every repaint, and a video repaints 24 times a second at this size. It dragged the whole
 		// app, not just the picture. Same cause as the card-hover cost measured on 2026-08-06.
-		el.className = `w-full rounded-2xl bg-black object-contain ${
-			showVideo() ? 'aspect-video' : 'pointer-events-none absolute inset-0 h-full opacity-0'
+		// `cover` fills its box edge to edge, whatever its shape, and the box does the rounding.
+		const box =
+			fit === 'cover' ? 'h-full bg-black object-cover' : 'rounded-2xl bg-black object-contain';
+		el.className = `w-full ${box} ${
+			showVideo()
+				? fit === 'cover'
+					? ''
+					: 'aspect-video'
+				: 'pointer-events-none absolute inset-0 h-full opacity-0'
 		}`;
 	});
 </script>

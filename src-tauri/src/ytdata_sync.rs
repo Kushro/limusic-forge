@@ -183,10 +183,8 @@ pub fn format_duration(secs: i64) -> String {
     }
 }
 
-/// YouTube's stand-in titles for a gone video: never taken as a real title.
-fn is_placeholder(title: &str) -> bool {
-    matches!(title, "Deleted video" | "Private video")
-}
+// YouTube's stand-in titles for a gone video: never taken as a real title.
+use crate::playlist_tools::recover::is_placeholder_title as is_placeholder;
 
 /// The artist a channel stands for: YouTube Music's auto-generated `Artist - Topic` is the artist.
 fn artist_of(channel: &str) -> &str {

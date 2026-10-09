@@ -45,6 +45,7 @@ mod state;
 mod taskbar;
 mod tray;
 mod videoproxy;
+mod wayback;
 mod webview;
 mod winstate;
 mod wintask;
@@ -105,10 +106,12 @@ fn spawn_heap_trimmer() {
 /// mapped into it. Measured A/B in `cargo tauri dev`, same build otherwise, home feed loaded:
 /// **259 MiB → 247 MiB** PSS at T+180s (236 → 223 at T+60s).
 ///
-/// `media` is the one exception, and only the main window passes `true`: the player view draws a
-/// `<video>` for music videos (plan 031). That is a plain `<video src>`, so `mediasource`,
-/// `media_stream`, `media_capabilities`, `encrypted_media`, `webaudio`, `webrtc` and `webgl` all
-/// stay off. The mini player has no video surface, so it keeps the whole media stack off. WebGL
+/// `media` is the one exception: the main window always passes `true`, since the player view draws
+/// a `<video>` for music videos (plan 031). The mini player passes `true` only with the
+/// experimental `mini_video` setting on (and `music_videos` with it), when it shows the same
+/// `<video>` in place of the cover (`mini.rs`); otherwise it keeps the whole media stack off.
+/// Either way that is a plain `<video src>`, so `mediasource`, `media_stream`,
+/// `media_capabilities`, `encrypted_media`, `webaudio`, `webrtc` and `webgl` all stay off. WebGL
 /// comes back on in the main window only while the ambient light is on ([`set_webgl`]).
 ///
 /// Applies to one webview, because WebKit settings are per-view: the main window and the mini
@@ -1137,6 +1140,17 @@ pub fn run() {
             commands::export_playlist,
             commands::songs_everywhere,
             commands::keep_only_in,
+            commands::song_occurrences,
+            commands::recover_candidates,
+            commands::recover_rows,
+            commands::recover_titles,
+            commands::recover_search,
+            commands::recover_pick,
+            commands::recover_set_title,
+            commands::recover_song,
+            commands::recover_cancel,
+            commands::recover_reset,
+            commands::recover_apply,
             commands::playlist_alerts,
             commands::dismiss_playlist_alert,
             commands::mark_alerts_seen,

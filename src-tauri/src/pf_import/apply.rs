@@ -391,10 +391,8 @@ fn sql(e: rusqlite::Error) -> PfImportError {
 
 // --- songs --------------------------------------------------------------------------------------
 
-/// YouTube's stand-in titles for a gone video: never taken as a real title.
-fn is_placeholder(title: &str) -> bool {
-    matches!(title.trim(), "" | "Deleted video" | "Private video")
-}
+// YouTube's stand-in titles for a gone video: never taken as a real title.
+use crate::playlist_tools::recover::is_placeholder_title as is_placeholder;
 
 /// A Topic channel (`Artist - Topic`) is the artist.
 fn artist_of(channel: &str) -> String {

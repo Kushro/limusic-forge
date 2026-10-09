@@ -1,11 +1,13 @@
 <script lang="ts">
 	// The tools hub (PlaylistForge's Operations screen): one card per playlist tool. Pick the
 	// playlist to work on, then a card opens that tool in the same dialog a playlist's ⋯ menu opens
-	// (`PlaylistToolsDialog`), on that playlist.
+	// (`PlaylistToolsDialog`), on that playlist. Below them, the tools over every playlist at once,
+	// each a page of its own (Recover tracks).
 	import { HugeiconsIcon } from '@hugeicons/svelte';
 	import {
 		ArrowRight01Icon,
 		Copy01Icon,
+		DataRecoveryIcon,
 		FilterIcon,
 		GitForkIcon,
 		GitMergeIcon,
@@ -100,6 +102,24 @@
 				</button>
 			</div>
 		{/each}
+	</div>
+
+	<!-- Tools that work across every playlist at once: no "Playlist to work on" for them. -->
+	<h2 class="mb-3 mt-8 font-heading text-lg font-semibold tracking-tight">{t('tools.section_global')}</h2>
+	<div class="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+		<div class="flex flex-col gap-3 rounded-xl border p-5 transition-colors hover:border-foreground/20">
+			<div class="flex h-10 w-10 items-center justify-center rounded-lg bg-primary/15">
+				<HugeiconsIcon icon={DataRecoveryIcon} class="h-5 w-5 text-primary" />
+			</div>
+			<div class="flex-1">
+				<p class="text-sm font-semibold">{t('tools.card_recover_title')}</p>
+				<p class="mt-1 text-xs text-muted-foreground">{t('tools.card_recover_desc')}</p>
+			</div>
+			<a href="/tools/recover" class="flex items-center gap-1.5 self-start text-xs font-medium text-primary hover:underline">
+				{t('tools.start')}
+				<HugeiconsIcon icon={ArrowRight01Icon} class="h-3 w-3" />
+			</a>
+		</div>
 	</div>
 </div>
 

@@ -1151,6 +1151,12 @@ html.art-tint.theme-amoled {
    Triggered from the clipping box, not the scrolling track: the trailing copy is inert, so it is
    not hit-testable and hovering it would never reach the track itself. */
 .marquee-box:hover .marquee { animation-play-state: paused; }
+/* The same loop for a track's playlist chips past five (PlaylistChips.svelte, which sets the
+   distance, the duration and the 1 s head start). `infinite` is safe here, unlike the title: it
+   only runs while the pointer or the focus is on the chips. A chip under the pointer or the
+   keyboard holds it, so the one you are reaching for does not slide away. */
+.chip-carousel { animation: marquee linear infinite; }
+.chip-carousel:has(a:hover, a:focus-visible) { animation-play-state: paused; }
 
 /* A small "pop" for the like button when a track is favourited. */
 @keyframes heart-pop {

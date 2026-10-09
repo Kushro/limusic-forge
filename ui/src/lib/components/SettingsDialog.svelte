@@ -491,6 +491,8 @@
 	const musicVideosOn = $derived(settings.music_videos === 'true');
 	// Off by default, and only offered with music videos on: it costs real GPU time on every frame.
 	const ambientOn = $derived(settings.ambient_light === 'true');
+	// Off by default, and only switchable with music videos on (`set_setting` enforces it too).
+	const miniVideoOn = $derived(musicVideosOn && settings.mini_video === 'true');
 	const preventDuplicatesOn = $derived(settings.prevent_duplicates === 'true');
 	// Off by default: shuffle applies to the queue it was turned on for (issue #117).
 	const stickyShuffleOn = $derived(settings.sticky_shuffle === 'true');
@@ -556,6 +558,24 @@
 		settings.music_videos = on ? 'true' : 'false';
 		prefs.musicVideos = on;
 		await api.setSetting('music_videos', settings.music_videos);
+		// The mini player's video only counts on top of this one, so it goes off with it rather than
+		// coming back on by itself the next time this is turned on.
+		// The stored value, not `miniVideoOn`: that one already reads off with music videos.
+		if (!on && settings.mini_video === 'true') await setMiniVideo(false);
+	}
+
+	// Read by the mini player when it opens (initApp(true), mini.rs), so there is nothing live to
+	// update. Rust refuses `true` while music videos are off (`needs_music_videos`); the switch is
+	// greyed then, so a refusal only means the two raced: put the switch back.
+	async function setMiniVideo(on: boolean) {
+		settings.mini_video = on ? 'true' : 'false';
+		prefs.miniVideo = on;
+		try {
+			await api.setSetting('mini_video', settings.mini_video);
+		} catch {
+			settings.mini_video = 'false';
+			prefs.miniVideo = false;
+		}
 	}
 
 	// `prefs` after the write: on Linux the write is also what turns WebGL on for the glow.
@@ -1276,6 +1296,13 @@
 									})}
 								{/if}
 								{@render row({
+									title: t('settings.playback.mini_video'),
+									badge: t('settings.themes.experimental'),
+									desc: t('settings.playback.mini_video_hint'),
+									control: miniVideoSwitch,
+									tall: true
+								})}
+								{@render row({
 									title: t('settings.playback.hide_videos'),
 									desc: t('settings.playback.hide_videos_hint'),
 									control: hideVideoSwitch,
@@ -1763,6 +1790,11 @@
 {#snippet normalizeSwitch()}<Switch checked={normalizeOn} onCheckedChange={setNormalize} />{/snippet}
 {#snippet musicVideoSwitch()}<Switch checked={musicVideosOn} onCheckedChange={setMusicVideos} />{/snippet}
 {#snippet ambientSwitch()}<Switch checked={ambientOn} onCheckedChange={setAmbient} />{/snippet}
+{#snippet miniVideoSwitch()}<Switch
+		checked={miniVideoOn}
+		disabled={!musicVideosOn}
+		onCheckedChange={setMiniVideo}
+	/>{/snippet}
 <!-- The GPU note, behind a warning glyph by the title: it matters to the few whose card is weak,
      and a paragraph under the switch read as a reason not to try it. A popover rather than a
      tooltip, so it opens on a click or a key and can hold the link. -->

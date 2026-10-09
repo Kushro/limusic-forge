@@ -12,6 +12,39 @@ export function announceOp(op: PlaylistOp | null, msg: string) {
 	else toast.success(msg);
 }
 
+/** Say what several edits did together (one action that wrote to several playlists), with one Undo
+ *  that takes them back newest first: a later edit may stand on an earlier one. */
+export function announceOps(ops: (PlaylistOp | null)[], msg: string) {
+	const live = ops.filter((op): op is PlaylistOp => !!op?.undoable);
+	if (!live.length) {
+		toast.success(msg);
+		return;
+	}
+	const ids = live.map((op) => op.id).reverse();
+	toast.action(msg, t('undo.action'), () => void undoOps(ids));
+}
+
+/** Undo `ids` in that order, quietly, and say once how it went. Stops at the first refusal. */
+async function undoOps(ids: number[]): Promise<boolean> {
+	let rebuilt = false;
+	try {
+		for (const id of ids) {
+			const op = await api.undoPlaylistOp(id);
+			if (op.kind === 'split' || op.kind === 'merge' || op.kind === 'extract') rebuilt = true;
+		}
+		toast.success(t('undo.done'));
+		return true;
+	} catch (e) {
+		toast.error(t('undo.failed', { error: String(e) }));
+		return false;
+	} finally {
+		if (rebuilt) {
+			loadLibrary(true);
+			refreshLocalPlaylists();
+		}
+	}
+}
+
 /** Undo one edit. The backend announces the playlists it touched (`playlists-edited`), which is
  *  what makes an open page re-read them. Answers whether it went through. */
 export async function undoOp(id: number): Promise<boolean> {

@@ -83,9 +83,18 @@ pub fn open(app: &AppHandle) -> Result<(), String> {
             let _ = win.set_position(p);
         }
         // Same treatment as the main window: this is a second web process, and it needs the media
-        // and 3D stacks even less than the app does.
+        // and 3D stacks even less than the app does. Media only while it shows the music video
+        // (`mini_video`, which counts only on top of `music_videos`): a `<video>` element, never
+        // mpv's picture. Read once, here: the settings that change it live in the main window,
+        // which is hidden while this one is up.
         #[cfg(target_os = "linux")]
-        crate::tune_webview_labelled(app, LABEL, false);
+        {
+            let media = app.try_state::<Arc<AppState>>().is_some_and(|s| {
+                let on = |k: &str| s.db.get_setting(k).as_deref() == Some("true");
+                on("music_videos") && on("mini_video")
+            });
+            crate::tune_webview_labelled(app, LABEL, media);
+        }
         let _ = win.show();
         let _ = win.set_focus();
     }
