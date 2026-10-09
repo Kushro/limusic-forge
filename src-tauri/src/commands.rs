@@ -373,10 +373,7 @@ fn setting_prerequisite(
     value: &str,
     stored: impl Fn(&str) -> Option<String>,
 ) -> Result<(), String> {
-    if key == "mini_video"
-        && value == "true"
-        && stored("music_videos").as_deref() != Some("true")
-    {
+    if key == "mini_video" && value == "true" && stored("music_videos").as_deref() != Some("true") {
         return Err("needs_music_videos".into());
     }
     Ok(())

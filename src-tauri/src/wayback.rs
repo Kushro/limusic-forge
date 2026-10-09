@@ -146,8 +146,7 @@ fn meta_content(html: &str, attr: &str, value: &str) -> Option<String> {
         let mut content = None;
         for c in ATTR.captures_iter(tag.as_str()) {
             let name = c.get(1).map_or("", |m| m.as_str());
-            let val =
-                c.get(2).or_else(|| c.get(3)).or_else(|| c.get(4)).map_or("", |m| m.as_str());
+            let val = c.get(2).or_else(|| c.get(3)).or_else(|| c.get(4)).map_or("", |m| m.as_str());
             if name.eq_ignore_ascii_case(attr) && val.trim().eq_ignore_ascii_case(value) {
                 key_matches = true;
             } else if name.eq_ignore_ascii_case("content") {
@@ -401,7 +400,8 @@ mod tests {
 
     #[test]
     fn titles_fall_back_to_the_title_tag_without_the_suffix() {
-        let html = "<head><TITLE>\n  Daft Punk &#39;Around the World&#39;\n - YouTube</TITLE></head>";
+        let html =
+            "<head><TITLE>\n  Daft Punk &#39;Around the World&#39;\n - YouTube</TITLE></head>";
         assert_eq!(title_from_html(html).as_deref(), Some("Daft Punk 'Around the World'"));
     }
 

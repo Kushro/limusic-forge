@@ -338,8 +338,7 @@ pub fn collect_candidates(
         if source == SOURCE_ALERT_REMOVED && c.position.is_none() {
             if let Some(from) = a.from_pos.and_then(|p| u32::try_from(p).ok()) {
                 c.position = Some(from);
-                let snap =
-                    before.entry((pid.to_owned(), a.at)).or_insert_with(|| prior(pid, a.at));
+                let snap = before.entry((pid.to_owned(), a.at)).or_insert_with(|| prior(pid, a.at));
                 if let Some(snap) = snap.as_ref() {
                     let from = from as usize;
                     if let Some(item) = snap.items.get(from).filter(|it| it.v == vid) {
@@ -1228,9 +1227,8 @@ fn dead_row<'a>(
     w: &Wanted,
     claimed: &HashSet<&str>,
 ) -> Option<&'a SongItem> {
-    let free = |r: &&'a SongItem| {
-        r.video_id == w.dead && handle(r).is_some_and(|h| !claimed.contains(h))
-    };
+    let free =
+        |r: &&'a SongItem| r.video_id == w.dead && handle(r).is_some_and(|h| !claimed.contains(h));
     if let Some(h) = w.dead_handle.as_deref() {
         if let Some(r) = fresh.iter().filter(free).find(|r| handle(r) == Some(h)) {
             return Some(r);
@@ -1635,8 +1633,7 @@ fn applicable(db: &Db) -> (Vec<RecoverCandidate>, HashMap<String, String>) {
         unavailable_index: &unavailable_index,
     };
     let cands = collect_candidates(&stored, true, |pid, at| db.snapshot_before(pid, at));
-    let titles =
-        latest.iter().filter_map(|(id, s)| Some((id.clone(), s.title.clone()?))).collect();
+    let titles = latest.iter().filter_map(|(id, s)| Some((id.clone(), s.title.clone()?))).collect();
     (cands, titles)
 }
 
@@ -2045,7 +2042,8 @@ mod tests {
                 item("b", "h2", "B", false),
             ],
         );
-        let now = snap(2, "VLPL1", 200, vec![item("a", "h0", "A", false), item("b", "h2", "B", false)]);
+        let now =
+            snap(2, "VLPL1", 200, vec![item("a", "h0", "A", false), item("b", "h2", "B", false)]);
         let mut removed = alert(7, "VLPL1", "gone", "removed", 200);
         removed.from_pos = Some(1);
         let got = collect(
@@ -2066,7 +2064,8 @@ mod tests {
         // A snapshot that does not have it there gives no anchor, the position stays.
         let mut off = removed.clone();
         off.from_pos = Some(0);
-        let got = collect(vec![now.clone()], vec![off], vec![], vec![], vec![before.clone()], false);
+        let got =
+            collect(vec![now.clone()], vec![off], vec![], vec![], vec![before.clone()], false);
         assert_eq!((got[0].position, got[0].next_handle.as_deref()), (Some(0), None));
 
         // Back in the playlist (the index, or the newest snapshot): not a candidate.
@@ -2365,8 +2364,8 @@ mod tests {
         ];
         let plan = plan_replacements(&fresh, &wanted);
         for (key, _) in &plan.dead_rows {
-            let covered = plan.adds.iter().any(|a| &a.key == key)
-                || plan.already_present.contains(key);
+            let covered =
+                plan.adds.iter().any(|a| &a.key == key) || plan.already_present.contains(key);
             assert!(covered, "{key:?} would go with no replacement");
         }
         assert_eq!(dead_handles(&plan), [("d1", "h1"), ("d2", "h2")]);
