@@ -93,16 +93,23 @@ jobs:
           ref: ${{ steps.rel.outputs.tag }}
           persist-credentials: false
 
-      # Avrea's Windows images ship a trimmed root store, and gh cannot fill it in. gh is Go: it
-      # verifies against the system store, but unlike SChannel it never triggers Windows' on-demand
-      # root download (AuthRoot auto-update), so on a fresh image without the roots GitHub's
-      # certificates chain to (USERTrust/Sectigo ECC, DigiCert) every `gh api` died with "x509:
-      # certificate signed by unknown authority". The libmpv step and the whole upload step are gh.
-      # So: shake hands once through SChannel (Invoke-WebRequest) with every GitHub host this job
-      # talks to, which makes Windows install the missing roots, then prove gh is happy. If it still
-      # is not, pull Microsoft's full trusted-root list from Windows Update into LocalMachine\Root.
-      # Only the handshake matters; HTTP errors (a 404 on a bare CDN host) are expected and ignored.
-      # Harmless on GitHub-hosted runners, where the first gh check simply passes.
+      # On Avrea's Windows images every `gh api` died with "x509: certificate signed by unknown
+      # authority", and the libmpv step and the whole upload step are gh. The first guess was a
+      # trimmed root store, but the first real run disproved it: SChannel (Invoke-WebRequest)
+      # shook hands fine with api.github.com, github.com and uploads.github.com, and gh kept
+      # failing even after 562 Windows Update roots went into LocalMachine\Root. So the root store
+      # is NOT the cause. The likely one is the runner's environment: gh is Go and honours
+      # HTTPS_PROXY/HTTP_PROXY (and, off Windows, SSL_CERT_FILE/SSL_CERT_DIR), so it can be talking
+      # to a TLS-intercepting proxy whose certificate nobody trusts, while pwsh went direct.
+      # In order, each fix tried in-process and proved with gh before it is kept:
+      #   1. gh already works: done (GitHub-hosted runners stop here).
+      #   2. print a diagnostic: proxy/cert env vars (credentials masked, tokens never printed)
+      #      and what curl sees with and without the env proxy.
+      #   3. proxy vars set: bypass the proxy for GitHub's hosts via NO_PROXY/no_proxy, and export
+      #      them through GITHUB_ENV so every later step (bash ones too) inherits them.
+      #   4. SSL_CERT_FILE/SSL_CERT_DIR set: try without them, export them empty if that works.
+      #   5. last resort: the SChannel warm-up and the Windows Update root import from before.
+      #   6. nothing worked: fail with the diagnostic summary.
       - name: Trust GitHub's TLS roots (Avrea Windows images)
         shell: pwsh
         env:
@@ -115,6 +122,80 @@ jobs:
             gh api rate_limit --silent 2>&1 | Out-Host
             return ($LASTEXITCODE -eq 0)
           }
+          function Hide-Secret([string]$Name, [string]$Value) {
+            # A secret-looking name is never printed; elsewhere mask URL credentials (user:pass@).
+            if ($Name -match 'token|secret|passw|pwd|key|auth') { return "<redacted>" }
+            return ($Value -replace '(?<=://)[^/@\s]+@', '***@')
+          }
+          function Show-CurlTls([string]$Label, [string[]]$Extra) {
+            $ErrorActionPreference = "Continue"
+            if (-not (Get-Command curl.exe -ErrorAction SilentlyContinue)) { return "curl ${Label}: curl.exe not found" }
+            $out = & curl.exe -sS -v --max-time 20 -o NUL --write-out "http=%{http_code}`n" @Extra https://api.github.com 2>&1 |
+              ForEach-Object { "$_" } |
+              Where-Object { $_ -match '(?i)issuer|subject|proxy|connected to|schannel|ssl|certificate|http=' } |
+              ForEach-Object { $_ -replace '(?<=://)[^/@\s]+@', '***@' }
+            $text = "curl ${Label} (exit ${LASTEXITCODE}):`n  " + ($out -join "`n  ")
+            Write-Host $text
+            return $text
+          }
+
+          # 1. Already fine?
+          if (Test-Gh) { Write-Host "gh trusts GitHub's certificates"; exit 0 }
+
+          # 2. Diagnose.
+          Write-Host "::warning::gh rejects GitHub's TLS certificate; diagnosing the environment"
+          $summary = [System.Collections.Generic.List[string]]::new()
+          $envVars = @(Get-ChildItem Env: | Where-Object { $_.Name -match '(?i)proxy|ssl_cert|cert' } | Sort-Object Name)
+          if ($envVars.Count -eq 0) { $summary.Add("no proxy/cert environment variables set") }
+          foreach ($v in $envVars) { $summary.Add("env $($v.Name)=$(Hide-Secret $v.Name $v.Value)") }
+          $summary | ForEach-Object { Write-Host $_ }
+          $summary.Add((Show-CurlTls "via env proxy" @()))
+          $summary.Add((Show-CurlTls "direct (--noproxy *)" @("--noproxy", "*")))
+
+          # 3. A proxy in the environment: keep GitHub's hosts off it.
+          $proxyVars = @($envVars | Where-Object { $_.Name -match '(?i)^(https?|all)_proxy$' })
+          if ($proxyVars.Count -gt 0) {
+            $origUpper = $env:NO_PROXY
+            $origLower = $env:no_proxy
+            $ghHosts = "github.com,.github.com,api.github.com,uploads.github.com,.githubusercontent.com"
+            $merged = @((@($origUpper, $origLower, $ghHosts) -join ",") -split "," |
+              ForEach-Object { $_.Trim() } | Where-Object { $_ } | Select-Object -Unique) -join ","
+            $env:NO_PROXY = $merged
+            $env:no_proxy = $merged
+            Write-Host "proxy set ($(($proxyVars | ForEach-Object Name) -join ', ')); retrying gh with NO_PROXY=$merged"
+            if (Test-Gh) {
+              Add-Content -Path $env:GITHUB_ENV -Value "NO_PROXY=$merged"
+              Add-Content -Path $env:GITHUB_ENV -Value "no_proxy=$merged"
+              Write-Host "gh trusts GitHub's certificates once GitHub bypasses the proxy; NO_PROXY exported to later steps"
+              exit 0
+            }
+            $summary.Add("NO_PROXY=$merged did not help")
+            $env:NO_PROXY = $origUpper
+            $env:no_proxy = $origLower
+          } else {
+            $summary.Add("no HTTP(S)_PROXY/ALL_PROXY set; proxy bypass skipped")
+          }
+
+          # 4. A custom CA bundle in the environment: try without it.
+          $certVars = @("SSL_CERT_FILE", "SSL_CERT_DIR" | Where-Object { [Environment]::GetEnvironmentVariable($_) })
+          if ($certVars.Count -gt 0) {
+            $saved = @{}
+            foreach ($n in $certVars) { $saved[$n] = [Environment]::GetEnvironmentVariable($n); [Environment]::SetEnvironmentVariable($n, $null) }
+            Write-Host "retrying gh without $($certVars -join ', ')"
+            if (Test-Gh) {
+              foreach ($n in $certVars) { Add-Content -Path $env:GITHUB_ENV -Value "${n}=" }
+              Write-Host "gh trusts GitHub's certificates without $($certVars -join ', '); exported empty to later steps"
+              exit 0
+            }
+            $summary.Add("clearing $($certVars -join ', ') did not help")
+            foreach ($n in $certVars) { [Environment]::SetEnvironmentVariable($n, $saved[$n]) }
+          } else {
+            $summary.Add("no SSL_CERT_FILE/SSL_CERT_DIR set; CA-bundle reset skipped")
+          }
+
+          # 5. Last resort: the root store. SChannel handshakes first (they make Windows fetch
+          # missing roots on demand), then Microsoft's full trusted-root list from Windows Update.
+          # Only the handshake matters; HTTP errors (a 404 on a bare CDN host) are expected.
           $hosts = @(
             "https://api.github.com",
             "https://github.com",
@@ -127,20 +208,29 @@ jobs:
               Invoke-WebRequest -Uri $u -UseBasicParsing -TimeoutSec 30 | Out-Null
               Write-Host "SChannel handshake ok: ${u}"
             } catch {
-              # An HTTP error status still means the TLS handshake (and the root fetch) happened.
               Write-Host "SChannel ${u}: $($_.Exception.Message)"
             }
           }
-          if (Test-Gh) { Write-Host "gh trusts GitHub's certificates"; exit 0 }
+          if (Test-Gh) { Write-Host "gh trusts GitHub's certificates (after the SChannel handshakes)"; exit 0 }
+          $summary.Add("SChannel handshakes did not help")
 
-          Write-Host "::warning::gh still rejects GitHub's certificate after the SChannel handshakes; importing Microsoft's trusted roots from Windows Update"
+          Write-Host "::warning::importing Microsoft's trusted roots from Windows Update"
           $sst = Join-Path $env:RUNNER_TEMP "windows-update-roots.sst"
+          $ErrorActionPreference = "Continue"
           certutil -generateSSTFromWU "$sst" | Out-Host
-          if ($LASTEXITCODE -ne 0 -or -not (Test-Path $sst)) { throw "certutil -generateSSTFromWU failed; cannot repair the root store" }
-          $n = @(Import-Certificate -FilePath $sst -CertStoreLocation Cert:\LocalMachine\Root).Count
-          Write-Host "imported $n roots into LocalMachine\Root"
-          if (-not (Test-Gh)) { throw "gh still fails TLS verification against api.github.com after importing the Windows Update roots — the runner image's trust store is broken beyond this repair" }
-          Write-Host "gh trusts GitHub's certificates (after the root import)"
+          $certutilExit = $LASTEXITCODE
+          $ErrorActionPreference = "Stop"
+          if ($certutilExit -eq 0 -and (Test-Path $sst)) {
+            $count = @(Import-Certificate -FilePath $sst -CertStoreLocation Cert:\LocalMachine\Root).Count
+            Write-Host "imported $count roots into LocalMachine\Root"
+            if (Test-Gh) { Write-Host "gh trusts GitHub's certificates (after the root import)"; exit 0 }
+            $summary.Add("importing $count Windows Update roots did not help")
+          } else {
+            $summary.Add("certutil -generateSSTFromWU failed (exit $certutilExit)")
+          }
+
+          # 6. Out of ideas.
+          throw ("gh still fails TLS verification against api.github.com. Diagnostic summary:`n  " + ($summary -join "`n  "))
 
       # The tag is the contract: the binaries must be built from the source that tag points at, and
       # the updater compares tauri.conf.json's version. If they disagree, the version bump never got
@@ -281,14 +371,18 @@ jobs:
 
       # v8's build script downloads the prebuilt rusty_v8.lib into target/release/gn_out/obj (its
       # `output` points the linker there), and rust-cache only keeps build/, .fingerprint/ and
-      # deps/, so gn_out never survives a restore. On a full match nothing recompiles v8 and the
-      # lib is never needed. On a partial match (any Cargo.lock change, i.e. every version bump)
-      # cargo can decide to recompile the v8 crate while the restored fingerprint says its build
-      # script already ran, so the script is not re-run, nothing re-downloads the lib, and the
-      # build dies with "could not find native static library rusty_v8" (macOS 1.3.0-forge.1).
-      # Drop v8's build dirs and fingerprints so the script runs again and fetches the lib.
+      # deps/, so gn_out is NEVER cached. On a partial match (any Cargo.lock change, i.e. every
+      # version bump) cargo can decide to recompile the v8 crate while the restored fingerprint says
+      # its build script already ran, so the script is not re-run, nothing re-downloads the lib, and
+      # the build dies with "could not find native static library rusty_v8" (macOS 1.3.0-forge.1).
+      # A full match is not safe either: the only thing that ever saved it was v8 not recompiling,
+      # and a cache saved after a failed run (cache-on-failure) can hold a half-compiled v8 under
+      # the exact key, so the next run restores it with cache-hit=true and dies the same way
+      # (macOS run 37898765342). So this runs on EVERY restore, whatever the match: if a v8 build
+      # script ran but the lib is gone, drop v8's build dirs and fingerprints so the script runs
+      # again and fetches the lib. Accepted cost: re-downloading and recompiling v8 whenever the
+      # lib is missing.
       - name: Drop a restored v8 build whose prebuilt lib is gone
-        if: ${{ steps.rust-cache.outputs.cache-hit != 'true' }}
         shell: bash
         run: |
           set -euo pipefail

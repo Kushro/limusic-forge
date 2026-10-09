@@ -198,14 +198,18 @@ jobs:
 
       # v8's build script downloads the prebuilt librusty_v8.a into target/release/gn_out/obj (its
       # `output` points the linker there), and rust-cache only keeps build/, .fingerprint/ and
-      # deps/, so gn_out never survives a restore. On a full match nothing recompiles v8 and the
-      # lib is never needed. On a partial match (any Cargo.lock change, i.e. every version bump)
-      # cargo can decide to recompile the v8 crate while the restored fingerprint says its build
-      # script already ran, so the script is not re-run, nothing re-downloads the lib, and the
-      # build dies with "could not find native static library rusty_v8" — exactly 1.3.0-forge.1.
-      # Drop v8's build dirs and fingerprints so the script runs again and fetches the lib.
+      # deps/, so gn_out is NEVER cached. On a partial match (any Cargo.lock change, i.e. every
+      # version bump) cargo can decide to recompile the v8 crate while the restored fingerprint says
+      # its build script already ran, so the script is not re-run, nothing re-downloads the lib, and
+      # the build dies with "could not find native static library rusty_v8" — exactly 1.3.0-forge.1.
+      # A full match is not safe either: the only thing that ever saved it was v8 not recompiling,
+      # and cache-on-failure (above) saves the target of a failed run, half-compiled v8 included,
+      # under the exact key. The next run restores it with cache-hit=true and dies the same way
+      # (run 37898765342). So this runs on EVERY restore, whatever the match: if a v8 build script
+      # ran but the lib is gone, drop v8's build dirs and fingerprints so the script runs again and
+      # fetches the lib. Accepted cost: re-downloading and recompiling v8 whenever the lib is
+      # missing.
       - name: Drop a restored v8 build whose prebuilt lib is gone
-        if: ${{ steps.rust-cache.outputs.cache-hit != 'true' }}
         run: |
           set -euo pipefail
           cd "${GITHUB_WORKSPACE:?}"
