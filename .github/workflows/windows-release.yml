@@ -55,8 +55,13 @@ env:
   MPV_DIR: ${{ github.workspace }}\.libmpv
 
 jobs:
+  # Avrea or GitHub-hosted labels, per the RUNNER_PROVIDER repo variable (see runner.yml).
+  runner:
+    uses: ./.github/workflows/runner.yml
+
   build:
-    runs-on: windows-latest
+    needs: runner
+    runs-on: ${{ needs.runner.outputs.windows }}
     # A healthy run is ~13 min, and ~20 on a cold cache. The default is six hours, which is what a
     # wedged download or a stuck installer build would burn while the release sits incomplete.
     timeout-minutes: 40
@@ -68,6 +73,14 @@ jobs:
           TAG="${{ inputs.tag }}"
           [ -n "$TAG" ] || { echo "::error::no tag to build for"; exit 1; }
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      # Dry runs only validate packaging, so trade runtime speed for build speed: 16 codegen units
+      # instead of the profile's 1. Published releases keep `codegen-units = 1` (Cargo.toml). Set
+      # before rust-cache, which keys on CARGO_* env, so dry-run artifacts never mix with release ones.
+      - name: Dry run, faster codegen
+        if: ${{ inputs.dry_run }}
+        shell: bash
+        run: echo "CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16" >> "$GITHUB_ENV"
 
       # Actions are pinned to commit SHAs, not tags: `@v4` and `@v2` are mutable refs. This job
       # holds TAURI_SIGNING_PRIVATE_KEY and produces the installers users auto-update to, so
@@ -340,19 +353,23 @@ jobs:
           fi
 
           # Stage the portable zip's exe NOW, from the first pass: it is the exe inside the setup
-          # above, and the import-table check below reads this copy too. The second pass may
-          # overwrite target/release/limusic-forge.exe (see there).
+          # above, and the import-table check below reads this copy too. The second pass only
+          # re-bundles (it does not compile), but staging here keeps the zip independent of it.
           STAGE="target/release/bundle/portable/stage"
           rm -rf "${STAGE:?}" && mkdir -p "$STAGE/data"
           cp target/release/limusic-forge.exe "$STAGE/"
 
           # Second pass: the offline installer, WebView2 runtime embedded and installed silently, for
           # machines that cannot reach Microsoft's download (design D1). No updater artifacts: the
-          # updater only ever downloads the online setup above. Cargo may recompile here: --config
-          # changes TAURI_CONFIG, which reruns tauri-build. That is why the portable zip uses the exe
-          # staged from the first pass above, not whatever this pass leaves in target/release. The
-          # CRT check after this step reads both: the staged copy and this pass's exe.
-          tauri build --bundles nsis --config '{"build":{"beforeBuildCommand":""},"bundle":{"createUpdaterArtifacts":false,"windows":{"webviewInstallMode":{"type":"offlineInstaller","silent":true}}}}'
+          # updater only ever downloads the online setup above.
+          # `tauri bundle`, NOT `tauri build`: everything this pass changes is bundler-only config,
+          # so it packages the exe the first pass already linked. `tauri build --config …` changed
+          # TAURI_CONFIG, which reran tauri-build and recompiled the whole crate (~11.5 min) to
+          # produce an identical exe. No --target/--features: the first pass used none either.
+          # zlib, not the default lzma, for this installer only: it embeds the WebView2 runtime
+          # installer (already compressed, well over 100 MB), which lzma spends minutes squeezing
+          # for little gain. The online setup above (the one the updater downloads) keeps lzma.
+          tauri bundle --bundles nsis --config '{"build":{"beforeBuildCommand":""},"bundle":{"createUpdaterArtifacts":false,"windows":{"webviewInstallMode":{"type":"offlineInstaller","silent":true},"nsis":{"compression":"zlib"}}}}'
           # The renamed online setup matches the same glob, so skip it.
           offline=()
           for f in "$NSIS"/*_"${VERSION}"_x64-setup.exe; do [ "$f" = "$SETUP" ] || offline+=("$f"); done
@@ -370,7 +387,7 @@ jobs:
           cp assets/portable/README.txt "$STAGE/data/README.txt"
           PORTABLE="$PWD/target/release/bundle/portable/limusic-forge_${VERSION}_x64-portable.zip"
           rm -f "$PORTABLE"
-          (cd "$STAGE" && 7z a -tzip -mx=9 "$PORTABLE" limusic-forge.exe libmpv-2.dll LICENSE data >/dev/null)
+          (cd "$STAGE" && 7z a -tzip -mx=5 "$PORTABLE" limusic-forge.exe libmpv-2.dll LICENSE data >/dev/null)
           7z l "$PORTABLE"
           ls -la "$NSIS" "$(dirname "$PORTABLE")"
 
@@ -388,9 +405,9 @@ jobs:
           Enter-VsDevShell -VsInstallPath $vs -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64'
 
           # Both exes that ship: the first-pass one (in the online setup and the portable zip), staged
-          # by the build step, and whatever the second pass left in target/release, which is the exe
-          # inside the offline setup. The second pass may have recompiled it (different TAURI_CONFIG),
-          # so it is its own link and needs its own check.
+          # by the build step, and the one in target/release, which is the exe inside the offline
+          # setup. The second pass is `tauri bundle` and should not relink it, so the two are
+          # expected to be the same file; checking both still catches it if that ever changes.
           $exes = @(
             "$env:GITHUB_WORKSPACE\target\release\bundle\portable\stage\limusic-forge.exe",
             "$env:GITHUB_WORKSPACE\target\release\limusic-forge.exe"

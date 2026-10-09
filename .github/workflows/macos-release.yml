@@ -74,6 +74,13 @@ jobs:
           [ -n "$TAG" ] || { echo "::error::no tag to build for"; exit 1; }
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
+      # Dry runs only validate packaging, so trade runtime speed for build speed: 16 codegen units
+      # instead of the profile's 1. Published releases keep `codegen-units = 1` (Cargo.toml). Set
+      # before rust-cache, which keys on CARGO_* env, so dry-run artifacts never mix with release ones.
+      - name: Dry run, faster codegen
+        if: ${{ inputs.dry_run }}
+        run: echo "CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16" >> "$GITHUB_ENV"
+
       # Actions pinned to commit SHAs, not tags: `@v4` is mutable and `rust-toolchain@stable` is a
       # branch. This job holds TAURI_SIGNING_PRIVATE_KEY and builds what users auto-update to, so
       # nothing in it should be able to change under us.
