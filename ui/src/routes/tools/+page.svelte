@@ -16,7 +16,7 @@
 	import { library, ownedByUser, personal } from '$lib/player.svelte';
 	import { mergeSaved, orderLibrary } from '$lib/personal';
 	import { t } from '$lib/i18n.svelte';
-	import * as Select from '$lib/components/ui/select';
+	import PlaylistSelect from '$lib/components/PlaylistSelect.svelte';
 	import PlaylistToolsDialog, { type ToolTab } from '$lib/components/PlaylistToolsDialog.svelte';
 
 	type Card = { tab: ToolTab; icon: typeof Wrench01Icon };
@@ -65,18 +65,14 @@
 	<section class="mb-4 flex flex-wrap items-center gap-3 rounded-xl border px-4 py-3">
 		<span class="text-sm">{t('tools.source')}</span>
 		{#if playlists.length}
-			<Select.Root type="single" value={sourceId} onValueChange={(v) => (sourceId = v)}>
-				<Select.Trigger class="w-72 max-w-full" aria-label={t('tools.source')}>
-					<span class="flex-1 truncate text-left {source ? '' : 'text-muted-foreground'}">
-						{source?.title ?? t('tools.source_pick')}
-					</span>
-				</Select.Trigger>
-				<Select.Content class="max-h-80">
-					{#each playlists as p (p.id)}
-						<Select.Item value={p.id} label={p.title}>{p.title}</Select.Item>
-					{/each}
-				</Select.Content>
-			</Select.Root>
+			<PlaylistSelect
+				value={sourceId}
+				options={playlists.map((p) => ({ value: p.id, label: p.title }))}
+				onpick={(v) => (sourceId = v)}
+				placeholder={t('tools.source_pick')}
+				label={t('tools.source')}
+				class="w-72 max-w-full"
+			/>
 		{:else}
 			<span class="text-sm text-muted-foreground">{t('tools.source_none')}</span>
 		{/if}

@@ -62,7 +62,8 @@
 		<!-- Mounted per opening: a tool starts over each time, not on the last preview. A split or
 		     a merge still writing carries on with the dialog closed (`build.svelte.ts`). -->
 		{#if open}
-			<Tabs.Root bind:value={tab}>
+			<!-- min-w-0: the dialog is a grid, so a long unwrapped track line would widen the column. -->
+			<Tabs.Root bind:value={tab} class="min-w-0">
 				<Tabs.List class="mb-3">
 					<Tabs.Trigger value="duplicates">{t('tools.tab_duplicates')}</Tabs.Trigger>
 					<Tabs.Trigger value="split">{t('tools.tab_split')}</Tabs.Trigger>
