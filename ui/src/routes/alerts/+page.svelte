@@ -47,7 +47,7 @@
 	import { Badge } from '$lib/components/ui/badge';
 	import { Button } from '$lib/components/ui/button';
 	import { Switch } from '$lib/components/ui/switch';
-	import * as Select from '$lib/components/ui/select';
+	import PlaylistSelect from '$lib/components/PlaylistSelect.svelte';
 	import * as Tabs from '$lib/components/ui/tabs';
 	import ErrorState from '$lib/components/ErrorState.svelte';
 
@@ -323,17 +323,17 @@
 							<span class="text-xs tabular-nums text-muted-foreground">{counts[k]}</span>
 						</button>
 					{/each}
-					<Select.Root type="single" value={playlist || ALL} onValueChange={(v) => (playlist = v === ALL ? '' : v)}>
-						<Select.Trigger class="w-56" aria-label={t('alerts.all_playlists')}>
-							<span class="flex-1 truncate text-left">{playlist ? nameOf(playlist) : t('alerts.all_playlists')}</span>
-						</Select.Trigger>
-						<Select.Content>
-							<Select.Item value={ALL} label={t('alerts.all_playlists')}>{t('alerts.all_playlists')}</Select.Item>
-							{#each alertPlaylistIds as id (id)}
-								<Select.Item value={id} label={nameOf(id)}>{nameOf(id)}</Select.Item>
-							{/each}
-						</Select.Content>
-					</Select.Root>
+					<PlaylistSelect
+						value={playlist || ALL}
+						options={[
+							{ value: ALL, label: t('alerts.all_playlists') },
+							...alertPlaylistIds.map((id) => ({ value: id, label: nameOf(id) }))
+						]}
+						onpick={(v) => (playlist = v === ALL ? '' : v)}
+						placeholder={t('alerts.all_playlists')}
+						label={t('alerts.all_playlists')}
+						class="w-56"
+					/>
 					<label class="ml-auto flex items-center gap-2 text-sm">
 						<Switch bind:checked={unseenOnly} />
 						{t('alerts.unseen_only')}
@@ -440,16 +440,14 @@
 
 		<Tabs.Content value="timeline">
 			<div class="mb-4 flex flex-wrap items-center gap-2">
-				<Select.Root type="single" value={timelineFor} onValueChange={(v) => (timelineFor = v)}>
-					<Select.Trigger class="w-72" aria-label={t('alerts.pick_playlist')}>
-						<span class="flex-1 truncate text-left">{timelineFor ? nameOf(timelineFor) : t('alerts.pick_playlist')}</span>
-					</Select.Trigger>
-					<Select.Content>
-						{#each timelineOptions as id (id)}
-							<Select.Item value={id} label={nameOf(id)}>{nameOf(id)}</Select.Item>
-						{/each}
-					</Select.Content>
-				</Select.Root>
+				<PlaylistSelect
+					value={timelineFor}
+					options={timelineOptions.map((id) => ({ value: id, label: nameOf(id) }))}
+					onpick={(v) => (timelineFor = v)}
+					placeholder={t('alerts.pick_playlist')}
+					label={t('alerts.pick_playlist')}
+					class="w-72"
+				/>
 				{#if timelineFor}
 					<Button variant="ghost" size="sm" class="gap-1.5" href={playlistHref(timelineFor)}>
 						<HugeiconsIcon icon={Playlist02Icon} class="h-4 w-4" />

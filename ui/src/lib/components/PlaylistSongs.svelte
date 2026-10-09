@@ -43,6 +43,7 @@
 	import { Button } from './ui/button';
 	import { Checkbox } from './ui/checkbox';
 	import * as Popover from './ui/popover';
+	import { Input } from './ui/input';
 	import * as Select from './ui/select';
 	import TrackFilter from './TrackFilter.svelte';
 	import FilterChips from './FilterChips.svelte';
@@ -90,6 +91,10 @@
 	const names = $derived(new Map(playlists.map((p) => [p.id, p.title])));
 	const nameOf = (id: string) => names.get(id) ?? t('common.playlist_singular');
 	const targets = $derived(playlists.filter((p) => canDropOn(p, null)));
+	let targetQuery = $state('');
+	const shownTargets = $derived(
+		targets.filter((p) => p.title.toLowerCase().includes(targetQuery.trim().toLowerCase()))
+	);
 
 	// Search box (plain, or a regex with `.*`), then the facet chips, then the chosen order.
 	const byId = $derived(new Map(songs.map((e) => [e.song.video_id, e])));
@@ -324,14 +329,19 @@
 					<HugeiconsIcon icon={SquareArrowRightDoubleIcon} class="h-4 w-4" />
 					{t('everywhere.keep_only')}
 				</Popover.Trigger>
-				<Popover.Content align="start" class="max-h-72 w-64 overflow-y-auto p-1">
-					{#each targets as p (p.id)}
-						<button class="w-full truncate rounded-md px-2 py-1.5 text-left text-sm hover:bg-accent/10" onclick={() => keep(p)}>
-							{p.title}
-						</button>
-					{:else}
-						<p class="px-2 py-3 text-sm text-muted-foreground">{t('drop.no_targets')}</p>
-					{/each}
+				<Popover.Content align="start" class="w-64 gap-2 p-2">
+					<Input bind:value={targetQuery} placeholder={t('drop.search')} aria-label={t('drop.search')} class="h-8" />
+					<div class="max-h-64 overflow-y-auto">
+						{#each shownTargets as p (p.id)}
+							<button class="w-full truncate rounded-md px-2 py-1.5 text-left text-sm hover:bg-accent/10" onclick={() => keep(p)}>
+								{p.title}
+							</button>
+						{:else}
+							<p class="px-2 py-3 text-sm text-muted-foreground">
+								{targets.length ? t('common.no_matches') : t('drop.no_targets')}
+							</p>
+						{/each}
+					</div>
 				</Popover.Content>
 			</Popover.Root>
 			{#if confirmRemove}
