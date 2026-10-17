@@ -584,6 +584,7 @@ export const setMiniCompact = (compact: boolean) => invoke<void>('set_mini_compa
 /** Put the dynamic widget back to its opening 480x270, anchored at its bottom-right corner. Fails
  *  when the live widget is the classic one. */
 export const resetMiniSize = () => invoke<void>('reset_mini_size');
+export const resetMiniDynamic = () => invoke<void>('reset_mini_dynamic');
 
 // --- browse / library (context/08) ---------------------------------------------------------
 /** `params` is a `HomeChip.params` token — omit for the unfiltered feed. */
