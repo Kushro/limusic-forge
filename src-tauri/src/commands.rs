@@ -249,6 +249,11 @@ const UI_SETTINGS: &[&str] = &[
     // The music video in the mini player too (mini.rs, MiniPlayer.svelte). Only on top of
     // `music_videos`: see `setting_prerequisite`.
     "mini_video",
+    // The mini player's layout (`classic|dynamic`), and the dynamic one's idle progress line and
+    // where its lyrics go (`overlay|side`). Read when the mini opens (mini.rs).
+    "mini_mode",
+    "mini_dyn_progress",
+    "mini_dyn_lyrics",
     "ambient_light",
     "sticky_shuffle",
     "shuffle_whole_queue",
@@ -332,6 +337,9 @@ fn setting_rule(key: &str) -> Option<SettingRule> {
         "drop_mode" => OneOf(&["ask", "copy", "move"]),
         "drop_dupes" => OneOf(&["skip", "allow", "consolidate"]),
         "tools.extract_new_mode" => OneOf(&["build", "create_transfer"]),
+        "mini_mode" => OneOf(&crate::mini::MODE_VALUES),
+        "mini_dyn_progress" => Bool,
+        "mini_dyn_lyrics" => OneOf(&crate::mini::LYRICS_VALUES),
         _ => return None,
     })
 }
@@ -882,6 +890,20 @@ pub async fn close_mini(app: tauri::AppHandle) -> Result<(), String> {
 #[tauri::command]
 pub async fn set_mini_compact(app: tauri::AppHandle, compact: bool) -> Result<(), String> {
     crate::mini::set_compact(&app, compact)
+}
+
+/// Settings' reset for the dynamic widget: it next opens at the default size, bottom-right. The
+/// classic widget's size and spot are left alone.
+#[tauri::command]
+pub async fn reset_mini_dynamic(state: St<'_>) -> Result<(), String> {
+    crate::mini::reset_dynamic(&state.db);
+    Ok(())
+}
+
+/// The dynamic widget's own reset button: back to the default size right away.
+#[tauri::command]
+pub async fn reset_mini_size(app: tauri::AppHandle) -> Result<(), String> {
+    crate::mini::reset_size(&app)
 }
 
 /// The arguments this process was launched with, handed over once (#348). See `LAUNCH_ARGS`.
@@ -5169,6 +5191,12 @@ mod tests {
             ("drop_mode", "ask"),
             ("drop_dupes", "consolidate"),
             ("tools.extract_new_mode", "create_transfer"),
+            ("mini_mode", "classic"),
+            ("mini_mode", "dynamic"),
+            ("mini_dyn_progress", "true"),
+            ("mini_dyn_progress", "false"),
+            ("mini_dyn_lyrics", "overlay"),
+            ("mini_dyn_lyrics", "side"),
             // No rule: anything goes.
             ("proxy", "socks5://whatever"),
             ("volume", "not even a number"),
@@ -5201,6 +5229,13 @@ mod tests {
             ("drop_mode", "drop"),
             ("drop_dupes", "keep"),
             ("tools.extract_new_mode", "create"),
+            ("mini_mode", "Dynamic"),
+            ("mini_mode", "compact"),
+            ("mini_mode", ""),
+            ("mini_dyn_progress", "1"),
+            ("mini_dyn_progress", "yes"),
+            ("mini_dyn_lyrics", "bottom"),
+            ("mini_dyn_lyrics", "Side"),
         ];
         for (key, value) in refused {
             let err = validate_setting(key, value).expect_err(&format!("{key} = {value:?}"));
@@ -5229,6 +5264,9 @@ mod tests {
             "drop_mode",
             "drop_dupes",
             "tools.extract_new_mode",
+            "mini_mode",
+            "mini_dyn_progress",
+            "mini_dyn_lyrics",
         ];
         for key in keys {
             assert!(setting_rule(key).is_some(), "{key} has no rule");

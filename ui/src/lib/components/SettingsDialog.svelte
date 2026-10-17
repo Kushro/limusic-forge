@@ -82,6 +82,7 @@
 		type FormatInfoMini,
 		type ThemeId
 	} from '$lib/theme.svelte';
+	import { MARQUEE_MODES, type MarqueeMode } from '$lib/marquee';
 	import {
 		updateState,
 		availableMessage,
@@ -493,6 +494,10 @@
 	const ambientOn = $derived(settings.ambient_light === 'true');
 	// Off by default, and only switchable with music videos on (`set_setting` enforces it too).
 	const miniVideoOn = $derived(musicVideosOn && settings.mini_video === 'true');
+	// Read by the mini player when it opens, so there is nothing live to update (mini.rs).
+	const miniDynamicOn = $derived(settings.mini_mode === 'dynamic');
+	const miniDynProgressOn = $derived(settings.mini_dyn_progress !== 'false');
+	const miniDynLyrics = $derived(settings.mini_dyn_lyrics === 'side' ? ('side' as const) : ('overlay' as const));
 	const preventDuplicatesOn = $derived(settings.prevent_duplicates === 'true');
 	// Off by default: shuffle applies to the queue it was turned on for (issue #117).
 	const stickyShuffleOn = $derived(settings.sticky_shuffle === 'true');
@@ -576,6 +581,21 @@
 			settings.mini_video = 'false';
 			prefs.miniVideo = false;
 		}
+	}
+
+	async function setMiniMode(mode: string) {
+		settings.mini_mode = mode;
+		await api.setSetting('mini_mode', settings.mini_mode);
+	}
+
+	async function setMiniDynProgress(on: boolean) {
+		settings.mini_dyn_progress = on ? 'true' : 'false';
+		await api.setSetting('mini_dyn_progress', settings.mini_dyn_progress);
+	}
+
+	async function setMiniDynLyrics(where: string) {
+		settings.mini_dyn_lyrics = where;
+		await api.setSetting('mini_dyn_lyrics', settings.mini_dyn_lyrics);
 	}
 
 	// `prefs` after the write: on Linux the write is also what turns WebGL on for the glow.
@@ -1212,6 +1232,18 @@
 									tall: true
 								})}
 								{@render row({
+									title: t('settings.themes.marquee_bar'),
+									desc: t('settings.themes.marquee_bar_hint'),
+									control: marqueeBarSelect,
+									tall: true
+								})}
+								{@render row({
+									title: t('settings.themes.marquee_mini'),
+									desc: t('settings.themes.marquee_mini_hint'),
+									control: marqueeMiniSelect,
+									tall: true
+								})}
+								{@render row({
 									title: t('settings.themes.reset_theme'),
 									desc: t('settings.themes.reset_theme_hint'),
 									control: resetButton
@@ -1308,6 +1340,37 @@
 									control: hideVideoSwitch,
 									tall: true
 								})}
+							</div>
+						</section>
+						<section class={GROUP}>
+							<h3 class={LABEL}>{t('settings.sections.mini_player')}</h3>
+							<div class={CARD}>
+								{@render row({
+									title: t('settings.playback.mini_mode'),
+									desc: t('settings.playback.mini_mode_hint'),
+									control: miniModeSelect,
+									tall: true
+								})}
+								{#if miniDynamicOn}
+									{@render row({
+										title: t('settings.playback.mini_dyn_progress'),
+										desc: t('settings.playback.mini_dyn_progress_hint'),
+										control: miniDynProgressSwitch,
+										tall: true
+									})}
+									{@render row({
+										title: t('settings.playback.mini_dyn_lyrics'),
+										desc: t('settings.playback.mini_dyn_lyrics_hint'),
+										control: miniDynLyricsSelect,
+										tall: true
+									})}
+									{@render row({
+										title: t('settings.playback.mini_dyn_reset'),
+										desc: t('settings.playback.mini_dyn_reset_hint'),
+										control: miniDynResetButton,
+										tall: true
+									})}
+								{/if}
 							</div>
 						</section>
 						<section class={GROUP}>
@@ -1954,6 +2017,87 @@
 			{/each}
 		</Select.Content>
 	</Select.Root>
+{/snippet}
+
+{#snippet marqueeBarSelect()}
+	<Select.Root
+		type="single"
+		value={appearance.marqueeBar}
+		onValueChange={(v) => setAppearance({ marqueeBar: v as MarqueeMode })}
+	>
+		<Select.Trigger class="w-44 shrink-0" aria-label={t('settings.themes.marquee_bar')}>
+			<span class="flex-1 text-left">{t(`settings.themes.marquee_at.${appearance.marqueeBar}`)}</span>
+		</Select.Trigger>
+		<Select.Content>
+			{#each MARQUEE_MODES as at (at)}
+				<Select.Item value={at} label={t(`settings.themes.marquee_at.${at}`)}
+					>{t(`settings.themes.marquee_at.${at}`)}</Select.Item
+				>
+			{/each}
+		</Select.Content>
+	</Select.Root>
+{/snippet}
+
+{#snippet marqueeMiniSelect()}
+	<Select.Root
+		type="single"
+		value={appearance.marqueeMini}
+		onValueChange={(v) => setAppearance({ marqueeMini: v as MarqueeMode })}
+	>
+		<Select.Trigger class="w-44 shrink-0" aria-label={t('settings.themes.marquee_mini')}>
+			<span class="flex-1 text-left">{t(`settings.themes.marquee_at.${appearance.marqueeMini}`)}</span>
+		</Select.Trigger>
+		<Select.Content>
+			{#each MARQUEE_MODES as at (at)}
+				<Select.Item value={at} label={t(`settings.themes.marquee_at.${at}`)}
+					>{t(`settings.themes.marquee_at.${at}`)}</Select.Item
+				>
+			{/each}
+		</Select.Content>
+	</Select.Root>
+{/snippet}
+
+{#snippet miniModeSelect()}
+	<Select.Root type="single" value={miniDynamicOn ? 'dynamic' : 'classic'} onValueChange={setMiniMode}>
+		<Select.Trigger class="w-44 shrink-0" aria-label={t('settings.playback.mini_mode')}>
+			<span class="flex-1 text-left"
+				>{t(`settings.playback.mini_mode_at.${miniDynamicOn ? 'dynamic' : 'classic'}`)}</span
+			>
+		</Select.Trigger>
+		<Select.Content>
+			{#each ['classic', 'dynamic'] as const as at (at)}
+				<Select.Item value={at} label={t(`settings.playback.mini_mode_at.${at}`)}
+					>{t(`settings.playback.mini_mode_at.${at}`)}</Select.Item
+				>
+			{/each}
+		</Select.Content>
+	</Select.Root>
+{/snippet}
+
+{#snippet miniDynProgressSwitch()}<Switch
+		checked={miniDynProgressOn}
+		onCheckedChange={setMiniDynProgress}
+	/>{/snippet}
+
+{#snippet miniDynLyricsSelect()}
+	<Select.Root type="single" value={miniDynLyrics} onValueChange={setMiniDynLyrics}>
+		<Select.Trigger class="w-44 shrink-0" aria-label={t('settings.playback.mini_dyn_lyrics')}>
+			<span class="flex-1 text-left">{t(`settings.playback.mini_dyn_lyrics_at.${miniDynLyrics}`)}</span>
+		</Select.Trigger>
+		<Select.Content>
+			{#each ['overlay', 'side'] as const as at (at)}
+				<Select.Item value={at} label={t(`settings.playback.mini_dyn_lyrics_at.${at}`)}
+					>{t(`settings.playback.mini_dyn_lyrics_at.${at}`)}</Select.Item
+				>
+			{/each}
+		</Select.Content>
+	</Select.Root>
+{/snippet}
+
+{#snippet miniDynResetButton()}
+	<Button variant="outline" size="sm" onclick={() => api.resetMiniDynamic().catch(() => {})}>
+		{t('settings.playback.mini_dyn_reset')}
+	</Button>
 {/snippet}
 
 {#snippet dropModeSelect()}

@@ -761,6 +761,7 @@
 		"mini_player": "Mini Player",
 		"mini_shrink": "Shrink mini player",
 		"mini_expand": "Expand mini player",
+		"mini_reset_size": "Reset size",
 		"theater_mode": "Theater mode",
 		"playing_from": "Playing from",
 		"exit_theater": "Exit theater mode",
@@ -997,6 +998,7 @@
 			"player_view": "Player view",
 			"audio": "Audio",
 			"video": "Video",
+			"mini_player": "Mini player",
 			"lyrics": "Lyrics",
 			"blocked": "Blocked artists",
 			"advanced": "Advanced",
@@ -1072,6 +1074,15 @@
 			"format_info_bar_hint": "Codec, bit depth, sample rate and bitrate of what is playing, with a Hi-Res, Lossless or Lossy badge. Bit depth only exists for lossless files.",
 			"format_info_mini": "Quality info in the mini player",
 			"format_info_mini_hint": "Same readout in the floating mini player. The compact size has no room for it.",
+			"marquee_bar": "Scroll long titles in the player bar",
+			"marquee_bar_hint": "A title or artist too long for the bar can scroll on its own, only when you hover it, or never.",
+			"marquee_mini": "Scroll long titles in the mini player",
+			"marquee_mini_hint": "Same choice for the mini player. Applies the next time it opens.",
+			"marquee_at": {
+				"auto": "Automatic",
+				"hover": "Only on hover",
+				"off": "Never"
+			},
 			"format_info_at": {
 				"volume": "Under the volume",
 				"artist": "Under the artist",
@@ -1122,6 +1133,22 @@
 			"music_videos_hint": "Show video stream when available instead of audio only.",
 			"mini_video": "Music video in the mini player",
 			"mini_video_hint": "The mini player shows the music video in place of the cover, in step with the audio. Needs music videos on, and applies the next time the mini player opens.",
+			"mini_mode": "Mini player mode",
+			"mini_mode_hint": "Classic keeps the compact floating player. Dynamic is a resizable 16:9 window. Applies the next time the mini player opens.",
+			"mini_mode_at": {
+				"classic": "Classic",
+				"dynamic": "Dynamic"
+			},
+			"mini_dyn_progress": "Progress line at rest",
+			"mini_dyn_progress_hint": "A thin progress line stays visible while the controls are hidden. Applies the next time the mini player opens.",
+			"mini_dyn_lyrics": "Lyrics",
+			"mini_dyn_lyrics_hint": "Lyrics over the cover or in a side panel. Applies the next time the mini player opens.",
+			"mini_dyn_lyrics_at": {
+				"overlay": "Overlaid",
+				"side": "Side panel"
+			},
+			"mini_dyn_reset": "Reset size and position",
+			"mini_dyn_reset_hint": "Puts the dynamic mini player back at its default size and corner.",
 			"ambient_light": "Ambient light",
 			"ambient_light_hint": "The player view around a music video glows with the video's colours.",
 			"ambient_light_gpu_title": "Needs a capable graphics card",

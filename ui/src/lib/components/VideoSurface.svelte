@@ -10,9 +10,10 @@
 	// This component owns the element and is always mounted (see +layout), so closing the player
 	// view no longer destroys the picture. The state the view also reads lives in $lib/video.
 
-	/** How the picture fills the box it is claimed into: whole, letterboxed (the player view), or
-	 *  cropped to fill it (the mini player's cover area). */
-	let { fit = 'contain' }: { fit?: 'contain' | 'cover' } = $props();
+	/** How the picture fills the box it is claimed into: whole, letterboxed (the player view),
+	 *  cropped to fill it (the mini player's cover area), or whole and letterboxed in black across
+	 *  the entire box, edge to edge with no rounding (the dynamic mini player). */
+	let { fit = 'contain' }: { fit?: 'contain' | 'cover' | 'fill' } = $props();
 
 	// How the picture is kept in step with mpv. Measured against mpv actually playing the same
 	// track, because the guesses before it were all wrong in the same direction:
@@ -383,13 +384,19 @@
 		// on every repaint, and a video repaints 24 times a second at this size. It dragged the whole
 		// app, not just the picture. Same cause as the card-hover cost measured on 2026-08-06.
 		// `cover` fills its box edge to edge, whatever its shape, and the box does the rounding.
+		// `fill` takes the whole box too but never crops: whatever the picture's shape, the rest is
+		// black, and the box (the window) does the rounding.
 		const box =
-			fit === 'cover' ? 'h-full bg-black object-cover' : 'rounded-2xl bg-black object-contain';
+			fit === 'cover'
+				? 'h-full bg-black object-cover'
+				: fit === 'fill'
+					? 'h-full bg-black object-contain'
+					: 'rounded-2xl bg-black object-contain';
 		el.className = `w-full ${box} ${
 			showVideo()
-				? fit === 'cover'
-					? ''
-					: 'aspect-video'
+				? fit === 'contain'
+					? 'aspect-video'
+					: ''
 				: 'pointer-events-none absolute inset-0 h-full opacity-0'
 		}`;
 	});

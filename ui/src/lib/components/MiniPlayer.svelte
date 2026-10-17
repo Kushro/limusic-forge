@@ -196,9 +196,14 @@
 			     its box with clientWidth, which counts padding as room to spare. -->
 			<Marquee
 				text={now?.title ?? t('player.not_playing')}
+				mode={appearance.marqueeMini}
 				class="mr-6 font-heading text-sm font-semibold leading-tight"
 			/>
-			<Marquee text={now?.artists ?? ''} class="text-xs leading-snug text-muted-foreground" />
+			<Marquee
+				text={now?.artists ?? ''}
+				mode={appearance.marqueeMini}
+				class="text-xs leading-snug text-muted-foreground"
+			/>
 			<div class="mt-1 flex items-center gap-1">
 				<button class={panelBtn} onclick={() => api.prevTrack()} aria-label={t('a11y.previous')}>
 					<HugeiconsIcon icon={PreviousIcon} class="h-4 w-4" />
@@ -393,9 +398,14 @@
 			<div class="min-w-0 [text-shadow:0_1px_4px_rgb(0_0_0/0.7)]">
 				<Marquee
 					text={now?.title ?? t('player.not_playing')}
+					mode={appearance.marqueeMini}
 					class="font-heading text-[0.95rem] font-semibold leading-tight text-white"
 				/>
-				<Marquee text={now?.artists ?? ''} class="text-xs leading-snug text-white/75" />
+				<Marquee
+					text={now?.artists ?? ''}
+					mode={appearance.marqueeMini}
+					class="text-xs leading-snug text-white/75"
+				/>
 				{#if appearance.formatInfoMini === 'artist' || appearance.formatInfoMini === 'hover'}
 					<AudioFormatInfo
 						tone="art"

@@ -761,6 +761,7 @@
 		"mini_player": "Reproductor mini",
 		"mini_shrink": "Encoger el mini reproductor",
 		"mini_expand": "Expandir el mini reproductor",
+		"mini_reset_size": "Restablecer tamaño",
 		"theater_mode": "Modo teatro",
 		"playing_from": "Reproduciendo desde",
 		"exit_theater": "Salir del modo teatro",
@@ -997,6 +998,7 @@
 			"player_view": "Vista del reproductor",
 			"audio": "Audio",
 			"video": "Video",
+			"mini_player": "Mini reproductor",
 			"lyrics": "Letra",
 			"blocked": "Artistas bloqueados",
 			"advanced": "Avanzado",
@@ -1072,6 +1074,15 @@
 			"format_info_bar_hint": "Códec, profundidad de bits, frecuencia de muestreo y bitrate de lo que suena, con una insignia Hi-Res, Lossless o Lossy. La profundidad de bits solo existe en archivos sin pérdida.",
 			"format_info_mini": "Info de calidad en el mini reproductor",
 			"format_info_mini_hint": "La misma información en el mini reproductor flotante. El tamaño compacto no tiene lugar para ella.",
+			"marquee_bar": "Desplazar títulos largos en la barra",
+			"marquee_bar_hint": "Un título o artista demasiado largo para la barra puede desplazarse solo, únicamente al pasar el puntero, o nunca.",
+			"marquee_mini": "Desplazar títulos largos en el mini reproductor",
+			"marquee_mini_hint": "La misma opción para el mini reproductor. Se aplica la próxima vez que lo abras.",
+			"marquee_at": {
+				"auto": "Automático",
+				"hover": "Solo al pasar el puntero",
+				"off": "Nunca"
+			},
 			"format_info_at": {
 				"volume": "Debajo del volumen",
 				"artist": "Debajo del artista",
@@ -1122,6 +1133,22 @@
 			"music_videos_hint": "Mostrar stream de video cuando esté disponible en lugar de solo audio.",
 			"mini_video": "Videoclip en el mini reproductor",
 			"mini_video_hint": "El mini reproductor muestra el videoclip en lugar de la carátula, sincronizado con el audio. Requiere los videoclips activados y se aplica la próxima vez que abras el mini reproductor.",
+			"mini_mode": "Modo del mini reproductor",
+			"mini_mode_hint": "Clásico mantiene el reproductor flotante compacto. Dinámico es una ventana 16:9 redimensionable. Se aplica la próxima vez que abras el mini reproductor.",
+			"mini_mode_at": {
+				"classic": "Clásico",
+				"dynamic": "Dinámico"
+			},
+			"mini_dyn_progress": "Línea de progreso en reposo",
+			"mini_dyn_progress_hint": "Una línea fina de progreso queda visible mientras los controles están ocultos. Se aplica la próxima vez que abras el mini reproductor.",
+			"mini_dyn_lyrics": "Letras",
+			"mini_dyn_lyrics_hint": "La letra sobre la carátula o en un panel lateral. Se aplica la próxima vez que abras el mini reproductor.",
+			"mini_dyn_lyrics_at": {
+				"overlay": "Superpuestas",
+				"side": "Panel lateral"
+			},
+			"mini_dyn_reset": "Restablecer tamaño y posición",
+			"mini_dyn_reset_hint": "Devuelve el mini reproductor dinámico a su tamaño y esquina por defecto.",
 			"ambient_light": "Modo ambiente",
 			"ambient_light_hint": "La vista del reproductor alrededor de un video musical brilla con los colores del video.",
 			"ambient_light_gpu_title": "Requiere una tarjeta gráfica adecuada",

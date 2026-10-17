@@ -1,12 +1,14 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
 	import type { ArtistRun } from '$lib/api';
+	import type { MarqueeMode } from '$lib/marquee';
 	import Marquee from './Marquee.svelte';
 
 	let {
 		runs,
 		text,
 		marquee = false,
+		marqueeMode = 'auto',
 		class: cls = ''
 	}: {
 		/** Per-run artist links; when empty the line renders as plain `text`. */
@@ -15,6 +17,8 @@
 		text: string;
 		/** Scroll the line instead of truncating it, when it doesn't fit (player bar only). */
 		marquee?: boolean;
+		/** When that scroll moves (see marquee.ts). */
+		marqueeMode?: MarqueeMode;
 		class?: string;
 	} = $props();
 
@@ -45,7 +49,7 @@
 
 {#if marquee}
 	<!-- Its own Marquee, so a long title scrolling above doesn't drag a short artist line with it. -->
-	<Marquee {text} class="min-w-0 {cls}">{@render line()}</Marquee>
+	<Marquee {text} mode={marqueeMode} class="min-w-0 {cls}">{@render line()}</Marquee>
 {:else}
 	<span class="min-w-0 truncate {cls}">{@render line()}</span>
 {/if}
