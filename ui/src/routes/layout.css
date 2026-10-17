@@ -1135,22 +1135,30 @@ html.art-tint.theme-amoled {
 	transform: rotate(6deg) translateY(-0.375rem);
 }
 
-/* A track title too wide for the player scrolls itself instead of stopping at an ellipsis.
+/* A track title too wide for the player can scroll itself instead of stopping at an ellipsis.
    --marquee-dx is one text width plus the gap, measured in Marquee.svelte, which also sets the
    duration to keep the speed constant. One direction, looping: the second copy lands where the
    first started, so translating back to 0 is not a visible jump. */
 @keyframes marquee {
 	to { transform: translateX(calc(var(--marquee-dx) * -1)); }
 }
-/* Three passes, not `infinite`: an overflowing title kept a transform animation running for the
-   whole session, so the compositor never reached an idle frame and every other repaint in the app
-   was re-incurred at refresh rate. Three passes is enough to read a long title; hovering still
-   holds it still, and `{#key text}` in Marquee.svelte restarts it on every track change. */
-.marquee { animation: marquee linear 3; }
-/* Hovering holds it still: the artist line's names are links, and hitting a moving target is not.
-   Triggered from the clipping box, not the scrolling track: the trailing copy is inert, so it is
-   not hit-testable and hovering it would never reach the track itself. */
-.marquee-box:hover .marquee { animation-play-state: paused; }
+/* At rest the track does not move; Marquee.svelte picks the phase (marquee.ts) per mode.
+   `intro` is three passes, not `infinite`: an overflowing title kept a transform animation running
+   for the whole session, so the compositor never reached an idle frame and every other repaint in
+   the app was re-incurred at refresh rate. Three passes is enough to read a long title, and
+   `{#key text}` in Marquee.svelte restarts them on every track change. `looping` is infinite but
+   only exists while the pointer is on the line, so nothing runs forever unattended. Both share the
+   keyframes, so a hover in the middle of the passes carries on from where the line is instead of
+   jumping back; leaving drops the class and the line returns to its start. */
+.marquee.intro { animation: marquee linear 3; }
+.marquee.looping { animation: marquee linear infinite; }
+/* A name under the pointer or the keyboard holds the loop, so the artist you are reaching for
+   does not slide away (as the chip carousel below). Only buttons and links inside the track count:
+   the player bar's title sits inside its album button, not around one, so it keeps moving and is
+   clickable anywhere. */
+.marquee.looping:has(button:hover, a:hover, button:focus-visible, a:focus-visible) {
+	animation-play-state: paused;
+}
 /* The same loop for a track's playlist chips past five (PlaylistChips.svelte, which sets the
    distance, the duration and the 1 s head start). `infinite` is safe here, unlike the title: it
    only runs while the pointer or the focus is on the chips. A chip under the pointer or the

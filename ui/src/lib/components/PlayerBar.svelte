@@ -167,6 +167,7 @@
 				{#snippet title()}
 					<Marquee
 						text={playback.now?.title ?? t('player.not_playing')}
+						mode={appearance.marqueeBar}
 						class="text-sm font-medium"
 					/>
 				{/snippet}
@@ -202,6 +203,7 @@
 				runs={playback.now?.artistRuns}
 				text={playback.now?.artists ?? ''}
 				marquee
+				marqueeMode={appearance.marqueeBar}
 				class="block max-w-full text-xs text-muted-foreground"
 			/>
 			{#if appearance.formatInfoBar === 'artist'}

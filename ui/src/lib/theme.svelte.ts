@@ -17,6 +17,7 @@ import { convertFileSrc } from '@tauri-apps/api/core';
 import { hexToHsv, isLight } from './color';
 import { artworkAccent, toAccent, warmAccent } from './artcolor';
 import { allowFontFile } from './api';
+import { type MarqueeMode, parseMarqueeMode } from './marquee';
 
 export type ThemeId =
 	| 'default'
@@ -124,7 +125,11 @@ export const appearance = $state({
 	/** Where the player bar shows the quality readout (codec, bit depth, sample rate, bitrate). */
 	formatInfoBar: 'volume' as FormatInfoBar,
 	/** Same, for the mini player's full layout. The compact one has no room for it. */
-	formatInfoMini: 'artist' as FormatInfoMini
+	formatInfoMini: 'artist' as FormatInfoMini,
+	/** When a title or artist line too long for the player bar scrolls (marquee.ts). */
+	marqueeBar: 'auto' as MarqueeMode,
+	/** Same, for the mini player. It reads this when it opens, like every setting it has. */
+	marqueeMini: 'auto' as MarqueeMode
 });
 
 export const FORMAT_INFO_BAR = ['volume', 'artist', 'title', 'time', 'off'] as const;
@@ -482,6 +487,8 @@ export function initTheme(): void {
 		}
 		if (FORMAT_INFO_BAR.includes(saved?.formatInfoBar)) appearance.formatInfoBar = saved.formatInfoBar;
 		if (FORMAT_INFO_MINI.includes(saved?.formatInfoMini)) appearance.formatInfoMini = saved.formatInfoMini;
+		appearance.marqueeBar = parseMarqueeMode(saved?.marqueeBar);
+		appearance.marqueeMini = parseMarqueeMode(saved?.marqueeMini);
 	} catch {
 		// unparseable — keep the defaults
 	}
