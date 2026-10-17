@@ -761,6 +761,7 @@
 		"mini_player": "Reproductor mini",
 		"mini_shrink": "Encoger el mini reproductor",
 		"mini_expand": "Expandir el mini reproductor",
+		"mini_reset_size": "Restablecer tamaño",
 		"theater_mode": "Modo teatro",
 		"playing_from": "Reproduciendo desde",
 		"exit_theater": "Salir del modo teatro",

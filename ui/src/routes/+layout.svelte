@@ -44,6 +44,8 @@
 	import ImportPrompt from '$lib/components/ImportPrompt.svelte';
 	import { handleImportDrop, initImport } from '$lib/import.svelte';
 	import MiniPlayer from '$lib/components/MiniPlayer.svelte';
+	import MiniDynamic from '$lib/components/MiniDynamic.svelte';
+	import { miniConfig } from '$lib/minidyn';
 	import NowPlaying from '$lib/components/NowPlaying.svelte';
 	import TheaterMode from '$lib/components/TheaterMode.svelte';
 	import VideoSurface from '$lib/components/VideoSurface.svelte';
@@ -244,7 +246,11 @@
 <!-- The mini player is the whole window when it is the window: no titlebar, no sidebar, no routes,
      and no toasts (a banner would cover most of a 560x180 widget). -->
 {#if isMini}
-	<MiniPlayer />
+	{#if miniConfig().mode === 'dynamic'}
+		<MiniDynamic />
+	{:else}
+		<MiniPlayer />
+	{/if}
 {:else}
 	<!-- The window itself is transparent; this root paints the background and, when not maximized,
 	     rounds the corners (the compositor can't round an undecorated window for us). Theater mode
