@@ -368,9 +368,11 @@ jobs:
           done | sort -u > /tmp/needed.txt
           # `find`, not `ls dirA dirB`: ls exits nonzero if either path is missing, and an Ubuntu
           # AppDir has no usr/lib64 — under pipefail that fails the step for no reason.
-          # gnutls-fallback/ counts as bundled: fix-appdir-tls.sh keeps the gnutls stack there so
-          # the loader only sees it on a host that cannot serve the whole chain itself (defect 6).
+          # gnutls-fallback/ and nettle-fallback/ count as bundled: fix-appdir-tls.sh keeps the
+          # gnutls and nettle stacks there so the loader only sees them on a host that cannot
+          # serve them itself (defect 6).
           find "$APPDIR/usr/lib" "$APPDIR/usr/lib64" "$APPDIR/usr/lib/gnutls-fallback" \
+            "$APPDIR/usr/lib/nettle-fallback" \
             -maxdepth 1 -printf '%f\n' 2>/dev/null | sort -u > /tmp/have.txt || true
           MISSING=""
           while read -r lib; do
@@ -406,13 +408,11 @@ jobs:
           # $APPDIR (absolute, may contain a space) comes from the build step.
           CHECK="$PWD/scripts/appdir-foreign-check.sh"
           IMAGES="debian:sid archlinux:latest opensuse/tumbleweed"
-          # Known failure, reported instead of blocking: since 2026-10 Tumbleweed no longer serves
-          # the libgnutls/libnettle/libhogweed sonames fix-appdir-tls.sh's 2a asks for, so the
-          # AppImage takes the bundled gnutls fallback, whose compiled-in trust path openSUSE does
-          # not have, and the probe counts 0 anchors (#164 again). Every release since #164 behaves
-          # the same there; the fix belongs in fix-appdir-tls.sh. Drop the image from this list
-          # once that lands.
-          ADVISORY="opensuse/tumbleweed"
+          # Images whose failure is reported as a warning instead of failing the release. Empty on
+          # purpose: Tumbleweed sat here while its nettle 4 move sent the AppImage to our gnutls
+          # (0 trust anchors, v1.4.0-forge.1), until fix-appdir-tls.sh split nettle-fallback/ off.
+          # Only park an image here with a linked issue, and take it out with the fix.
+          ADVISORY=""
 
           pids=""
           for image in $IMAGES; do
