@@ -25,6 +25,7 @@ mod lyrics;
 mod media;
 mod migrate_upstream;
 mod mini;
+mod mini_aspect;
 #[cfg(target_os = "linux")]
 mod nativevideo;
 #[cfg(windows)]

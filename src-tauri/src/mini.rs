@@ -12,16 +12,43 @@
 //! would be cheaper, but it throws away everything the app has rendered on every toggle. Revisit
 //! only if idle memory in mini mode ever matters more than an instant restore.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use tauri::{
     AppHandle, Manager, PhysicalPosition, PhysicalSize, WebviewUrl, WebviewWindow,
     WebviewWindowBuilder,
 };
 
+use crate::mini_aspect;
 use crate::state::AppState;
 
 pub const LABEL: &str = "mini";
+
+/// Which widget `mini_mode` asks for: the classic pill, or the dynamic 16:9 one that resizes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Mode {
+    Classic,
+    Dynamic,
+}
+
+/// What `mini_mode` accepts (`commands::setting_rule`), in [`Mode`]'s order.
+pub const MODE_VALUES: [&str; 2] = ["classic", "dynamic"];
+const MODE_KEY: &str = "mini_mode";
+
+impl Mode {
+    /// Anything but `dynamic`, a missing key included, is the classic widget users already have.
+    fn parse(value: Option<&str>) -> Self {
+        if value == Some(MODE_VALUES[1]) {
+            Mode::Dynamic
+        } else {
+            Mode::Classic
+        }
+    }
+}
+
+/// The mode of the widget that is up, fixed when it was built. The setting can change under an
+/// open widget; this is what the window on screen actually is.
+static MODE: Mutex<Mode> = Mutex::new(Mode::Classic);
 
 /// Logical sizes of the widget, full and compact (#301). Not user-resizable: it's a pill, not a
 /// window you arrange, and its own shrink/expand button is the only way between the two.
@@ -44,12 +71,38 @@ pub fn open(app: &AppHandle) -> Result<(), String> {
         let _ = w.show();
         let _ = w.set_focus();
     } else {
-        let (w, h) = size(app);
+        let mode = Mode::parse(
+            app.try_state::<Arc<AppState>>().and_then(|s| s.db.get_setting(MODE_KEY)).as_deref(),
+        );
+        // The dynamic widget may grow to 60 % of the display; unbounded if there is none to ask.
+        let max_w = display_width(app).map(mini_aspect::max_width);
+        let (w, h) = match mode {
+            Mode::Classic => size(app),
+            Mode::Dynamic => {
+                (mini_aspect::DEFAULT_WIDTH, mini_aspect::height_for(mini_aspect::DEFAULT_WIDTH))
+            }
+        };
         let builder = WebviewWindowBuilder::new(app, LABEL, WebviewUrl::App("index.html".into()));
         // Portable: the same profile as the main window, inside `data` (paths.rs).
         let builder = match crate::paths::webview_dir() {
             Some(dir) => builder.data_directory(dir),
             None => builder,
+        };
+        let builder = match mode {
+            Mode::Classic => builder.resizable(false),
+            // Resizable, but never maximised: without `maximizable(false)` a double click on the
+            // drag region maximises it. The limits are 16:9 too, so a clamp keeps the ratio.
+            Mode::Dynamic => {
+                let min = mini_aspect::MIN_WIDTH;
+                let builder = builder
+                    .resizable(true)
+                    .maximizable(false)
+                    .min_inner_size(min, mini_aspect::height_for(min));
+                match max_w {
+                    Some(max) => builder.max_inner_size(max, mini_aspect::height_for(max)),
+                    None => builder,
+                }
+            }
         };
         let win = builder
             // Distinct from the main window's "LiMusic Forge" so compositor window rules (niri,
@@ -58,7 +111,6 @@ pub fn open(app: &AppHandle) -> Result<(), String> {
             // a language switch. The app_id can't differ instead, GTK sets that once per process.
             .title("LiMusic Forge Mini Player")
             .inner_size(w, h)
-            .resizable(false)
             .decorations(false)
             .transparent(true)
             .always_on_top(true)
@@ -79,6 +131,11 @@ pub fn open(app: &AppHandle) -> Result<(), String> {
             use gtk::prelude::WidgetExt;
             wv.inner().set_size_request(1, 1);
         });
+        if mode == Mode::Dynamic {
+            mini_aspect::set_limits(mini_aspect::MIN_WIDTH, max_w.unwrap_or(f64::MAX));
+            mini_aspect::attach(&win);
+        }
+        *MODE.lock().unwrap_or_else(|e| e.into_inner()) = mode;
         if let Some(p) = placement(app, &win, (w, h)) {
             let _ = win.set_position(p);
         }
@@ -142,6 +199,15 @@ fn size(app: &AppHandle) -> (f64, f64) {
     } else {
         FULL
     }
+}
+
+/// Logical width of the display the main window is on, which is where [`bottom_right`] puts the
+/// widget.
+fn display_width(app: &AppHandle) -> Option<f64> {
+    let main = app.get_webview_window("main")?;
+    let m =
+        main.current_monitor().ok().flatten().or_else(|| main.primary_monitor().ok().flatten())?;
+    Some(m.size().width as f64 / m.scale_factor())
 }
 
 /// Top-left for a widget going from `old` to `new` size, so it stays against the screen edges it
@@ -254,8 +320,17 @@ fn contains(
 
 #[cfg(test)]
 mod tests {
-    use super::{anchored, contains, parse_pos};
+    use super::{anchored, contains, parse_pos, Mode};
     use tauri::{PhysicalPosition, PhysicalSize};
+
+    #[test]
+    fn mode_is_classic_unless_it_says_dynamic() {
+        assert_eq!(Mode::parse(Some("dynamic")), Mode::Dynamic);
+        assert_eq!(Mode::parse(Some("classic")), Mode::Classic);
+        for junk in [None, Some(""), Some("Dynamic"), Some("compact")] {
+            assert_eq!(Mode::parse(junk), Mode::Classic, "{junk:?}");
+        }
+    }
 
     #[test]
     fn parses_what_close_wrote() {
