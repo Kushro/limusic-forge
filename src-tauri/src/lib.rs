@@ -1059,6 +1059,8 @@ pub fn run() {
             commands::open_mini,
             commands::close_mini,
             commands::set_mini_compact,
+            commands::reset_mini_dynamic,
+            commands::reset_mini_size,
             commands::show_main,
             commands::take_launch_args,
             commands::get_home,

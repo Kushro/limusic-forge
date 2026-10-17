@@ -47,6 +47,24 @@ pub fn set_limits(min_width: f64, max_width: f64) {
     MAX_W.store(max_width.max(min_width).to_bits(), Ordering::Relaxed);
 }
 
+/// The logical maximum width [`set_limits`] last set.
+pub fn max_limit() -> f64 {
+    f64::from_bits(MAX_W.load(Ordering::Relaxed))
+}
+
+/// Re-read the scale the widget is at from the display it is on now. The Win32 subclass learns of
+/// a new DPI from `WM_DPICHANGED`, which a window placed while hidden may never get, so mini.rs
+/// calls this once the widget is placed and whenever it moves. A no-op elsewhere: the other
+/// platforms ask the window for its scale on every correction.
+pub fn refresh_scale(win: &WebviewWindow) {
+    #[cfg(windows)]
+    if let Ok(Some(m)) = win.current_monitor() {
+        win32::set_scale(m.scale_factor());
+    }
+    #[cfg(not(windows))]
+    let _ = win;
+}
+
 /// The limits in physical pixels at `scale`: the minimum rounded up and the maximum down, so the
 /// result never falls outside the window's own `min_inner_size`/`max_inner_size`.
 fn physical_limits(scale: f64) -> (i32, i32) {
@@ -177,9 +195,9 @@ fn after_resize(win: &WebviewWindow) {
 }
 
 /// Ask the window manager for the aspect itself. GTK takes logical pixels, and the hints replace
-/// the ones tao set, so the size limits go in again with it.
+/// the ones tao set, so the size limits go in again with it. Again after every [`set_limits`].
 #[cfg(target_os = "linux")]
-fn gtk_hints(win: &WebviewWindow) {
+pub fn gtk_hints(win: &WebviewWindow) {
     use gtk::gdk::{Geometry, Gravity, WindowHints};
     use gtk::prelude::GtkWindowExt;
 
@@ -226,12 +244,18 @@ mod win32 {
 
     const SUBCLASS_ID: usize = 0x16_09_a5_9e;
     /// The widget's DPI, kept current from `WM_DPICHANGED` so the limits convert at the scale
-    /// the window is on now, before tao resizes it for the new display.
+    /// the window is on now, before tao resizes it for the new display, and from
+    /// [`super::refresh_scale`] for the moves that never send it. Cached rather than asked for per
+    /// message: `GetDpiForWindow` needs a `windows` feature the app doesn't enable.
     static DPI: AtomicU32 = AtomicU32::new(96);
+
+    pub fn set_scale(scale: f64) {
+        DPI.store((scale * 96.0).round() as u32, Ordering::Relaxed);
+    }
 
     /// Install the subclass. `false` if Windows refused it.
     pub fn attach(hwnd: HWND, scale: f64) -> bool {
-        DPI.store((scale * 96.0).round() as u32, Ordering::Relaxed);
+        set_scale(scale);
         // Removed again in WM_NCDESTROY: the widget is destroyed on every close.
         unsafe { SetWindowSubclass(hwnd, Some(subclass_proc), SUBCLASS_ID, 0) }.as_bool()
     }

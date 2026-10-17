@@ -339,7 +339,7 @@ fn setting_rule(key: &str) -> Option<SettingRule> {
         "tools.extract_new_mode" => OneOf(&["build", "create_transfer"]),
         "mini_mode" => OneOf(&crate::mini::MODE_VALUES),
         "mini_dyn_progress" => Bool,
-        "mini_dyn_lyrics" => OneOf(&["overlay", "side"]),
+        "mini_dyn_lyrics" => OneOf(&crate::mini::LYRICS_VALUES),
         _ => return None,
     })
 }
@@ -890,6 +890,20 @@ pub async fn close_mini(app: tauri::AppHandle) -> Result<(), String> {
 #[tauri::command]
 pub async fn set_mini_compact(app: tauri::AppHandle, compact: bool) -> Result<(), String> {
     crate::mini::set_compact(&app, compact)
+}
+
+/// Settings' reset for the dynamic widget: it next opens at the default size, bottom-right. The
+/// classic widget's size and spot are left alone.
+#[tauri::command]
+pub async fn reset_mini_dynamic(state: St<'_>) -> Result<(), String> {
+    crate::mini::reset_dynamic(&state.db);
+    Ok(())
+}
+
+/// The dynamic widget's own reset button: back to the default size right away.
+#[tauri::command]
+pub async fn reset_mini_size(app: tauri::AppHandle) -> Result<(), String> {
+    crate::mini::reset_size(&app)
 }
 
 /// The arguments this process was launched with, handed over once (#348). See `LAUNCH_ARGS`.
