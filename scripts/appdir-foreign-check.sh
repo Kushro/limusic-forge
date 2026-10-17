@@ -64,7 +64,7 @@ elif command -v zypper >/dev/null; then
     xvfb-run xauth dbus-1-daemon python3 \
     Mesa-libEGL1 Mesa-libGL1 Mesa-libGLESv2-2 libglvnd harfbuzz-tools libharfbuzz0 krb5 \
     libpango-1_0-0 alsa-lib libfribidi0 libusb-1_0-0 libcom_err2 libgpg-error0 libexpat1 \
-    fontconfig dejavu-fonts ca-certificates gvfs libgnutls30
+    fontconfig dejavu-fonts ca-certificates gvfs libgnutls30 gawk
 else
   echo "   unknown package manager"; exit 1
 fi
@@ -80,7 +80,7 @@ done
 
 # The library path the app actually runs with. AppRun.wrapped prepends the AppDir's own lib dirs
 # and keeps whatever the GTK hook exported after them, and since #164 that hook adds the gnutls
-# fallback directory on a host that cannot serve libgnutls/libnettle/libhogweed itself. Computed in
+# and/or nettle fallback directories on a host that cannot serve them itself. Computed in
 # a subshell so the hook's other exports (XDG_DATA_DIRS, GST_*) do not leak into the probes below,
 # which run their own copies deliberately.
 APPDIR_LD="$(set +u

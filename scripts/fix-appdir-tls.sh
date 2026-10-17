@@ -58,7 +58,8 @@
 #      no sign-in, no thumbnails, no music video (issue #164). Rust is unaffected, it carries
 #      rustls, so the app looks alive. Fixed by moving the gnutls stack off the library path so the
 #      host's own copy, which knows where the host's trust store is, is what loads. Conditionally:
-#      see 1e, Arch cannot serve the chain and keeps ours.
+#      see 1e and 2a. A nettle 4 host (Arch, Tumbleweed) keeps its own gnutls and borrows only our
+#      nettle 8; a host with no gnutls at all gets ours.
 #
 # ON PRUNING. v0.2.11 pruned eight libraries and broke worse than what it fixed, so the bar is high,
 # but "never prune" is the wrong rule — defect 3 above is only fixable by pruning. What made v0.2.11
@@ -273,21 +274,38 @@ fi
 #     Arch 164 -> 119 (ours, via 2a), Ubuntu 121 -> 121. On openSUSE a real glib-networking
 #     handshake to music.youtube.com went from "Unacceptable TLS certificate", the string in #164,
 #     to OK. appdir-foreign-check.sh counts those anchors on every build now.
-GNUTLS_STACK="libgnutls.so.30 libnettle.so.8 libhogweed.so.6 libgmp.so.10 libtasn1.so.6
+#
+#     nettle and hogweed get a directory of their own, nettle-fallback/. On a nettle 4 host
+#     (libnettle.so.9: Arch, and openSUSE Tumbleweed since 2026-10) the host's gnutls is built
+#     against .so.9, so it never asks for our .so.8 and the two copies can share the process:
+#     nettle versions its symbols (@NETTLE_8, @HOGWEED_6), so neither resolves against the other.
+#     That host gets its own gnutls, and its own trust store, plus our nettle for libarchive and
+#     libsrt. Sharing one directory forced it onto our whole chain, and on Tumbleweed that meant
+#     Ubuntu's compiled-in /etc/ssl/certs path again: 0 anchors, #164 back in v1.4.0-forge.1.
+GNUTLS_STACK="libgnutls.so.30 libgmp.so.10 libtasn1.so.6
               libp11-kit.so.0 libidn2.so.0 libunistring.so.5"
+NETTLE_STACK="libnettle.so.8 libhogweed.so.6"
 FALLBACK="$APPDIR/usr/lib/gnutls-fallback"
-mkdir -p "$FALLBACK"
-for soname in $GNUTLS_STACK; do
-  for lib in "$APPDIR"/usr/lib/"$soname"* "$APPDIR"/usr/lib64/"$soname"*; do
-    [ -e "$lib" ] || continue
-    mv -f "$lib" "$FALLBACK/$(basename "$lib")"
-    echo "==> moved $(basename "$lib") into gnutls-fallback/"
+NETTLE_FALLBACK="$APPDIR/usr/lib/nettle-fallback"
+mkdir -p "$FALLBACK" "$NETTLE_FALLBACK"
+move_stack() { # $1 = sonames, $2 = destination directory
+  local soname lib
+  for soname in $1; do
+    for lib in "$APPDIR"/usr/lib/"$soname"* "$APPDIR"/usr/lib64/"$soname"*; do
+      [ -e "$lib" ] || continue
+      mv -f "$lib" "$2/$(basename "$lib")"
+      echo "==> moved $(basename "$lib") into $(basename "$2")/"
+    done
   done
-done
+}
+move_stack "$GNUTLS_STACK" "$FALLBACK"
+move_stack "$NETTLE_STACK" "$NETTLE_FALLBACK"
 # p11-kit's module directory goes with it: nothing can load those without libp11-kit.so.0 anyway.
 rm -rf "$APPDIR/usr/lib/pkcs11" "$APPDIR/usr/lib64/pkcs11"
 [ -e "$FALLBACK/libgnutls.so.30" ] || {
   echo "no libgnutls.so.30 in the AppDir at all — did linuxdeploy stop bundling it?"; exit 1; }
+[ -e "$NETTLE_FALLBACK/libnettle.so.8" ] || {
+  echo "no libnettle.so.8 in the AppDir at all — did linuxdeploy stop bundling it?"; exit 1; }
 
 # 2. Point GIO_EXTRA_MODULES at the AppDir's own module directories — never the host's, see the
 #    header. Appended rather than edited in place: AppRun *sources* the hook, so the last assignment
@@ -338,23 +356,30 @@ grep -q 'gnutls-fallback' "$HOOK" || cat >> "$HOOK" <<'EOF'
 # bundle anywhere else (openSUSE) ours leaves the webview trusting nothing. The host's own gnutls
 # knows where the host's trust store is.
 #
-# That only works when the host can serve the whole chain, because a soname is loaded once per
-# process: the host's gnutls resolves libnettle.so.8 to ours if ours is on the path, and 3.8.10+
-# wants a symbol our nettle 3.9 does not have. So it is all of the host's or all of ours. Arch is
-# the "all of ours" case — nettle 4.0 there is libnettle.so.9, which cannot serve the bundled
-# libarchive and libsrt, so we put our own copies back and accept the compiled-in trust path, which
-# is the file Arch actually has. Whatever this picks, the check in scripts/appdir-foreign-check.sh
-# counts the trust anchors that come out of it.
-_gnutls_host=1
-for _so in libgnutls.so.30 libnettle.so.8 libhogweed.so.6; do
-  _found=""
+# A soname is loaded once per process, so whose nettle loads decides whose gnutls can work: the
+# host's gnutls resolves libnettle.so.8 to ours if ours is on the path, and 3.8.10+ wants a symbol
+# our nettle 3.9 does not have. Three cases, by what the host has:
+#   - gnutls and nettle 8 (Debian, Ubuntu, older Fedora): all of the host's, nothing of ours.
+#   - gnutls but no nettle 8 (nettle 4 is libnettle.so.9: Arch, openSUSE Tumbleweed): the host's
+#     gnutls, which never asks for .so.8, plus our nettle 8 for the bundled libarchive and libsrt.
+#     nettle versions its symbols, so .so.8 and .so.9 cannot resolve against each other.
+#   - no gnutls at all: all of ours, accepting the compiled-in trust path.
+# Whatever this picks, scripts/appdir-foreign-check.sh counts the trust anchors that come out of it.
+_lim_host_has() {
   for _d in /usr/lib/x86_64-linux-gnu /usr/lib64 /usr/lib /lib64 /lib/x86_64-linux-gnu; do
-    [ -e "$_d/$_so" ] && { _found=1; break; }
+    [ -e "$_d/$1" ] && return 0
   done
-  [ -n "$_found" ] || _gnutls_host=""
-done
-[ -n "$_gnutls_host" ] || export LD_LIBRARY_PATH="$APPDIR/usr/lib/gnutls-fallback${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-unset _gnutls_host _so _found _d
+  return 1
+}
+_lim_fb=""
+if ! _lim_host_has libgnutls.so.30; then
+  _lim_fb="$APPDIR/usr/lib/gnutls-fallback:$APPDIR/usr/lib/nettle-fallback"
+elif ! _lim_host_has libnettle.so.8 || ! _lim_host_has libhogweed.so.6; then
+  _lim_fb="$APPDIR/usr/lib/nettle-fallback"
+fi
+[ -z "$_lim_fb" ] || export LD_LIBRARY_PATH="$_lim_fb${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+unset -f _lim_host_has
+unset _lim_fb _d
 EOF
 
 # 2b. Point GStreamer at the bundled plugins. Same shape as GIO_MODULE_DIR above and for the same
