@@ -537,9 +537,9 @@ fn webview2_missing() -> ! {
 
 /// Build the main window from its `tauri.conf.json` entry, which is `"create": false` so that this
 /// happens here: in portable mode the webview profile has to point into `data` before the window
-/// exists, or Tauri creates `%LOCALAPPDATA%\<identifier>` for it. Installed builds get the exact
-/// config they always had. macOS still creates it from `tauri.macos.conf.json` (its window array
-/// replaces this one, `create` included), so an existing window is left alone.
+/// exists, or Tauri creates `%LOCALAPPDATA%\<identifier>` for it, and WebView2 only takes a proxy at
+/// creation, which isn't known until the database is open (#465). Installed builds get the exact
+/// config they always had. A window Tauri already created is left alone.
 fn create_main_window(app: &tauri::App, data_dir: &std::path::Path) -> Result<(), String> {
     if app.get_webview_window("main").is_some() {
         return Ok(());
@@ -557,7 +557,8 @@ fn create_main_window(app: &tauri::App, data_dir: &std::path::Path) -> Result<()
     if let Some(dir) = paths::webview_dir() {
         builder = builder.data_directory(dir);
     }
-    let win = builder.build().map_err(|e| e.to_string())?;
+    let win = http::proxied(builder).build().map_err(|e| e.to_string())?;
+    keep_on_screen(&win);
     if paths::is_portable() {
         winstate::attach(&win, data_dir);
     }
@@ -811,9 +812,6 @@ pub fn run() {
                     "upstream LiMusic migration"
                 );
             }
-            if let Err(e) = create_main_window(app, &data_dir) {
-                fatal("LiMusic Forge could not open its window", &e);
-            }
             let cache_dir = data_dir.join("audio-cache");
             std::fs::create_dir_all(&cache_dir).ok();
 
@@ -873,13 +871,9 @@ pub fn run() {
                 });
             // Before the first fetch: the shared client builds itself on first use.
             http::set_proxy(proxy.as_deref());
-            // Built here instead of from the config (`create: false`), because WebView2 only takes
-            // a proxy at creation and it isn't known until the database is open (#465).
-            if let Some(config) = app.config().app.windows.first() {
-                let w =
-                    http::proxied(tauri::WebviewWindowBuilder::from_config(&handle, config)?)
-                        .build()?;
-                keep_on_screen(&w);
+            // The one place the main window is built (`create: false`): after the proxy is known.
+            if let Err(e) = create_main_window(app, &data_dir) {
+                fatal("LiMusic Forge could not open its window", &e);
             }
             let cookie = db.get_setting("session_cookie").filter(|s| !s.is_empty());
             let data_sync_id = state::persisted_data_sync_id(&db);
