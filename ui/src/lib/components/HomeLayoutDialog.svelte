@@ -27,15 +27,14 @@
 	import { personal, resetHome, saveHome } from '$lib/player.svelte';
 	import { CARD_SIZES, hiddenSections, homeIsDefault, type CardSize } from '$lib/personal';
 	import { t, type TranslationKey } from '$lib/i18n.svelte';
+	import { onWindowChrome } from '$lib/utils';
 
 	let {
 		open = $bindable(false),
 		sections
 	}: { open: boolean; sections: { key: string; title: string }[] } = $props();
 
-	// `fresh`: YouTube started sending it after the last arrangement. Worked out once per opening, so
-	// the badge stays on for the whole visit even though the first edit ranks every row.
-	type Row = { key: string; title: string; shown: boolean; fresh: boolean };
+	type Row = { key: string; title: string; shown: boolean };
 	let rows = $state<Row[]>([]);
 	// Index of the row being dragged. It follows the row as the list rearranges under it, so the
 	// pointer keeps hold of the same section rather than of whatever slid into that slot.
@@ -68,18 +67,12 @@
 	};
 
 	/**
-	 * Snapshotted from `sections`, not derived: the feed keeps appending shelves as the page behind
-	 * loads, and a list that grows mid-drag reshuffles under the cursor.
+	 * Snapshotted from `sections`, not derived: a rebuild in the middle of a drag would reshuffle the
+	 * list under the cursor.
 	 */
 	function build() {
 		const hidden = hiddenSections(personal);
-		const ranked = new Set(personal.home.order);
-		rows = sections.map((s) => ({
-			key: s.key,
-			title: s.title,
-			shown: !hidden.has(s.key),
-			fresh: ranked.size > 0 && !ranked.has(s.key)
-		}));
+		rows = sections.map((s) => ({ key: s.key, title: s.title, shown: !hidden.has(s.key) }));
 		dragging = null;
 	}
 
@@ -89,7 +82,7 @@
 		if (open) untrack(build);
 	});
 
-	/** The list as it stands. Every row goes into `order`, so nothing listed is new after this. */
+	/** The list as it stands. */
 	const arrangement = () => ({
 		order: rows.map((r) => r.key),
 		hidden: rows.filter((r) => !r.shown).map((r) => r.key)
@@ -138,16 +131,6 @@
 		commit();
 	}
 
-	/**
-	 * Off ranks every section listed, so the ones on the page now stay put and only what YouTube
-	 * sends after this is held back. On writes only the flag: whatever the policy was holding back is
-	 * still unranked, so it shows again by itself, and the rebuild turns its switch back on.
-	 */
-	function setShowNew(on: boolean) {
-		saveHome(on ? { hideNew: false } : { hideNew: true, ...arrangement() });
-		if (on) build();
-	}
-
 	function reset() {
 		resetHome();
 		// `sections` re-derives from the reset arrangement on read, so this lays out YouTube's order.
@@ -175,6 +158,7 @@
 		<!-- Floats clear of the titlebar and the window's rounded corner: flush to the edge, its square
 		     corner would poke out past the window's round one. -->
 		<DialogPrimitive.Content
+			onInteractOutside={(e) => onWindowChrome(e) && e.preventDefault()}
 			class="fixed bottom-3 right-3 top-12 z-50 flex w-[25rem] max-w-[calc(100%-1.5rem)] flex-col overflow-hidden rounded-2xl border bg-popover text-popover-foreground shadow-2xl outline-none duration-200 data-open:animate-in data-open:fade-in-0 data-open:slide-in-from-right-8 data-closed:animate-out data-closed:fade-out-0 data-closed:slide-out-to-right-8"
 		>
 			<div class="flex items-start gap-3 border-b px-5 py-4">
@@ -200,8 +184,8 @@
 				</Button>
 			</div>
 
-			<!-- dragScroll: the section list is taller than the panel once home has remembered a dozen
-			     shelves, and without an edge pull you can only drop one somewhere already on screen. -->
+			<!-- dragScroll: the section list is taller than the panel, and without an edge pull you can
+			     only drop one somewhere already on screen. -->
 			<div
 				class="min-h-0 flex-1 overflow-y-auto px-5 py-5"
 				{@attach (node) => dragScroll(node, SECTION_ROW_MIME)}
@@ -336,13 +320,6 @@
 							>
 								{row.title}
 							</span>
-							{#if row.fresh}
-								<span
-									class="shrink-0 rounded-full bg-primary/12 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-primary"
-								>
-									{t('home.new_section')}
-								</span>
-							{/if}
 							<Switch
 								size="sm"
 								checked={row.shown}
@@ -353,10 +330,6 @@
 					{/each}
 				</div>
 				<p class="mt-2 px-1 text-xs leading-relaxed text-muted-foreground">{t('home.sections_hint')}</p>
-
-				<div class="mt-4 overflow-hidden rounded-xl border bg-card">
-					{@render toggleRow(t('home.show_new'), t('home.show_new_desc'), !personal.home.hideNew, setShowNew)}
-				</div>
 			</div>
 
 			<div class="flex items-center gap-2 border-t px-5 py-3">

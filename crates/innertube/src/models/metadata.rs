@@ -42,13 +42,19 @@ pub struct SongItem {
     /// edit_playlist). Only present when the item came from a playlist page.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub set_video_id: Option<String>,
-    /// Who put this track in the playlist, on a collaborative one: the contributor's name and
-    /// avatar off the row's `contributorsAvatars`. `None` everywhere else, since an ordinary
+    /// Who put this track in the playlist, on a collaborative one: their names and one avatar per
+    /// person off the row's `contributorsAvatars`. Usually one, several on a Taste Match row that
+    /// more than one member's taste picked (#102). Empty everywhere else, since an ordinary
     /// playlist has one contributor and YouTube doesn't send the stack.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub added_by: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub added_by_avatars: Vec<String>,
+    /// When the track went into the playlist, unix seconds ([`added_at`] on a YouTube playlist
+    /// row; the app stamps its own for a playlist kept on this machine). Shed with the rest of
+    /// the playlist context once the track leaves the page (`shed_queue_context`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub added_by_avatar: Option<String>,
+    pub added_at: Option<i64>,
     /// The signed-in user's rating of this track, from the row's `likeStatus`. `None` when the
     /// response didn't carry one, which the UI treats the same as [`Rating::Indifferent`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -79,6 +85,26 @@ pub struct SongItem {
     /// "hide music videos" setting; computed once here, never re-derived downstream.
     #[serde(default)]
     pub is_video: bool,
+    /// A podcast episode, not a song: the player swaps shuffle for a speed control and adds the
+    /// 15-second skips (#500). Set by the episode rows and by `/player`'s `musicVideoType`.
+    #[serde(default)]
+    pub is_episode: bool,
+    /// The same song's other version: the music video for an audio track, or the audio track for
+    /// a video. What the player's Song/Video switch swaps to (#442). Known only where YouTube
+    /// pairs them: an album row we swapped to its audio id, and the wrapper rows of a signed-in
+    /// `/next`, which YouTube sends to some accounts and not others (#520).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub counterpart: Option<String>,
+    /// The `counterpart`'s own art, traded with `thumbnail` on a switch so the player shows the
+    /// cover of the version playing, not the video frame it started on (#520).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub counterpart_thumbnail: Option<String>,
+    /// The stretches this version shares with the `counterpart`, off the wrapper's `segmentMap`,
+    /// in order. A video's intro, outro and any break in the middle fall between them, so the
+    /// switch lands on the same moment of the other version (#520, #535). Empty when YouTube sent
+    /// none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub counterpart_segments: Vec<Segment>,
     /// One of the signed-in user's own uploads ([`is_upload_row`]). Only an authenticated client
     /// can stream these, so the orchestrator swaps in a login-only fallback chain. Issue #71.
     #[serde(default)]
@@ -97,6 +123,15 @@ pub struct SongItem {
     /// files, On Repeat), where there is nothing to send.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub library: Option<LibraryToggle>,
+}
+
+/// One stretch of a song that plays in both versions: `start_ms` into this one, `twin_start_ms`
+/// into its counterpart, running `duration_ms` in both. A `segmentMap` entry (#535).
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Segment {
+    pub start_ms: i64,
+    pub twin_start_ms: i64,
+    pub duration_ms: i64,
 }
 
 /// A track's library membership as its menu states it, with the tokens for both directions.
@@ -139,6 +174,9 @@ pub(crate) const AUDIO_TRACK_TYPE: &str = "MUSIC_VIDEO_TYPE_ATV";
 /// video mode on a track that has no video at all. Issue #71.
 pub(crate) const UPLOADED_TRACK_TYPE: &str = "MUSIC_VIDEO_TYPE_PRIVATELY_OWNED_TRACK";
 
+/// A podcast episode. Still a "video" to [`is_video_type`]: a video podcast has a picture.
+pub(crate) const PODCAST_EPISODE_TYPE: &str = "MUSIC_VIDEO_TYPE_PODCAST_EPISODE";
+
 /// True for a `musicVideoType` that means "a music video", i.e. neither of the two audio kinds.
 pub(crate) fn is_video_type(t: &str) -> bool {
     t != AUDIO_TRACK_TYPE && t != UPLOADED_TRACK_TYPE
@@ -178,6 +216,11 @@ pub(crate) fn is_video_row(node: &Value) -> bool {
 /// True when a renderer row links one of the user's own uploads. Same lookup as [`is_video_row`].
 pub(crate) fn is_upload_row(node: &Value) -> bool {
     row_video_type(node) == Some(UPLOADED_TRACK_TYPE)
+}
+
+/// True when a renderer row links a podcast episode (#500), as a search result does. Same lookup.
+pub(crate) fn is_episode_row(node: &Value) -> bool {
+    row_video_type(node) == Some(PODCAST_EPISODE_TYPE)
 }
 
 /// The `musicVideoType` a row claims, from the overlay play button when it carries one.
@@ -290,8 +333,11 @@ pub fn parse_next(root: &Value) -> NextResult {
     let mut items = Vec::new();
     let mut rows = Vec::new();
     panel_rows(root, &mut rows);
-    for node in rows {
-        if let Some(item) = parse_panel_video(node) {
+    for (node, counterpart) in rows {
+        if let Some(mut item) = parse_panel_video(node) {
+            if let Some(c) = counterpart {
+                set_twin(&mut item, c);
+            }
             items.push(item);
         }
     }
@@ -316,22 +362,61 @@ pub fn parse_next(root: &Value) -> NextResult {
 /// `playlistPanelVideoWrapperRenderer`. A signed-in radio wraps each track's audio row together
 /// with its music-video twin (what YouTube's own Song/Video toggle switches between), so a plain
 /// [`find_all`] takes both and the queue gets every song twice. Issue #170.
-fn panel_rows<'a>(node: &'a Value, out: &mut Vec<&'a Value>) {
+///
+/// The twin's `counterpart` arm rides along with its primary row instead, for our own Song/Video
+/// switch (#442).
+fn panel_rows<'a>(node: &'a Value, out: &mut Vec<(&'a Value, Option<&'a Value>)>) {
     match node {
         Value::Object(map) => {
+            let start = out.len();
             for (k, v) in map {
                 if k == "counterpart" {
                     continue;
                 }
                 if k == "playlistPanelVideoRenderer" {
-                    out.push(v);
+                    out.push((v, None));
                 }
                 panel_rows(v, out);
+            }
+            if let Some(twin) = map.get("counterpart") {
+                // A wrapper holds exactly one primary row; anything else is a shape we don't know.
+                if let [(_, slot)] = &mut out[start..] {
+                    *slot = Some(twin);
+                }
             }
         }
         Value::Array(arr) => arr.iter().for_each(|e| panel_rows(e, out)),
         _ => {}
     }
+}
+
+/// Copy a wrapper's `counterpart` arm onto its primary row: the other version's id and art, and
+/// from `segmentMap` the stretches the two share (#520, #535).
+fn set_twin(item: &mut SongItem, counterpart: &Value) {
+    let Some(row) = find_all(counterpart, "playlistPanelVideoRenderer").into_iter().next() else {
+        return;
+    };
+    let Some(id) = row.get("videoId").and_then(Value::as_str) else { return };
+    item.counterpart = Some(id.to_owned());
+    item.counterpart_thumbnail = last_thumbnail(row);
+    let segments = find_all(counterpart, "segmentMap").into_iter().filter_map(|m| m.get("segment"));
+    item.counterpart_segments = segments
+        .filter_map(Value::as_array)
+        .flatten()
+        .filter_map(|seg| {
+            // YouTube sends these as strings; a number is taken too, should that ever change.
+            let ms = |key| {
+                let v = seg.get(key)?;
+                v.as_str().and_then(|s| s.parse().ok()).or_else(|| v.as_i64())
+            };
+            Some(Segment {
+                start_ms: ms("primaryVideoStartTimeMilliseconds")?,
+                twin_start_ms: ms("counterpartVideoStartTimeMilliseconds")?,
+                duration_ms: ms("durationMilliseconds")?,
+            })
+        })
+        .collect();
+    item.counterpart_segments.sort_by_key(|s| s.start_ms);
 }
 
 /// The lyrics tab's browseId from a `next` response: the browseEndpoint whose pageType is
@@ -521,13 +606,19 @@ pub(crate) fn parse_list_item(node: &Value) -> Option<SongItem> {
     // so read it the other way: a duration-shaped, unlinked third column is the length.
     let duration =
         duration.or_else(|| fixed_column_text(node)).or_else(|| flex_column_duration(node));
-    // …and the album in a column of its own rather than in the subtitle runs. An artist page's top
-    // songs put the play count in that column and the album in a fourth one (#377), so past it,
-    // take whichever column links an album page.
-    let album = album.or_else(|| album_column(node)).or_else(|| {
-        (3..flex.map_or(0, Vec::len))
-            .find_map(|i| flex_runs(node, i).and_then(|r| album_from_runs(r)))
-    });
+    // A video row's subtitle has no album field: its middle is the view count
+    // ("Artist • 21M views • 4:51"). Gated on `musicVideoType`, not the text, since a
+    // release can open with a digit ("1989 (Deluxe)").
+    let is_video = is_video_row(node);
+    // The album can also sit in its own column. A linked name goes first (#451, #377);
+    // plain text is only the fallback for playlist and library rows.
+    let album = album
+        .filter(|_| !is_video)
+        .or_else(|| {
+            (3..flex.map_or(0, Vec::len))
+                .find_map(|i| flex_runs(node, i).and_then(|r| album_from_runs(r)))
+        })
+        .or_else(|| album_column(node));
     let artist_id = subtitle_runs.and_then(|r| first_artist_id(r));
     // Only when this row's own menu offers the remove action. Every playlist row carries a
     // playlistSetVideoId, including rows on a playlist you can't edit (live-checked 2026-08-23),
@@ -542,10 +633,7 @@ pub(crate) fn parse_list_item(node: &Value) -> Option<SongItem> {
                 .map(str::to_owned)
         })
         .flatten();
-    let (added_by, added_by_avatar) = match contributor(node) {
-        Some((name, avatar)) => (Some(name), Some(avatar)),
-        None => (None, None),
-    };
+    let (added_by, added_by_avatars) = contributors(node);
     Some(SongItem {
         video_id,
         title,
@@ -559,15 +647,20 @@ pub(crate) fn parse_list_item(node: &Value) -> Option<SongItem> {
         thumbnail: last_thumbnail(node),
         set_video_id,
         added_by,
-        added_by_avatar,
+        added_by_avatars,
+        added_at: added_at(node),
         rating: like_status(node),
         queued_by: None,
         queued: false,
         queued_end: false,
         queued_from: None,
         autoplay: false,
-        is_video: is_video_row(node),
+        is_video,
+        counterpart: None,
+        counterpart_thumbnail: None,
+        counterpart_segments: Vec::new(),
         is_upload: is_upload_row(node),
+        is_episode: is_episode_row(node),
         explicit: is_explicit(node),
         unavailable: is_greyed_out(node),
         library: library_toggle(node),
@@ -579,6 +672,17 @@ pub(crate) fn parse_list_item(node: &Value) -> Option<SongItem> {
 pub(crate) fn is_greyed_out(node: &Value) -> bool {
     node.get("musicItemRendererDisplayPolicy").and_then(Value::as_str)
         == Some("MUSIC_ITEM_RENDERER_DISPLAY_POLICY_GREY_OUT")
+}
+
+/// When a playlist row went into its playlist: `playlistItemData.voteSortValue`, unix seconds.
+/// The name is YouTube's, and on an ordinary playlist the value is the add time: live-checked
+/// 2026-10-18 on an owned playlist (`tests/fixtures/playlist_rows_added.json`), it fell in step with
+/// the "Newest" sort, a bulk add of 38 tracks shared one second, and the one track added later
+/// carried that day. Anything that can't be a date (before 2005, after 2100) is dropped.
+fn added_at(node: &Value) -> Option<i64> {
+    node.pointer("/playlistItemData/voteSortValue")
+        .and_then(Value::as_i64)
+        .filter(|t| (1_104_537_600..4_102_444_800).contains(t))
 }
 
 /// A podcast episode row (`musicMultiRowListItemRenderer`), the only row a show page (`MPSP…`),
@@ -600,6 +704,7 @@ pub(crate) fn parse_episode_item(node: &Value) -> Option<SongItem> {
         // An episode's type is MUSIC_VIDEO_TYPE_PODCAST_EPISODE, which "hide music videos" would
         // otherwise drop. Video mode still reads the player response, so video podcasts keep it.
         is_video: false,
+        is_episode: true,
         library: library_toggle(node),
         ..Default::default()
     })
@@ -727,14 +832,36 @@ pub(crate) fn album_from_runs(runs: &[Value]) -> Option<String> {
 /// The track's rating from its menu's `likeStatus` (`LIKE` / `INDIFFERENT` / `DISLIKE`).
 /// Tolerant: grabs the first `likeStatus` anywhere in the node, and reads anything it doesn't
 /// recognise as unrated rather than dropping the row. context/08.
-/// The contributor who added this row, on a collaborative playlist: their display name and avatar
-/// URL. One avatar per row (whoever added it), in a stack renderer YouTube only sends there.
-fn contributor(node: &Value) -> Option<(String, String)> {
-    let stack = find_all(node, "contributorsAvatars").into_iter().next()?;
-    let avatar = find_all(stack, "avatarViewModel").into_iter().next()?;
-    let name = avatar.get("accessibilityText").and_then(Value::as_str)?;
-    let url = avatar.pointer("/image/sources/0/url").and_then(Value::as_str)?;
-    Some((name.to_owned(), url.to_owned()))
+/// Who added this row, on a collaborative playlist: their names for the tooltip and one avatar URL
+/// per person, off a stack renderer YouTube only sends there. A Taste Match row several members
+/// share stacks all of them, and a name is never required: the multi-person rows used to vanish
+/// whole because the first avatar carried none (#102). Each avatar's own `accessibilityText`
+/// first, else the stack's label.
+fn contributors(node: &Value) -> (Option<String>, Vec<String>) {
+    let Some(stack) = find_all(node, "contributorsAvatars").into_iter().next() else {
+        return (None, Vec::new());
+    };
+    let avatars = find_all(stack, "avatarViewModel");
+    let urls: Vec<String> = avatars
+        .iter()
+        .filter_map(|a| a.pointer("/image/sources/0/url").and_then(Value::as_str))
+        .map(str::to_owned)
+        .collect();
+    if urls.is_empty() {
+        return (None, urls);
+    }
+    let names: Vec<&str> =
+        avatars.iter().filter_map(|a| a.get("accessibilityText").and_then(Value::as_str)).collect();
+    let label = if names.is_empty() {
+        find_all(stack, "label")
+            .into_iter()
+            .chain(find_all(stack, "content"))
+            .find_map(Value::as_str)
+            .map(str::to_owned)
+    } else {
+        Some(names.join(", "))
+    };
+    (label, urls)
 }
 
 /// Does this row's menu carry "Remove from playlist"? The menu item is a `playlistEditEndpoint`
@@ -840,7 +967,8 @@ fn parse_panel_video(node: &Value) -> Option<SongItem> {
         thumbnail: last_thumbnail(node),
         set_video_id: None,
         added_by: None,
-        added_by_avatar: None,
+        added_by_avatars: Vec::new(),
+        added_at: None,
         rating: like_status(node),
         queued_by: None,
         queued: false,
@@ -848,7 +976,11 @@ fn parse_panel_video(node: &Value) -> Option<SongItem> {
         queued_from: None,
         autoplay: false,
         is_video: is_video_row(node),
+        counterpart: None,
+        counterpart_thumbnail: None,
+        counterpart_segments: Vec::new(),
         is_upload: is_upload_row(node),
+        is_episode: is_episode_row(node),
         // Queue-panel rows carry no badges today; asking anyway costs a map lookup and picks the
         // flag up for free if YouTube ever adds one.
         explicit: is_explicit(node),
@@ -1171,6 +1303,11 @@ mod tests {
         let up = "MUSIC_VIDEO_TYPE_PRIVATELY_OWNED_TRACK";
         assert!(!is_video_row(&json!({ "navigationEndpoint": cfg(up) })));
         assert!(!is_video_row(&json!({ "overlay": overlay(up) })));
+
+        // A podcast episode in a search result (#500), read off the same tag.
+        let ep = "MUSIC_VIDEO_TYPE_PODCAST_EPISODE";
+        assert!(is_episode_row(&json!({ "overlay": overlay(ep) })));
+        assert!(!is_episode_row(&json!({ "overlay": overlay("MUSIC_VIDEO_TYPE_OMV") })));
     }
 
     // The upload flag picks the orchestrator's login-only client chain (issue #71), so it has to
@@ -1323,6 +1460,49 @@ mod tests {
         let out = parse_next(&root);
         let ids: Vec<&str> = out.items.iter().map(|i| i.video_id.as_str()).collect();
         assert_eq!(ids, ["audio1", "plain1"]);
+        // The twin is kept on its primary for the Song/Video switch (#442), and only there.
+        assert_eq!(out.items[0].counterpart.as_deref(), Some("video1"));
+        assert_eq!(out.items[1].counterpart, None);
+    }
+
+    // The reporter's capture of the web client's first `/next` for a music video played on its
+    // own, on an account YouTube pairs versions for (#520): the seed is wrapped, and the song
+    // starts 5477 ms into the video.
+    #[test]
+    fn a_wrapped_seed_carries_its_twin_art_and_offset() {
+        let root: Value =
+            serde_json::from_str(include_str!("../../tests/fixtures/next_wrapped_video_seed.json"))
+                .unwrap();
+        let out = parse_next(&root);
+        let [seed] = &out.items[..] else { panic!("one row, got {}", out.items.len()) };
+        assert_eq!(seed.video_id, "uuZE_IRwLNI");
+        assert!(seed.is_video);
+        assert_eq!(seed.counterpart.as_deref(), Some("59nAgJZ5IoE"));
+        let art = seed.counterpart_thumbnail.as_deref().unwrap_or_default();
+        assert!(art.starts_with("https://yt3.googleusercontent.com/"), "{art}");
+        let one = Segment { start_ms: 5477, twin_start_ms: 0, duration_ms: 484451 };
+        assert_eq!(seed.counterpart_segments, [one]);
+    }
+
+    // The reporter's "Locked Away" pair (#535): the song is the primary, and the video breaks
+    // for 14.5 s in the middle, so the two share two stretches with a gap between.
+    #[test]
+    fn every_segment_of_a_twin_is_kept() {
+        let root: Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/next_wrapper_two_segments.json"
+        ))
+        .unwrap();
+        let out = parse_next(&root);
+        let [song] = &out.items[..] else { panic!("one row, got {}", out.items.len()) };
+        assert_eq!((song.video_id.as_str(), song.is_video), ("wTR_tymnbac", false));
+        assert_eq!(song.counterpart.as_deref(), Some("6GUm5g8SG4o"));
+        assert_eq!(
+            song.counterpart_segments,
+            [
+                Segment { start_ms: 0, twin_start_ms: 22698, duration_ms: 86438 },
+                Segment { start_ms: 86439, twin_start_ms: 123644, duration_ms: 141061 },
+            ]
+        );
     }
 
     // A real radio page has no automix marker — nothing to escalate to, and nothing to mistake a
@@ -1471,6 +1651,105 @@ mod tests {
         assert_eq!(song.play_count.as_deref(), Some("1.2B"));
         assert_eq!(song.album.as_deref(), Some("The Album"));
         assert_eq!(song.album_id.as_deref(), Some("MPREalbum1"));
+    }
+
+    // An artist page's Top songs row reads "Title | Artist | plays | Album", and the album in the
+    // fourth column links its own page. `album_column` reads the third one on a guess — anything
+    // that is not a length and not a count — and that guess only holds while the count opens with
+    // a digit. It does not: `hl` follows the UI language (#274), and Portuguese leads with the
+    // verb ("Tocou 93 mi vezes"), so `play_count` declines it, `album_column` swallows it, and the
+    // count ships as the album to Discord, MPRIS and the scrobbler while the real album sits in
+    // the next column, linked and unread. Reading the link before the guess makes the locale stop
+    // mattering. Lifted from a live artist page, hl=pt.
+    #[test]
+    fn a_linked_album_beats_a_localized_play_count() {
+        let row = |second: &str| {
+            json!({
+                "playlistItemData": { "videoId": "abc123" },
+                "flexColumns": [
+                    { "musicResponsiveListItemFlexColumnRenderer": { "text": { "runs": [{ "text": "The Summoning" }] } } },
+                    { "musicResponsiveListItemFlexColumnRenderer": { "text": { "runs": [
+                        { "text": "Sleep Token",
+                          "navigationEndpoint": { "browseEndpoint": { "browseId": "UCsleeptoken" } } }
+                    ] } } },
+                    { "musicResponsiveListItemFlexColumnRenderer": { "text": { "runs": [{ "text": second }] } } },
+                    { "musicResponsiveListItemFlexColumnRenderer": { "text": { "runs": [{
+                        "text": "Take Me Back To Eden",
+                        "navigationEndpoint": { "browseEndpoint": { "browseId": "MPREb_VVttKm9imi6" } }
+                    }] } } }
+                ]
+            })
+        };
+        // Whatever the locale orders the count in, the linked album is the one that wins.
+        for count in ["Tocou 93\u{a0}mi vezes", "93M plays", "再生回数 9385万 回"] {
+            let song = parse_list_item(&row(count)).unwrap();
+            assert_eq!(song.album.as_deref(), Some("Take Me Back To Eden"), "count {count:?} won");
+            assert_eq!(song.album_id.as_deref(), Some("MPREb_VVttKm9imi6"));
+        }
+    }
+
+    // Number-like album names ("1989", "24 Songs") still read as albums.
+    // They come from the subtitle text, so column order does not change them.
+    #[test]
+    fn an_album_named_after_a_number_is_still_an_album() {
+        let row = |second: &str| {
+            json!({ "musicResponsiveListItemRenderer": {
+                "playlistItemData": { "videoId": "abc123" },
+                "flexColumns": [
+                    { "musicResponsiveListItemFlexColumnRenderer": { "text": { "runs": [{ "text": "Song Title" }] } } },
+                    { "musicResponsiveListItemFlexColumnRenderer": { "text": { "runs": [
+                        { "text": "The Artist" },
+                        { "text": " • " },
+                        { "text": second },
+                        { "text": " • " },
+                        { "text": "3:41" }
+                    ] } } }
+                ]
+            }})
+        };
+        for album in ["1989 (Deluxe)", "24 Songs", "5SOS5", "2nd Collection"] {
+            let row = row(album);
+            assert_eq!(
+                parse_list_item(&row["musicResponsiveListItemRenderer"]).unwrap().album.as_deref(),
+                Some(album),
+                "{album:?} is a release, not a count"
+            );
+        }
+    }
+
+    // A music video row has no third column to put an album in, so the count in its subtitle lands in
+    // `album` and rides out to Discord, MPRIS and the scrobble as if it named a release. The shape
+    // is lifted verbatim from a live `FILTER_VIDEO` row.
+    #[test]
+    fn a_video_row_view_count_is_not_the_album() {
+        let row = json!({
+            "playlistItemData": { "videoId": "4iSvoQNfrrk" },
+            "overlay": { "musicItemThumbnailOverlayRenderer": { "content": {
+                "musicPlayButtonRenderer": { "playNavigationEndpoint": { "watchEndpoint": {
+                    "videoId": "4iSvoQNfrrk",
+                    "watchEndpointMusicSupportedConfigs": { "watchEndpointMusicConfig": {
+                        "musicVideoType": "MUSIC_VIDEO_TYPE_OMV"
+                    } }
+                } } }
+            } } },
+            "flexColumns": [
+                { "musicResponsiveListItemFlexColumnRenderer": { "text": { "runs": [{ "text": "Caramel" }] } } },
+                { "musicResponsiveListItemFlexColumnRenderer": { "text": { "runs": [
+                    { "text": "Sleep Token",
+                      "navigationEndpoint": { "browseEndpoint": { "browseId": "UCsleeptoken" } } },
+                    { "text": " • " },
+                    { "text": "21M views" },
+                    { "text": " • " },
+                    { "text": "4:51" }
+                ] } } }
+            ]
+        });
+        let song = parse_list_item(&row).unwrap();
+        assert!(song.is_video);
+        assert_eq!(song.artists, "Sleep Token");
+        assert_eq!(song.duration.as_deref(), Some("4:51"));
+        assert_eq!(song.album, None, "the view count is not a release");
+        assert_eq!(song.play_count, None, "the count is in the subtitle, not a column");
     }
 
     // #274 again, the other half: with `hl=ko` a row YouTube stripped the artist from reads
@@ -1843,7 +2122,27 @@ mod tests {
         });
         let item = parse_list_item(&node).unwrap();
         assert_eq!(item.added_by.as_deref(), Some("Rajat"));
-        assert_eq!(item.added_by_avatar.as_deref(), Some("https://yt3.ggpht.com/abc=s48"));
+        assert_eq!(item.added_by_avatars, ["https://yt3.ggpht.com/abc=s48"]);
+        // A Taste Match row two members share stacks both, and the names sit on the stack: the
+        // row must keep both avatars rather than vanish for lack of a per-avatar name (#102).
+        let shared = json!({
+            "playlistItemData": { "videoId": "vid1" },
+            "flexColumns": [{ "musicResponsiveListItemFlexColumnRenderer": {
+                "text": { "runs": [{ "text": "Alpha" }] } } }],
+            "contributorsAvatars": { "avatarStackViewModel": {
+                "avatars": [
+                    { "avatarViewModel": { "image": { "sources": [{ "url": "https://yt3.ggpht.com/a=s48" }] } } },
+                    { "avatarViewModel": { "image": { "sources": [{ "url": "https://yt3.ggpht.com/b=s48" }] } } }
+                ],
+                "rendererContext": { "accessibilityContext": { "label": "Irine and Rajat" } }
+            } }
+        });
+        let item = parse_list_item(&shared).unwrap();
+        assert_eq!(
+            item.added_by_avatars,
+            ["https://yt3.ggpht.com/a=s48", "https://yt3.ggpht.com/b=s48"]
+        );
+        assert_eq!(item.added_by.as_deref(), Some("Irine and Rajat"));
         // An ordinary playlist row has no stack, so no name to draw.
         assert_eq!(
             parse_list_item(&json!({

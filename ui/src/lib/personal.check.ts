@@ -9,9 +9,9 @@ import type { BrowseItem } from './api';
 import {
 	MAX_PICKS,
 	addPick,
+	adoptKinds,
 	arrangeSections,
 	empty,
-	firstArtist,
 	forgetSearch,
 	forgetIds,
 	freshen,
@@ -26,7 +26,6 @@ import {
 	noteRecent,
 	noteSearch,
 	MAX_SEARCHES,
-	noteSections,
 	orderLibrary,
 	placePick,
 	recentItems,
@@ -35,7 +34,6 @@ import {
 	seedPick,
 	togglePin,
 	toggleSaved,
-	topArtistIds,
 	touchPick,
 	unsynced
 } from './personal.ts';
@@ -194,14 +192,6 @@ const range = (n: number, prefix: string) => Array.from({ length: n }, (_, i) =>
 	ok(interleave([range(9, 'a'), range(9, 'b')], 4).length === 4, 'the cap holds');
 }
 
-// --- artist credit parsing ----------------------------------------------------------------------
-{
-	ok(firstArtist('Daft Punk') === 'Daft Punk', 'a lone artist is unchanged');
-	ok(firstArtist('Daft Punk, Pharrell Williams') === 'Daft Punk', 'a comma list takes the lead');
-	ok(firstArtist('The Weeknd & Ariana Grande') === 'The Weeknd', 'an ampersand pair takes the lead');
-	ok(firstArtist('Drake feat. Rihanna') === 'Drake', 'a feature credit is stripped');
-}
-
 // --- hydrate survives junk ----------------------------------------------------------------------
 {
 	ok(hydrate(null).picks.length === 0, 'null hydrates to empty');
@@ -283,7 +273,7 @@ const range = (n: number, prefix: string) => Array.from({ length: n }, (_, i) =>
 // --- the arrangement survives a round trip, and a corrupt one degrades instead of throwing --------
 {
 	const p = empty();
-	p.home = { ...p.home, order: ['@recent', 'Listen again'], hidden: ['@forgotten'], seen: ['Listen again'] };
+	p.home = { ...p.home, order: ['@recent', 'Listen again'], hidden: ['@forgotten'] };
 	const back = hydrate(JSON.parse(JSON.stringify(p)));
 	// '@familiar' and '@shortcuts' are slotted into an order saved before they existed, so neither
 	// sinks to the bottom.
@@ -292,7 +282,6 @@ const range = (n: number, prefix: string) => Array.from({ length: n }, (_, i) =>
 		'order survives persistence'
 	);
 	ok(back.home.hidden.join() === '@forgotten', 'hidden survives persistence');
-	ok(back.home.seen.join() === 'Listen again', 'so does the list of shelves home has ever shown');
 	ok(
 		hydrate({ home: { order: ['Listen again'], hidden: [] } }).home.order.join() ===
 			'@shortcuts,Listen again,@familiar',
@@ -306,36 +295,24 @@ const range = (n: number, prefix: string) => Array.from({ length: n }, (_, i) =>
 	ok(hydrate({ home: { order: [1, 'a'], hidden: 'nope' } }).home.order.join() === '@shortcuts,a,@familiar', 'junk is dropped');
 }
 
-// --- the rest of Edit home: new-section policy, look, reset --------------------------------------
+// --- the rest of Edit home: look, reset ----------------------------------------------------------
 {
 	const p = empty();
 	ok(homeIsDefault(p), 'a fresh home is the default one');
 	ok(!hiddenSections(p).has('Anything'), 'nothing hidden by default');
 
-	// #317: hide every shelf, and the next page of the feed must not bring replacements.
-	p.home = { ...p.home, order: ['@shortcuts', 'Quick picks'], hidden: ['Quick picks'], hideNew: true };
-	const h = hiddenSections(p);
-	ok(h.has('Quick picks') && h.has('Mixed for you'), 'a section the arrangement never ranked is hidden');
-	ok(!h.has('@shortcuts'), 'a ranked, shown one is not');
-	p.home.hideNew = false;
-	ok(!hiddenSections(p).has('Mixed for you'), 'with the policy off it shows as before');
-	// Nothing ranked yet means nothing is new relative to anything: the policy can't blank home.
-	p.home = { ...p.home, order: [], hidden: [], hideNew: true };
-	ok(!hiddenSections(p).has('Mixed for you'), 'no arrangement, no new sections');
-
-	p.home = { ...p.home, order: ['a'], chips: false, backdrop: false, cards: 'large', seen: ['a', 'b'] };
+	p.home = { ...p.home, order: ['a'], chips: false, backdrop: false, cards: 'large' };
 	ok(!homeIsDefault(p), 'any setting counts as arranged');
 	const back = hydrate(JSON.parse(JSON.stringify(p)));
-	ok(
-		back.home.hideNew && !back.home.chips && !back.home.backdrop && back.home.cards === 'large',
-		'the look survives persistence'
-	);
+	ok(!back.home.chips && !back.home.backdrop && back.home.cards === 'large', 'the look survives persistence');
 	resetHome(p);
 	ok(homeIsDefault(p), 'reset is the default');
-	ok(p.home.seen.join() === 'a,b', 'but keeps the shelves home has seen, which are not a setting');
 
-	const junk = hydrate({ home: { hideNew: 'yes', chips: 0, cards: 'huge' } }).home;
-	ok(!junk.hideNew && junk.chips && junk.backdrop && junk.cards === 'medium', 'junk falls back');
+	// A blob from before #476 still carries `seen` and `hideNew`; both are dropped, nothing breaks.
+	const old = hydrate({ home: { order: ['a'], seen: ['a', 'b'], hideNew: true } }).home;
+	ok(!('seen' in old) && !('hideNew' in old), 'the old feed memory and new-section policy go');
+	const junk = hydrate({ home: { chips: 0, cards: 'huge' } }).home;
+	ok(junk.chips && junk.backdrop && junk.cards === 'medium', 'junk falls back');
 }
 
 // --- the saved library: local saves merge with YouTube's without duplicating anything ------------
@@ -384,19 +361,6 @@ const range = (n: number, prefix: string) => Array.from({ length: n }, (_, i) =>
 	ok(hydrate({ saved: [{ id: 'x' }, 'junk'] }).saved.length === 0, 'junk rows are dropped');
 }
 
-// --- familiar artists: play counts, but only the ones with a channel to open --------------------
-{
-	const p = empty();
-	p.artists = {
-		UCa: { name: 'A', count: 3 },
-		UCb: { name: 'B', count: 9 },
-		'Some Band': { name: 'Some Band', count: 99 }
-	};
-	ok(topArtistIds(p).join() === 'UCb,UCa', 'ordered by plays, name-keyed entries dropped');
-	ok(topArtistIds(p, 1).join() === 'UCb', 'capped at n');
-	ok(topArtistIds(empty()).length === 0, 'no listening history is not an error');
-}
-
 // --- stored cards follow the live library ------------------------------------------------------
 {
 	const stale = { ...item('VL1'), subtitle: '14 tracks', thumbnail: 'old.jpg', lastUsedAt: 5 };
@@ -415,21 +379,23 @@ const range = (n: number, prefix: string) => Array.from({ length: n }, (_, i) =>
 	ok(freshen(stale, bare).subtitle === '14 tracks', 'same for a row with no subtitle');
 }
 
-// --- every shelf home has ever shown, so Edit home isn't bounded by how far you scrolled --------
+// --- #476: an arrangement keyed by shelf title moves over to kinds as the feed names them ---------
 {
 	const p = empty();
-	ok(noteSections(p, ['Quick picks', 'Listen again']), 'the first page is all new');
-	ok(!noteSections(p, ['Listen again']), 'a page with nothing new writes nothing');
-	ok(noteSections(p, ['Listen again', 'Albums for you']), 'a later page adds only what is new');
-	ok(p.home.seen.join() === 'Albums for you,Quick picks,Listen again', 'newest first');
-	ok(!noteSections(p, ['', '']), 'a shelf YouTube sent untitled is not a section');
-	ok(noteSections(p, ['Dup', 'Dup']) && p.home.seen.filter((t) => t === 'Dup').length === 1,
-		'one page carrying the same title twice records it once');
-	// The cap is what keeps a shelf YouTube stopped sending from living in the modal forever.
-	for (let i = 0; i < 60; i++) noteSections(p, [`shelf ${i}`]);
-	ok(p.home.seen.length === 40, 'capped');
-	ok(p.home.seen[0] === 'shelf 59', 'and it is the stalest that goes, not the newest');
-	ok(!p.home.seen.includes('Quick picks'), 'the first shelves ever seen have aged out');
+	p.home = { ...p.home, order: ['@shortcuts', 'Quick picks', 'Ouvir de novo', 'Indila'], hidden: ['Quick picks'] };
+	const feed = [
+		{ title: 'Quick picks', kind: 'quick_picks' },
+		{ title: 'Indila' },
+		{ title: 'Listen again', kind: 'listen_again' }
+	];
+	ok(adoptKinds(p, feed), 'a title the feed names is renamed');
+	ok(p.home.order.join() === '@shortcuts,quick_picks,Ouvir de novo,Indila', 'in place, the rest untouched');
+	ok(p.home.hidden.join() === 'quick_picks', 'a hidden shelf stays hidden');
+	ok(!adoptKinds(p, feed), 'the second page with nothing to rename writes nothing');
+	// Both an old title and its kind can sit in `order` (moved, then the language changed back).
+	p.home.order = ['quick_picks', 'Quick picks'];
+	adoptKinds(p, feed);
+	ok(p.home.order.join() === 'quick_picks', 'a rename never leaves the same key twice');
 }
 
 // --- recent searches ------------------------------------------------------------------------------

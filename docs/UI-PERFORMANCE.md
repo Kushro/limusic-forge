@@ -44,7 +44,8 @@ it out sit together in one clipped wrapper that carries the `.art-wash` class; p
 the two layers land a pixel apart while scrolling and a line of raw wash flickers at the fade's
 edge (`HomeHero.svelte`). `.art-wash` puts that wrapper on its own layer on WebKit only, because
 the same promotion made the lyrics panel drop every frame on Chromium (#341, `layout.css`). A
-full-screen blur is baked into a small canvas once per track and upscaled (`TheaterMode.svelte`).
+full-screen blur is baked into a small canvas once per track and upscaled (`artroom.svelte.ts`,
+the backdrop of theater mode and the player view).
 
 **`backdrop-filter` goes on small elements over still content.** A backdrop filter re-runs whenever
 anything under it repaints. Over the whole window that means four times a second while music plays,
@@ -60,6 +61,15 @@ quarters of the hover cost.
 restyles the whole document: 160-200 ms and about 10 MB that WebKitGTK never gives back, per write
 (#217). Transitioning a registered (`@property`) custom property does that once a frame. Keep the
 artwork tint to the fills listed in `layout.css`.
+
+**A control that sets a root token previews on a leaf and commits on release.** A slider or colour
+picker writing `<html>` per pointer move queues one whole-document restyle per move. The old
+Appearance tint slider took 5.6-8.2 s of main thread to play out a 0.75 s drag on WebKitGTK 2.52
+(~120 ms a frame). Now a drag only restyles `ThemeMock`, which carries its own `theme-<id>` class and
+inline overrides, and `<html>` is written once on `onValueCommit`: the same drag runs at 16 ms frames
+with nothing blocked. Keep the live preview to one miniature: seven gallery miniatures following
+the drag cost 60 of 150 frames at 4x CPU on Chromium, the single preview none
+(`AppearanceSettings.svelte`).
 
 **A `requestAnimationFrame` loop runs only while its output is on screen and changing.** Gate it the
 way `LyricsView.svelte` gates the karaoke clock (`needsFrameClock`), so the app reaches idle frames.

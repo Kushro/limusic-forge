@@ -3,7 +3,6 @@
 	import { open, save } from '@tauri-apps/plugin-dialog';
 	import { HugeiconsIcon } from '@hugeicons/svelte';
 	import {
-		Cancel01Icon,
 		Settings02Icon,
 		PaintBoardIcon,
 		PlayCircleIcon,
@@ -26,10 +25,8 @@
 	import { Input } from '$lib/components/ui/input';
 	import { Switch } from '$lib/components/ui/switch';
 	import { Slider } from '$lib/components/ui/slider';
-	import { LEVELS as ZOOM_LEVELS, setZoom, zoom } from '$lib/zoom.svelte';
 	import { Alert, AlertDescription } from '$lib/components/ui/alert';
 	import * as Dialog from '$lib/components/ui/dialog';
-	import * as Select from '$lib/components/ui/select';
 	import * as Popover from '$lib/components/ui/popover';
 	import { HELP_COMBO } from '$lib/shortcuts';
 	import { copyText } from '$lib/clipboard';
@@ -38,6 +35,7 @@
 	import {
 		blocked,
 		prefs,
+		refreshLanguage,
 		refreshView,
 		setAutoplay,
 		ui,
@@ -50,39 +48,12 @@
 	const DROP_MODES: DropMode[] = ['ask', 'copy', 'move'];
 	import { win } from '$lib/win.svelte';
 	import { lt } from '$lib/lt.svelte';
-	import ColorPicker from '$lib/components/ColorPicker.svelte';
+	import AppearanceSettings from '$lib/components/AppearanceSettings.svelte';
+	import * as Select from '$lib/components/ui/select';
 	import Changelog from '$lib/components/Changelog.svelte';
 	import DiscordSettings from '$lib/components/DiscordSettings.svelte';
 	import ScrobbleSettings from '$lib/components/ScrobbleSettings.svelte';
 	import { lastfm } from '$lib/lastfm.svelte';
-	import {
-		THEMES,
-		FONTS,
-		theme,
-		appearance,
-		setAppearance,
-		custom,
-		effective,
-		applyTheme,
-		setCustom,
-		resetCustom,
-		isDefaultCustom,
-		readBack,
-		familyName,
-		fontAvailable,
-		fileFonts,
-		fileFamily,
-		addFontFile,
-		removeFontFile,
-		registerFontFiles,
-		FORMAT_INFO_BAR,
-		FORMAT_INFO_MINI,
-		type Custom,
-		type FormatInfoBar,
-		type FormatInfoMini,
-		type ThemeId
-	} from '$lib/theme.svelte';
-	import { MARQUEE_MODES, type MarqueeMode } from '$lib/marquee';
 	import {
 		updateState,
 		availableMessage,
@@ -93,7 +64,6 @@
 	} from '$lib/updater.svelte';
 	import { getVersion } from '@tauri-apps/api/app';
 	import { t, setLocale, currentLocale, LOCALES, type TranslationKey } from '$lib/i18n.svelte';
-	import { appIcon, chooseAppIcon } from '$lib/appicon.svelte';
 	import GlobalHotkeysSettings from '$lib/components/GlobalHotkeysSettings.svelte';
 	import LyricsSourcesSettings from '$lib/components/LyricsSourcesSettings.svelte';
 	import LanguagePicker from '$lib/components/LanguagePicker.svelte';
@@ -135,96 +105,6 @@
 	const LABEL =
 		'mb-2 px-1 text-[11px] font-semibold uppercase tracking-[0.08em] text-muted-foreground';
 	const CARD = 'divide-y divide-border/60 overflow-hidden rounded-xl border bg-card';
-
-	const currentTheme = $derived(THEMES.find((t) => t.id === theme.id) ?? THEMES[0]);
-
-	// --- Themes tab ---
-	const pct = (level: number) => `${Math.round(level * 100)}%`;
-
-	type FontKey = 'fontSans' | 'fontHeading';
-	const FONT_ROWS: { key: FontKey; label: string; hint: string }[] = $derived([
-		{
-			key: 'fontSans',
-			label: t('settings.themes.interface_font_label'),
-			hint: t('settings.themes.interface_font_short_hint')
-		},
-		{
-			key: 'fontHeading',
-			label: t('settings.themes.heading_font_label'),
-			hint: t('settings.themes.heading_font_short_hint')
-		}
-	]);
-	let pickerOpen = $state(false);
-	// Whether each font row is on "Custom", and the family name typed into it. Kept locally because
-	// the select can sit on Custom before anything has been typed.
-	let isCustomFont = $state<Record<FontKey, boolean>>({ fontSans: false, fontHeading: false });
-	let fontName = $state<Record<FontKey, string>>({ fontSans: '', fontHeading: '' });
-
-	/** Which entry in the font dropdown a resolved stack corresponds to. */
-	const fontOptions = $derived([...FONTS, ...fileFonts()]);
-	const matchFont = (stack: string) =>
-		fontOptions.find((f) => familyName(f.value) === familyName(stack))?.value ?? 'custom';
-
-	async function pickFontFiles() {
-		const picked = await open({
-			multiple: true,
-			title: t('settings.themes.load_font_dialog'),
-			filters: [{ name: t('settings.themes.font_filter'), extensions: ['ttf', 'otf', 'woff', 'woff2'] }]
-		});
-		for (const path of picked ?? []) {
-			try {
-				toast.success(t('toasts.font_loaded', { name: await addFontFile(path) }));
-			} catch (e) {
-				toast.error(String(e));
-			}
-		}
-	}
-
-	async function pickAppIcon() {
-		try {
-			const picked = await open({
-				title: t('settings.themes.app_icon_dialog'),
-				filters: [{ name: t('settings.themes.app_icon_filter'), extensions: ['png'] }]
-			});
-			if (typeof picked !== 'string') return;
-			await chooseAppIcon(picked);
-			toast.success(t('toasts.app_icon_set'));
-		} catch (e) {
-			toast.error(String(e));
-		}
-	}
-
-	async function resetAppIcon() {
-		try {
-			await chooseAppIcon(null);
-		} catch (e) {
-			toast.error(String(e));
-		}
-	}
-
-	function chooseFont(key: FontKey, value: string) {
-		isCustomFont[key] = value === 'custom';
-		if (value === 'custom') fontName[key] = familyName(effective[key]);
-		else setCustom({ [key]: value } as Partial<Custom>);
-	}
-
-	// Applying a font family rewrites --font-sans/--font-heading on <html>, which restyles and
-	// reflows the whole app (and `apply` then re-reads the computed tokens). Doing that per
-	// keystroke is what made typing a font name lag (#97), so the input updates immediately and the
-	// theme follows once typing pauses. Half-typed names are meaningless anyway.
-	const fontTimers: Record<FontKey, ReturnType<typeof setTimeout> | undefined> = {
-		fontSans: undefined,
-		fontHeading: undefined
-	};
-
-	function typeFont(key: FontKey, name: string) {
-		fontName[key] = name;
-		clearTimeout(fontTimers[key]);
-		fontTimers[key] = setTimeout(() => {
-			// Blank clears the override, so the preset's font comes back.
-			setCustom({ [key]: name.trim() ? `'${name.trim()}', sans-serif` : null } as Partial<Custom>);
-		}, 300);
-	}
 
 	let tab = $state<TabId>('general');
 	const currentTab = $derived(TABS.find((tb) => tb.id === tab) ?? TABS[0]);
@@ -268,8 +148,7 @@
 
 	// (Re)load whenever the modal opens, so it reflects the current persisted values. Also clear the
 	// stale update-check result so re-opening the modal doesn't show it until pressed again.
-	// untrack: this reads and writes theme state, and `registerFontFiles` can rewrite it again when
-	// it prunes a deleted font. Opening the modal is the only thing that should run it.
+	// untrack: opening the modal is the only thing that should run it.
 	$effect(() => {
 		if (!ui.settingsOpen) return;
 		untrack(() => {
@@ -290,14 +169,6 @@
 				load();
 			}
 			updateResult = null;
-			pickerOpen = false;
-			readBack();
-			// Catches a font deleted while the app was running, not just between launches.
-			registerFontFiles();
-			for (const key of ['fontSans', 'fontHeading'] as FontKey[]) {
-				isCustomFont[key] = matchFont(effective[key]) === 'custom';
-				fontName[key] = isCustomFont[key] ? familyName(effective[key]) : '';
-			}
 		});
 	});
 
@@ -490,6 +361,9 @@
 	// Off until the setting is turned on: still experimental, so nobody gets video they didn't ask
 	// for. Same test in `player.svelte.ts`, which hydrates `prefs` at launch.
 	const musicVideosOn = $derived(settings.music_videos === 'true');
+	// On by default, and only offered with music videos on: album songs that have a video start as
+	// it, with the song on the Song/Video switch (#442, #464). Rust reads it in `get_album`.
+	const videosFirstOn = $derived(settings.videos_first !== 'false');
 	// Off by default, and only offered with music videos on: it costs real GPU time on every frame.
 	const ambientOn = $derived(settings.ambient_light === 'true');
 	// Off by default, and only switchable with music videos on (`set_setting` enforces it too).
@@ -507,6 +381,8 @@
 	const betaOn = $derived(settings.update_channel === 'beta');
 	const trayOn = $derived(settings.close_to_tray !== 'false');
 	const trackNotificationsOn = $derived(settings.track_notifications === 'true');
+	const trackNotificationsFocusedOn = $derived(settings.track_notifications_focused === 'true');
+	const playOnStartOn = $derived(settings.play_on_start === 'true');
 	const autostartOn = $derived(settings.autostart === 'true');
 	const startMinimizedOn = $derived(settings.start_minimized === 'true');
 	// `native_chrome` is read-only and platform-derived (commands.rs). `overlay` is macOS, where the
@@ -598,6 +474,11 @@
 		await api.setSetting('mini_dyn_lyrics', settings.mini_dyn_lyrics);
 	}
 
+	async function setVideosFirst(on: boolean) {
+		settings.videos_first = on ? 'true' : 'false';
+		await api.setSetting('videos_first', settings.videos_first);
+	}
+
 	// `prefs` after the write: on Linux the write is also what turns WebGL on for the glow.
 	async function setAmbient(on: boolean) {
 		settings.ambient_light = on ? 'true' : 'false';
@@ -646,6 +527,11 @@
 		await api.setSetting('track_notifications', settings.track_notifications);
 	}
 
+	async function setTrackNotificationsFocused(on: boolean) {
+		settings.track_notifications_focused = on ? 'true' : 'false';
+		await api.setSetting('track_notifications_focused', settings.track_notifications_focused);
+	}
+
 	// The backend flips the real window decorations; `win.chrome` is what the SPA keys its own
 	// corner rounding, resize borders and window buttons off, so it has to move with it.
 	async function setSystemTitlebar(on: boolean) {
@@ -659,6 +545,11 @@
 			win.chrome = prev;
 			toast.error(String(e));
 		}
+	}
+
+	async function setPlayOnStart(on: boolean) {
+		settings.play_on_start = on ? 'true' : 'false';
+		await api.setSetting('play_on_start', settings.play_on_start);
 	}
 
 	async function setAutostart(on: boolean) {
@@ -929,7 +820,7 @@
 </script>
 
 <!-- One row shape for the whole modal: label and description on the left, the control on the right,
-     and an optional block underneath for the things that expand (color picker, font input, lists). -->
+     and an optional block underneath for the things that expand (lists, inputs, the changelog). -->
 {#snippet row(o: {
 	title: string;
 	desc?: string;
@@ -969,12 +860,12 @@
 {/snippet}
 
 <Dialog.Root bind:open={ui.settingsOpen}>
-	<!-- The Discord and Scrobbling tabs put their live preview *beside* the controls rather than
+	<!-- The Discord, Scrobbling and Appearance tabs put their live preview *beside* the controls rather than
 	     under them, so they need the extra width; every other tab reads better narrow. Deliberately not animated:
 	     transitioning the width relayouts the whole modal every frame, and WebKitGTK is the webview
 	     that would pay for it. -->
 	<Dialog.Content
-		class="gap-0 overflow-hidden p-0 {tab === 'discord' || tab === 'scrobbling' ? 'sm:max-w-5xl' : tab === 'hotkeys' ? 'sm:max-w-4xl' : 'sm:max-w-3xl'}"
+		class="gap-0 overflow-hidden p-0 {tab === 'discord' || tab === 'scrobbling' || tab === 'themes' ? 'sm:max-w-5xl' : tab === 'hotkeys' ? 'sm:max-w-4xl' : 'sm:max-w-3xl'}"
 	>
 		<Dialog.Description class="sr-only">{t('settings.title')}</Dialog.Description>
 
@@ -1049,8 +940,13 @@
 					</div>
 				{:else if loaded && tab === 'scrobbling'}
 					<ScrobbleSettings {settings} />
+				{:else if tab === 'themes'}
+					<AppearanceSettings />
 				{:else}
-				<div class="min-w-0 flex-1 overflow-y-auto overflow-x-hidden px-6 py-5">
+				<!-- relative: an absolute child (the lyrics sources' sr-only live region) would otherwise
+				     be laid out against the dialog, outside this pane, and make the overflow-hidden dialog
+				     scrollable. scrollIntoView then scrolls the dialog too and clips its rail (#406). -->
+				<div class="relative min-w-0 flex-1 overflow-y-auto overflow-x-hidden px-6 py-5">
 					{#if !loaded}
 						<p class="text-sm text-muted-foreground">{t('common.loading')}</p>
 					{:else if tab === 'general'}
@@ -1104,6 +1000,18 @@
 									desc: t('settings.general.track_notifications_hint'),
 									control: trackNotificationsSwitch
 								})}
+								{#if trackNotificationsOn}
+									{@render row({
+										title: t('settings.general.track_notifications_focused'),
+										desc: t('settings.general.track_notifications_focused_hint'),
+										control: trackNotificationsFocusedSwitch
+									})}
+								{/if}
+								{@render row({
+									title: t('settings.general.play_on_start'),
+									desc: t('settings.general.play_on_start_hint'),
+									control: playOnStartSwitch
+								})}
 								{@render row({
 									title: t('settings.general.autostart'),
 									desc: portable
@@ -1125,129 +1033,6 @@
 										control: systemTitlebarSwitch
 									})}
 								{/if}
-							</div>
-						</section>
-					{:else if tab === 'themes'}
-						<section class={GROUP}>
-							<h3 class={LABEL}>{t('settings.sections.theme')}</h3>
-							<div class={CARD}>
-								{@render row({
-									title: t('settings.tabs.themes'),
-									desc: t('settings.tabs.themes_hint'),
-									control: presetSelect
-								})}
-								{@render row({
-									title: t('settings.themes.primary_color'),
-									desc: t('settings.themes.custom_colors'),
-									control: accentSwatch,
-									below: pickerOpen ? accentPicker : undefined
-								})}
-								{@render row({
-									title: t('settings.themes.background_color'),
-									desc:
-										theme.id === 'default'
-											? t('settings.themes.tint_hint')
-											: t('settings.themes.tint_palette_hint', { theme: currentTheme.label }),
-									control: tintSlider
-								})}
-								{@render row({
-									title: t('settings.themes.roundness'),
-									desc: t('settings.themes.roundness_hint'),
-									control: radiusSlider
-								})}
-								{@render row({
-									title: t('settings.themes.zoom'),
-									desc: t('settings.themes.zoom_hint'),
-									control: zoomSelect
-								})}
-								{@render row({
-									title: t('settings.themes.app_icon'),
-									desc: t('settings.themes.app_icon_hint'),
-									control: appIconButtons
-								})}
-							</div>
-						</section>
-
-						<section class={GROUP}>
-							<h3 class={LABEL}>{t('settings.sections.typography')}</h3>
-							<div class={CARD}>
-								{#each FONT_ROWS as fr (fr.key)}
-									<!-- Zero-arg wrappers: a snippet passed as a value can't carry arguments. -->
-									{#snippet pick()}{@render fontSelect(fr.key, fr.label)}{/snippet}
-									{#snippet type()}{@render fontInput(fr.key, fr.label)}{/snippet}
-									{@render row({
-										title: fr.label,
-										desc: fr.hint,
-										control: pick,
-										below: isCustomFont[fr.key] ? type : undefined
-									})}
-								{/each}
-								{@render row({
-									title: t('settings.themes.load_font_file'),
-									desc: t('settings.themes.load_font_file_hint'),
-									control: addFontButton,
-									below: custom.fontFiles.length ? fontFileList : undefined
-								})}
-							</div>
-						</section>
-
-						<section class={GROUP}>
-							<h3 class={LABEL}>{t('settings.sections.player_view')}</h3>
-							<div class={CARD}>
-								{@render row({
-									title: t('settings.themes.open_player'),
-									desc: t('settings.themes.open_player_hint'),
-									control: openPlayerSwitch,
-									tall: true
-								})}
-								{@render row({
-									title: t('settings.themes.tabbed_player'),
-									desc: t('settings.themes.tabbed_player_hint'),
-									control: tabbedSwitch,
-									tall: true
-								})}
-								{@render row({
-									title: t('settings.themes.artwork_background'),
-									desc: t('settings.themes.artwork_background_hint'),
-									control: artworkBgSwitch,
-									tall: true
-								})}
-								{@render row({
-									title: t('settings.themes.artwork_accent'),
-									badge: t('settings.themes.experimental'),
-									desc: t('settings.themes.artwork_accent_hint'),
-									control: artworkAccentSwitch,
-									tall: true
-								})}
-								{@render row({
-									title: t('settings.themes.format_info_bar'),
-									desc: t('settings.themes.format_info_bar_hint'),
-									control: formatInfoBarSelect,
-									tall: true
-								})}
-								{@render row({
-									title: t('settings.themes.format_info_mini'),
-									desc: t('settings.themes.format_info_mini_hint'),
-									control: formatInfoMiniSelect,
-									tall: true
-								})}
-								{@render row({
-									title: t('settings.themes.marquee_bar'),
-									desc: t('settings.themes.marquee_bar_hint'),
-									control: marqueeBarSelect,
-									tall: true
-								})}
-								{@render row({
-									title: t('settings.themes.marquee_mini'),
-									desc: t('settings.themes.marquee_mini_hint'),
-									control: marqueeMiniSelect,
-									tall: true
-								})}
-								{@render row({
-									title: t('settings.themes.reset_theme'),
-									desc: t('settings.themes.reset_theme_hint'),
-									control: resetButton
-								})}
 							</div>
 						</section>
 					{:else if tab === 'playback'}
@@ -1318,6 +1103,12 @@
 									tall: true
 								})}
 								{#if musicVideosOn}
+									{@render row({
+										title: t('settings.playback.videos_first'),
+										desc: t('settings.playback.videos_first_hint'),
+										control: videosFirstSwitch,
+										tall: true
+									})}
 									{@render row({
 										title: t('settings.playback.ambient_light'),
 										badge: t('settings.themes.experimental'),
@@ -1770,7 +1561,7 @@
 		onclose={() => (langOpen = false)}
 		onpick={(id) => {
 			langOpen = false;
-			setLocale(id).then(refreshView);
+			setLocale(id).then(refreshLanguage);
 		}}
 	/>
 {/snippet}
@@ -1808,6 +1599,11 @@
 		checked={trackNotificationsOn}
 		onCheckedChange={setTrackNotifications}
 	/>{/snippet}
+{#snippet trackNotificationsFocusedSwitch()}<Switch
+		checked={trackNotificationsFocusedOn}
+		onCheckedChange={setTrackNotificationsFocused}
+	/>{/snippet}
+{#snippet playOnStartSwitch()}<Switch checked={playOnStartOn} onCheckedChange={setPlayOnStart} />{/snippet}
 {#snippet autostartSwitch()}<Switch
 		checked={autostartOn && !portable}
 		disabled={portable}
@@ -1852,6 +1648,7 @@
 	/>{/snippet}
 {#snippet normalizeSwitch()}<Switch checked={normalizeOn} onCheckedChange={setNormalize} />{/snippet}
 {#snippet musicVideoSwitch()}<Switch checked={musicVideosOn} onCheckedChange={setMusicVideos} />{/snippet}
+{#snippet videosFirstSwitch()}<Switch checked={videosFirstOn} onCheckedChange={setVideosFirst} />{/snippet}
 {#snippet ambientSwitch()}<Switch checked={ambientOn} onCheckedChange={setAmbient} />{/snippet}
 {#snippet miniVideoSwitch()}<Switch
 		checked={miniVideoOn}
@@ -1895,168 +1692,6 @@
 {#snippet hideVideoSwitch()}<Switch checked={hideVideosOn} onCheckedChange={setHideVideos} />{/snippet}
 {#snippet bannerSwitch()}<Switch checked={updateBannerOn} onCheckedChange={setUpdateBanner} />{/snippet}
 {#snippet betaSwitch()}<Switch checked={betaOn} onCheckedChange={setBeta} />{/snippet}
-{#snippet openPlayerSwitch()}<Switch
-		checked={appearance.openPlayerOnPlay}
-		onCheckedChange={(on) => setAppearance({ openPlayerOnPlay: on })}
-	/>{/snippet}
-{#snippet tabbedSwitch()}<Switch
-		checked={appearance.tabbedPlayer}
-		onCheckedChange={(on) => setAppearance({ tabbedPlayer: on })}
-	/>{/snippet}
-{#snippet artworkBgSwitch()}<Switch
-		checked={appearance.artworkBackground}
-		onCheckedChange={(on) => setAppearance({ artworkBackground: on })}
-	/>{/snippet}
-{#snippet artworkAccentSwitch()}<Switch
-		checked={appearance.artworkAccent}
-		onCheckedChange={(on) => setAppearance({ artworkAccent: on })}
-	/>{/snippet}
-
-{#snippet presetSelect()}
-	<Select.Root type="single" value={theme.id} onValueChange={(v) => applyTheme(v as ThemeId)}>
-		<Select.Trigger class="w-44 shrink-0" aria-label={t('a11y.theme')}>
-			<span
-				class="size-4 shrink-0 rounded-full ring-1 ring-foreground/20"
-				style="background:{currentTheme.color}"
-			></span>
-			<span class="flex-1 truncate text-left">{currentTheme.label}</span>
-		</Select.Trigger>
-		<Select.Content>
-			{#each THEMES as th (th.id)}
-				<Select.Item value={th.id} label={th.label}>
-					<span
-						class="size-4 shrink-0 rounded-full ring-1 ring-foreground/20"
-						style="background:{th.color}"
-					></span>
-					{th.label}
-				</Select.Item>
-			{/each}
-		</Select.Content>
-	</Select.Root>
-{/snippet}
-
-{#snippet accentSwatch()}
-	<button
-		type="button"
-		onclick={() => (pickerOpen = !pickerOpen)}
-		aria-label={t('a11y.choose_accent')}
-		aria-expanded={pickerOpen}
-		class="size-8 cursor-pointer rounded-lg ring-1 ring-black/10 transition-transform hover:scale-105 {pickerOpen
-			? 'ring-2 ring-primary/60'
-			: ''}"
-		style="background:{effective.accent}"
-	></button>
-{/snippet}
-
-{#snippet accentPicker()}
-	<ColorPicker value={effective.accent} onchange={(hex) => setCustom({ accent: hex })} />
-{/snippet}
-
-{#snippet tintSlider()}
-	<Slider
-		type="single"
-		aria-label={t('a11y.background_tint')}
-		max={360}
-		step={1}
-		disabled={theme.id !== 'default'}
-		value={effective.hue}
-		onValueChange={(hue) => setCustom({ hue })}
-		class="w-44 shrink-0 [&_[data-slot=slider-range]]:bg-transparent [&_[data-slot=slider-track]]:bg-[linear-gradient(to_right,#f00,#ff0,#0f0,#0ff,#00f,#f0f,#f00)]"
-	/>
-{/snippet}
-
-{#snippet radiusSlider()}
-	<div class="flex w-44 shrink-0 items-center gap-3">
-		<Slider
-			type="single"
-			aria-label={t('a11y.roundness')}
-			max={1.5}
-			step={0.05}
-			value={effective.radius}
-			onValueChange={(radius) => setCustom({ radius })}
-		/>
-		<span class="w-10 shrink-0 text-right font-mono text-xs text-muted-foreground">
-			{effective.radius.toFixed(2)}
-		</span>
-	</div>
-{/snippet}
-
-{#snippet formatInfoBarSelect()}
-	<Select.Root
-		type="single"
-		value={appearance.formatInfoBar}
-		onValueChange={(v) => setAppearance({ formatInfoBar: v as FormatInfoBar })}
-	>
-		<Select.Trigger class="w-44 shrink-0" aria-label={t('settings.themes.format_info_bar')}>
-			<span class="flex-1 text-left">{t(`settings.themes.format_info_at.${appearance.formatInfoBar}`)}</span>
-		</Select.Trigger>
-		<Select.Content>
-			{#each FORMAT_INFO_BAR as at (at)}
-				<Select.Item value={at} label={t(`settings.themes.format_info_at.${at}`)}
-					>{t(`settings.themes.format_info_at.${at}`)}</Select.Item
-				>
-			{/each}
-		</Select.Content>
-	</Select.Root>
-{/snippet}
-
-{#snippet formatInfoMiniSelect()}
-	<Select.Root
-		type="single"
-		value={appearance.formatInfoMini}
-		onValueChange={(v) => setAppearance({ formatInfoMini: v as FormatInfoMini })}
-	>
-		<Select.Trigger class="w-44 shrink-0" aria-label={t('settings.themes.format_info_mini')}>
-			<span class="flex-1 text-left">{t(`settings.themes.format_info_at.${appearance.formatInfoMini}`)}</span>
-		</Select.Trigger>
-		<Select.Content>
-			{#each FORMAT_INFO_MINI as at (at)}
-				<Select.Item value={at} label={t(`settings.themes.format_info_at.${at}`)}
-					>{t(`settings.themes.format_info_at.${at}`)}</Select.Item
-				>
-			{/each}
-		</Select.Content>
-	</Select.Root>
-{/snippet}
-
-{#snippet marqueeBarSelect()}
-	<Select.Root
-		type="single"
-		value={appearance.marqueeBar}
-		onValueChange={(v) => setAppearance({ marqueeBar: v as MarqueeMode })}
-	>
-		<Select.Trigger class="w-44 shrink-0" aria-label={t('settings.themes.marquee_bar')}>
-			<span class="flex-1 text-left">{t(`settings.themes.marquee_at.${appearance.marqueeBar}`)}</span>
-		</Select.Trigger>
-		<Select.Content>
-			{#each MARQUEE_MODES as at (at)}
-				<Select.Item value={at} label={t(`settings.themes.marquee_at.${at}`)}
-					>{t(`settings.themes.marquee_at.${at}`)}</Select.Item
-				>
-			{/each}
-		</Select.Content>
-	</Select.Root>
-{/snippet}
-
-{#snippet marqueeMiniSelect()}
-	<Select.Root
-		type="single"
-		value={appearance.marqueeMini}
-		onValueChange={(v) => setAppearance({ marqueeMini: v as MarqueeMode })}
-	>
-		<Select.Trigger class="w-44 shrink-0" aria-label={t('settings.themes.marquee_mini')}>
-			<span class="flex-1 text-left">{t(`settings.themes.marquee_at.${appearance.marqueeMini}`)}</span>
-		</Select.Trigger>
-		<Select.Content>
-			{#each MARQUEE_MODES as at (at)}
-				<Select.Item value={at} label={t(`settings.themes.marquee_at.${at}`)}
-					>{t(`settings.themes.marquee_at.${at}`)}</Select.Item
-				>
-			{/each}
-		</Select.Content>
-	</Select.Root>
-{/snippet}
-
 {#snippet miniModeSelect()}
 	<Select.Root type="single" value={miniDynamicOn ? 'dynamic' : 'classic'} onValueChange={setMiniMode}>
 		<Select.Trigger class="w-44 shrink-0" aria-label={t('settings.playback.mini_mode')}>
@@ -2115,120 +1750,6 @@
 			{/each}
 		</Select.Content>
 	</Select.Root>
-{/snippet}
-
-{#snippet zoomSelect()}
-	<Select.Root type="single" value={String(zoom.level)} onValueChange={(v) => setZoom(Number(v))}>
-		<Select.Trigger class="w-44 shrink-0" aria-label={t('a11y.zoom')}>
-			<span class="flex-1 text-left">{pct(zoom.level)}</span>
-		</Select.Trigger>
-		<Select.Content>
-			{#each ZOOM_LEVELS as lv (lv)}
-				<Select.Item value={String(lv)} label={pct(lv)}>{pct(lv)}</Select.Item>
-			{/each}
-		</Select.Content>
-	</Select.Root>
-{/snippet}
-
-{#snippet fontSelect(key: FontKey, label: string)}
-	<Select.Root
-		type="single"
-		value={isCustomFont[key] ? 'custom' : matchFont(effective[key])}
-		onValueChange={(v) => chooseFont(key, v)}
-	>
-		<Select.Trigger class="w-44 shrink-0" aria-label={label}>
-			<span class="min-w-0 flex-1 truncate text-left" style="font-family:{effective[key]}">
-				{isCustomFont[key] ? 'Custom' : familyName(effective[key])}
-			</span>
-		</Select.Trigger>
-		<!-- max-w: a loaded font's name is whatever the file was called, and the dropdown grows to
-		     its widest item. -->
-		<Select.Content class="max-w-64">
-			{#each FONTS as f (f.value)}
-				<Select.Item value={f.value} label={f.label}>
-					<span class="block truncate" style="font-family:{f.value}">{f.label}</span>
-				</Select.Item>
-			{/each}
-			{#if custom.fontFiles.length}
-				<Select.Group>
-					<Select.GroupHeading>{t('settings.themes.your_fonts')}</Select.GroupHeading>
-					{#each fileFonts() as f (f.value)}
-						<Select.Item value={f.value} label={f.label}>
-							<span class="block truncate" style="font-family:{f.value}">{f.label}</span>
-						</Select.Item>
-					{/each}
-				</Select.Group>
-			{/if}
-			<Select.Item value="custom" label={t('common.custom')}>{t('settings.themes.custom_font')}</Select.Item>
-		</Select.Content>
-	</Select.Root>
-{/snippet}
-
-{#snippet fontInput(key: FontKey, label: string)}
-	<Input
-		value={fontName[key]}
-		oninput={(e) => typeFont(key, e.currentTarget.value)}
-		placeholder={t('settings.themes.font_placeholder')}
-		aria-label={t('settings.themes.font_aria', { label })}
-		spellcheck={false}
-		style="font-family:{effective[key]}"
-	/>
-	<!-- Probes the *applied* family, not the half-typed one: measuring a font on every keystroke is
-	     the other half of #97, and a name mid-typing is never installed anyway. -->
-	{#if fontName[key].trim() && !fontAvailable(familyName(effective[key]))}
-		<p class="mt-1.5 text-xs text-muted-foreground">
-			{t('settings.themes.font_not_installed')}
-		</p>
-	{/if}
-{/snippet}
-
-{#snippet appIconButtons()}
-	<div class="flex shrink-0 items-center gap-2">
-		<img src={appIcon.src} alt="" class="size-7 rounded" />
-		<Button variant="outline" size="sm" onclick={pickAppIcon}>{t('settings.themes.app_icon_pick')}</Button>
-		<Button variant="ghost" size="sm" onclick={resetAppIcon}>{t('common.reset')}</Button>
-	</div>
-{/snippet}
-
-{#snippet addFontButton()}
-	<Button variant="outline" size="sm" class="shrink-0" onclick={pickFontFiles}>{t('settings.themes.add_font')}</Button>
-{/snippet}
-
-{#snippet fontFileList()}
-	<div class="flex flex-col gap-1.5">
-		{#each custom.fontFiles as path (path)}
-			<div class="flex items-center gap-3 rounded-lg bg-secondary/60 py-1.5 pr-1.5 pl-3 text-sm">
-				<!-- The name is the identity; the path only earns a tooltip. A font called
-				     BigBlueTerm437NerdFontMono-Regular is wider than the modal. -->
-				<span class="min-w-0 flex-1 truncate" style="font-family:'{fileFamily(path)}'" title={path}>
-					{fileFamily(path)}
-				</span>
-				<button
-					type="button"
-					onclick={() => removeFontFile(path)}
-					aria-label={t('a11y.remove_font', { name: fileFamily(path) })}
-					class="flex size-6 shrink-0 cursor-pointer items-center justify-center rounded text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
-				>
-					<HugeiconsIcon icon={Cancel01Icon} size={14} />
-				</button>
-			</div>
-		{/each}
-	</div>
-{/snippet}
-
-{#snippet resetButton()}
-	<Button
-		variant="outline"
-		size="sm"
-		disabled={isDefaultCustom()}
-		onclick={() => {
-			resetCustom();
-			isCustomFont = { fontSans: false, fontHeading: false };
-			fontName = { fontSans: '', fontHeading: '' };
-		}}
-	>
-		{t('common.reset')}
-	</Button>
 {/snippet}
 
 <!-- Segmented, not three buttons: the options are one exclusive choice and should look like it. -->

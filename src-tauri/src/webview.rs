@@ -107,7 +107,7 @@ impl Bridge {
                 Some(dir) => builder.data_directory(dir),
                 None => builder,
             };
-            let res = builder
+            let res = crate::http::proxied(builder)
                 .visible(false)
                 .inner_size(1.0, 1.0)
                 .skip_taskbar(true)

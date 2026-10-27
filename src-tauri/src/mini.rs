@@ -207,17 +207,16 @@ pub fn open(app: &AppHandle) -> Result<(), String> {
             // A square WM shadow around a rounded transparent window looks broken.
             .shadow(false)
             // Positioned before it is shown, so it never flashes wherever the WM guessed first.
-            .visible(false)
-            .build()
-            .map_err(|e| {
-                // The old widget's label may still be registered: its teardown finishes later.
-                // The main window is still up (it is hidden last), so the user can just retry.
-                if replaced {
-                    format!("the previous mini player is still closing, try again: {e}")
-                } else {
-                    format!("couldn't open the mini player: {e}")
-                }
-            })?;
+            .visible(false);
+        let win = crate::http::proxied(win).build().map_err(|e| {
+            // The old widget's label may still be registered: its teardown finishes later.
+            // The main window is still up (it is hidden last), so the user can just retry.
+            if replaced {
+                format!("the previous mini player is still closing, try again: {e}")
+            } else {
+                format!("couldn't open the mini player: {e}")
+            }
+        })?;
 
         // WebKitGTK's view keeps a 200px minimum height and GTK sizes the window to fit it, so on
         // Linux the 180px widget came out 200 and the compact one couldn't shrink at all. Without
@@ -479,7 +478,9 @@ fn placement(
             .and_then(|v| parse_pos(&v))
     };
     let spot = match mode {
-        Mode::Classic => saved(POS_KEY).filter(|p| on_a_display(win, *p)),
+        Mode::Classic => {
+            saved(POS_KEY).filter(|p| on_a_display(win, *p, win.outer_size().unwrap_or_default()))
+        }
         Mode::Dynamic => saved(DYN_POS_KEY).and_then(|p| {
             let monitors = win.available_monitors().unwrap_or_default();
             inside_a_display(&displays(&monitors), p, size)
@@ -560,11 +561,21 @@ fn fit_into(
     )
 }
 
-/// Is that point on a display that is currently connected? Checked on the top-left corner, which
-/// is what `set_position` sets and what the WM keeps reachable.
-fn on_a_display(win: &WebviewWindow, p: PhysicalPosition<i32>) -> bool {
+/// Is a window at `p`, this size, on a display that is currently connected? Its middle has to be.
+/// A corner is not enough: one can sit on a display with only the invisible resize border showing,
+/// which is how the main window came back off-screen after a monitor layout change (#459).
+pub(crate) fn on_a_display(
+    win: &WebviewWindow,
+    p: PhysicalPosition<i32>,
+    size: PhysicalSize<u32>,
+) -> bool {
+    let mid = middle(p, size);
     win.available_monitors()
-        .is_ok_and(|monitors| monitors.iter().any(|m| contains(*m.position(), *m.size(), p)))
+        .is_ok_and(|monitors| monitors.iter().any(|m| contains(*m.position(), *m.size(), mid)))
+}
+
+fn middle(p: PhysicalPosition<i32>, size: PhysicalSize<u32>) -> PhysicalPosition<i32> {
+    PhysicalPosition::new(p.x + size.width as i32 / 2, p.y + size.height as i32 / 2)
 }
 
 /// Bottom-right of the display the main window is on, inside its *work area* so a taskbar or dock
@@ -786,6 +797,21 @@ mod tests {
         // Right/bottom edges are exclusive — that pixel belongs to the next display.
         assert!(!contains(primary.0, primary.1, PhysicalPosition::new(1920, 500)));
         assert!(!contains(primary.0, primary.1, PhysicalPosition::new(500, 1080)));
+    }
+
+    #[test]
+    fn a_window_counts_by_its_middle() {
+        // #459: the window was saved maximized on a laptop display that sat right of monitor A,
+        // then restored with A as the only display at that height.
+        let a = (PhysicalPosition::new(0, 0), PhysicalSize::new(1920u32, 1080));
+        let (at, size) = (PhysicalPosition::new(1911, -9), PhysicalSize::new(1900u32, 1008));
+        // Its bottom-left corner is inside A, which is all the window-state plugin checks...
+        assert!(contains(a.0, a.1, PhysicalPosition::new(at.x, at.y + size.height as i32)));
+        // ...but its middle is on nothing.
+        assert!(!contains(a.0, a.1, middle(at, size)));
+        // Maximized on A, the frame overhangs every edge by its border and still counts.
+        let maxed = middle(PhysicalPosition::new(-9, -9), PhysicalSize::new(1938, 1098));
+        assert!(contains(a.0, a.1, maxed));
     }
 
     #[test]

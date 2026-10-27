@@ -644,7 +644,8 @@ fn build_state(handle: &AppHandle, db: Arc<Db>, data_dir: &Path) -> Result<Arc<A
         potoken,
     ));
     // Headless never scrobbles: no session key, so the config is never read.
-    let lastfm = crate::lastfm::spawn(None, crate::lastfm::ScrobbleConfig::default());
+    let lastfm =
+        crate::lastfm::spawn(handle.clone(), None, None, crate::lastfm::ScrobbleConfig::default());
     let lt_url = db.get_setting("lt_server_url").unwrap_or_default();
     let (lt, _sync) = crate::listentogether::LtSession::new(handle.clone(), lt_url);
     Ok(Arc::new(AppState::new(

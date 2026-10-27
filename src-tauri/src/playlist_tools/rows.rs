@@ -41,7 +41,7 @@ pub async fn read_all(state: &Arc<AppState>, playlist_id: &str) -> Result<Vec<So
             .db
             .local_playlist_tracks(key)
             .into_iter()
-            .filter_map(|(row, json)| {
+            .filter_map(|(row, json, _)| {
                 let song: SongItem = serde_json::from_str(&json).ok()?;
                 Some(SongItem { set_video_id: Some(row.to_string()), ..song })
             })
@@ -85,8 +85,12 @@ pub async fn move_rows(
     }
     if is_local_playlist(playlist_id) {
         let key = local_key(playlist_id)?;
-        let mut order: Vec<String> =
-            state.db.local_playlist_tracks(key).into_iter().map(|(id, _)| id.to_string()).collect();
+        let mut order: Vec<String> = state
+            .db
+            .local_playlist_tracks(key)
+            .into_iter()
+            .map(|(id, _, _)| id.to_string())
+            .collect();
         lis::apply_moves(&mut order, moves);
         let ids: Vec<i64> = order.iter().filter_map(|id| id.parse().ok()).collect();
         return state.db.reorder_local_playlist(key, &ids, now_secs()).map_err(db_err);
@@ -157,7 +161,7 @@ pub async fn add_rows(
             .db
             .local_playlist_tracks(key)
             .into_iter()
-            .filter_map(|(row, json)| {
+            .filter_map(|(row, json, _)| {
                 let s: SongItem = serde_json::from_str(&json).ok()?;
                 Some((s.video_id, row.to_string()))
             })

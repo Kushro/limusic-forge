@@ -11,6 +11,7 @@
 	} from '@hugeicons/core-free-icons';
 	import { browser } from '$app/environment';
 	import { afterNavigate } from '$app/navigation';
+	import { cancelRestore, restoreTo } from '$lib/scrollrestore';
 	import { onMount } from 'svelte';
 	import { getCurrentWindow } from '@tauri-apps/api/window';
 	import { fly } from 'svelte/transition';
@@ -33,9 +34,11 @@
 	import PlayerBar from '$lib/components/PlayerBar.svelte';
 	import QueuePanel from '$lib/components/QueuePanel.svelte';
 	import LyricsPanel from '$lib/components/LyricsPanel.svelte';
+	import CommentsPanel from '$lib/components/CommentsPanel.svelte';
 	import AddToPlaylist from '$lib/components/AddToPlaylist.svelte';
 	import NewPlaylistDialog from '$lib/components/NewPlaylistDialog.svelte';
 	import SettingsDialog from '$lib/components/SettingsDialog.svelte';
+	import TempoPitchDialog from '$lib/components/TempoPitchDialog.svelte';
 	import ShareDialog from '$lib/components/ShareDialog.svelte';
 	import ChannelPicker from '$lib/components/ChannelPicker.svelte';
 	import ListenTogether from '$lib/components/ListenTogether.svelte';
@@ -53,8 +56,9 @@
 	import KeyboardShortcuts from '$lib/components/KeyboardShortcuts.svelte';
 	import { Button } from '$lib/components/ui/button';
 	import { auth, initApp, np, playback, prefs, runToastAction, ui } from '$lib/player.svelte';
+	import { isLocalId } from '$lib/api';
 	import { video } from '$lib/video.svelte';
-	import { win, initWin } from '$lib/win.svelte';
+	import { initWin, windowCorners } from '$lib/win.svelte';
 	import { initZoom } from '$lib/zoom.svelte';
 	import { initShortcuts } from '$lib/shortcuts';
 	import { initErrorLog } from '$lib/errlog';
@@ -72,57 +76,9 @@
 	// each restore the position they left at, where a URL→scroll Map would collapse both onto the
 	// last save. Kit 2.69 reads `.snapshot` off the bound component *instance* (the generated
 	// root.svelte does `bind:this`), so it must be exported from this script, not the module. This
-	// covers every route that scrolls `<main>`; /playlist/[id] and /search scroll their own
-	// container and restore themselves.
-	// `restore` re-applies the saved offset each frame while the destination is filling in. A
-	// single reach isn't enough: a shelf or an image filling in late shifts the layout under a
-	// pixel-perfect position. So it releases once the height stays quiet for ~300ms, after ~2.5s
-	// of re-applying, or when the user steers — wheel, touch, pointer, keys, or a drag.
+	// covers every route that scrolls `<main>` (`$lib/scrollrestore`); /playlist/[id] scrolls its
+	// own container and exports a snapshot of its own.
 	let scroller = $state<HTMLElement | null>(null);
-	let restoreRaf = 0;
-	const cancelRestore = () => {
-		cancelAnimationFrame(restoreRaf);
-		removeEventListener('wheel', cancelRestore, { capture: true });
-		removeEventListener('touchstart', cancelRestore, { capture: true });
-		removeEventListener('pointerdown', cancelRestore, { capture: true });
-		removeEventListener('keydown', cancelRestore, { capture: true });
-		removeEventListener('dragstart', cancelRestore, { capture: true });
-	};
-	const restoreTo = (el: HTMLElement, y: number) => {
-		cancelRestore();
-		// The settle loop writes `y` every frame, so any input that changes the scroll while it
-		// runs has to abort it. wheel/touchstart cover a wheel and a touchscreen; a scrollbar
-		// drag and the keyboard fire pointerdown/keydown instead; dragScroll on `<main>` runs off
-		// dragover while a card is in flight, so dragstart catches it.
-		addEventListener('wheel', cancelRestore, { passive: true, capture: true });
-		addEventListener('touchstart', cancelRestore, { passive: true, capture: true });
-		addEventListener('pointerdown', cancelRestore, { passive: true, capture: true });
-		addEventListener('keydown', cancelRestore, { passive: true, capture: true });
-		addEventListener('dragstart', cancelRestore, { passive: true, capture: true });
-		let lastHeight = el.scrollHeight;
-		let quiet = 0;
-		let budget = 0;
-		const settle = () => {
-			el.scrollTop = y;
-			const grown = el.scrollHeight > lastHeight;
-			lastHeight = el.scrollHeight;
-			// Release when the scroller can hold y *and* the content has stopped changing for
-			// ~300ms — a late shelf or an image filling in shifts the layout under a pixel
-			// position, so a single reach isn't stable. A list that got genuinely shorter sits at
-			// the clamped bottom and releases the same way once its height is quiet. Give up after
-			// ~2.5s overall (budget counts every frame and never resets, so a destination that keeps
-			// growing occupies the position for at most that long), or the user steers — wheel,
-			// touch, pointer, keys, or a drag all cancel.
-			if (++budget > 150) return cancelRestore();
-			if (!grown) {
-				if (++quiet > 18) return cancelRestore();
-			} else {
-				quiet = 0;
-			}
-			restoreRaf = requestAnimationFrame(settle);
-		};
-		settle();
-	};
 	export const snapshot = {
 		capture: () => (scroller ? scroller.scrollTop : null),
 		restore: (y: unknown) => {
@@ -146,8 +102,12 @@
 	// Queue and lyrics toggle independently and both float over the page rather than docking into
 	// it — two docked columns squeezed the content down to an unusable strip. At lg+ they sit side
 	// by side over the content; narrower, they stack (see QueuePanel / LyricsPanel).
+	// Comments take the lyrics' slot rather than a third column, so the two are exclusive with each
+	// other (opening one closes the other) and everything that offsets for "the lyrics panel" counts
+	// either as that one slot.
 	let queueOpen = $state(false);
 	let lyricsOpen = $state(false);
+	let commentsOpen = $state(false);
 	// Two ways the now-playing view and these panels can divide the same two buttons, picked in
 	// settings (#62). Tabbed (the default): the view carries queue and lyrics itself, so the panels
 	// step aside for it and the bar's buttons switch its tabs. Off: these are the only owner, the
@@ -158,13 +118,26 @@
 	// whatever was open before it (#365).
 	const showQueue = $derived(queueOpen && !tabbed);
 	const showLyrics = $derived(lyricsOpen && !tabbed);
+	const showComments = $derived(commentsOpen && !tabbed);
+	// A local file has no YouTube comments, and the bar and the view hide their comments buttons for
+	// it, so nothing could close them: comments count as closed. Docked, the panel goes; tabbed, the
+	// view goes back to the tab that was open before comments. Opened again on a YouTube track as usual.
+	let tabBeforeComments = $state<'queue' | 'lyrics'>('queue');
+	$effect(() => {
+		if (np.tab !== 'comments') tabBeforeComments = np.tab;
+	});
+	$effect(() => {
+		if (!playback.now || !isLocalId(playback.now.videoId)) return;
+		commentsOpen = false;
+		if (np.tab === 'comments') np.tab = tabBeforeComments;
+	});
 
 	// "Adapt colors to artwork": re-run on every track change and on the toggle itself. The 120px
-	// cover is the one the player bar has already loaded, so this costs no extra request.
+	// cover is the one the player bar has already loaded, so this costs no extra request. A Matugen
+	// palette owns every colour while it's on, so the artwork stands down.
+	const artworkTint = $derived(appearance.artworkAccent && !appearance.matugen);
 	$effect(() => {
-		applyArtworkAccent(
-			appearance.artworkAccent ? thumb(playback.now?.thumbnail, 120) : null
-		);
+		applyArtworkAccent(artworkTint ? thumb(playback.now?.thumbnail, 120) : null);
 	});
 	// The accent is banded against the active theme (a cover's colour that reads on a light page is
 	// mud on a dark one, #137), so flipping light/dark has to re-derive it from the same cover.
@@ -174,7 +147,7 @@
 	// Same colour, one track early. Reading it off the queue instead of the track change means the
 	// palette starts moving on the frame the artwork swaps, not after a fetch and a decode.
 	$effect(() => {
-		if (!appearance.artworkAccent) return;
+		if (!artworkTint) return;
 		const q = playback.queue;
 		prewarmArtworkAccent(thumb(q.items[q.currentIndex + 1]?.thumbnail, 120));
 	});
@@ -253,20 +226,16 @@
 	{/if}
 {:else}
 	<!-- The window itself is transparent; this root paints the background and, when not maximized,
-	     rounds the corners (the compositor can't round an undecorated window for us). Theater mode
-	     counts as maximized here: it is fullscreen, and rounding it clips the corners of a view that
-	     is meant to reach every edge (#139). With a system frame (win.chrome) the compositor rounds
-	     for us, so ours would only fight it.
-	     12px, not `rounded-lg`: that resolves to --radius, which every theme sets differently, so
-	     the window corner used to change with the theme. This is the GNOME/Adwaita value (#65). -->
+	     rounds the corners (the compositor can't round an undecorated window for us on Linux).
+	     Theater mode counts as maximized here: it is fullscreen, and rounding it clips the corners
+	     of a view that is meant to reach every edge (#139). With a system frame (win.chrome), or on
+	     Windows 11, the compositor rounds for us, so ours would only fight it (#504).
+	     Invisible while theater mode shows mpv's picture: theater is transparent over the hole, and
+	     the titlebar, sidebar or player bar under it would paint over the video. -->
 	<div
 		class="relative flex h-screen flex-col overflow-hidden text-foreground {video.hole
 			? ''
-			: 'bg-background'} {win.maximized ||
-		ui.theaterOpen ||
-		win.chrome !== 'off'
-			? ''
-			: 'rounded-[12px]'}"
+			: 'bg-background'} {windowCorners()} {ui.theaterOpen && video.hole ? 'invisible' : ''}"
 	>
 		{#if video.hole}
 			<!-- Linux: mpv draws the music video underneath the page (nativevideo.rs), so the page
@@ -275,7 +244,7 @@
 			     root's own background and <main> step aside while it is up (both paint the box). -->
 			<div
 				aria-hidden="true"
-				class="pointer-events-none absolute -z-10 rounded-2xl"
+				class="pointer-events-none visible absolute -z-10 rounded-2xl"
 				style="left:{video.hole.x}px;top:{video.hole.y}px;width:{video.hole.w}px;height:{video.hole
 					.h}px;box-shadow:0 0 0 100vmax var(--background)"
 			></div>
@@ -303,9 +272,16 @@
 			     parking container until the view borrows the picture. Not on Linux, where mpv draws the
 			     picture itself (prefs.nativeVideo). -->
 			{#if !prefs.nativeVideo}<VideoSurface />{/if}
-			{#if np.open && playback.now}<NowPlaying queueOpen={showQueue} lyricsOpen={showLyrics} />{/if}
+			{#if np.open && playback.now}<NowPlaying
+					queueOpen={showQueue}
+					lyricsOpen={showLyrics || showComments}
+				/>{/if}
 			<!-- Lyrics before queue: side by side over the page, lyrics on the left, queue on the right. -->
 			{#if showLyrics}<LyricsPanel onClose={() => (lyricsOpen = false)} queueOpen={showQueue} />{/if}
+			{#if showComments}<CommentsPanel
+					onClose={() => (commentsOpen = false)}
+					queueOpen={showQueue}
+				/>{/if}
 			{#if showQueue}<QueuePanel onClose={() => (queueOpen = false)} />{/if}
 		</div>
 		{#if playback.now}
@@ -317,8 +293,22 @@
 				<PlayerBar
 					onToggleQueue={() => (tabbed ? (np.tab = 'queue') : (queueOpen = !queueOpen))}
 					queueOpen={tabbed ? np.tab === 'queue' : queueOpen}
-					onToggleLyrics={() => (tabbed ? (np.tab = 'lyrics') : (lyricsOpen = !lyricsOpen))}
+					onToggleLyrics={() => {
+						if (tabbed) np.tab = 'lyrics';
+						else {
+							lyricsOpen = !lyricsOpen;
+							if (lyricsOpen) commentsOpen = false;
+						}
+					}}
 					lyricsOpen={tabbed ? np.tab === 'lyrics' : lyricsOpen}
+					onToggleComments={() => {
+						if (tabbed) np.tab = 'comments';
+						else {
+							commentsOpen = !commentsOpen;
+							if (commentsOpen) lyricsOpen = false;
+						}
+					}}
+					commentsOpen={tabbed ? np.tab === 'comments' : commentsOpen}
 				/>
 			</div>
 		{/if}
@@ -335,6 +325,7 @@
 	<NewPlaylistDialog />
 	<ShareDialog />
 	<SettingsDialog />
+	<TempoPitchDialog bind:open={ui.tempoPitchOpen} />
 	<ChannelPicker />
 	<ListenTogether />
 	<LinkDialog />
@@ -343,11 +334,13 @@
 	<ImportPrompt />
 
 	<!-- The two notification banners below run at z-[100]. Dialogs and menus sit at z-50 and portal to
-	     <body>, so a z-50 banner loses the tie on DOM order and hides behind an open modal. -->
+	     <body>, so a z-50 banner loses the tie on DOM order and hides behind an open modal. The update
+	     banner also needs pointer-events-auto: an open dialog sets `pointer-events: none` on <body>,
+	     so without it the banner shows above the modal but its buttons can't be clicked. -->
 	{#if updateState.available}
 		<div
 			transition:fly={{ y: 16, duration: 220, easing: cubicOut }}
-			class="fixed bottom-24 left-1/2 z-[100] flex -translate-x-1/2 items-center gap-3 rounded-lg border bg-card px-4 py-2 text-sm shadow-lg"
+			class="pointer-events-auto fixed bottom-24 left-1/2 z-[100] flex -translate-x-1/2 items-center gap-3 rounded-lg border bg-card px-4 py-2 text-sm shadow-lg"
 		>
 			<span>{availableMessage(updateState.available)}</span>
 			{#if updateState.canInstall}
