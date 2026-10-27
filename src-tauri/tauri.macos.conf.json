@@ -9,6 +9,7 @@
   "app": {
     "windows": [
       {
+        "create": false,
         "title": "LiMusic Forge",
         "width": 1200,
         "height": 800,
@@ -21,7 +22,7 @@
         "transparent": false,
         "dragDropEnabled": false,
         "titleBarStyle": "Overlay",
-        "trafficLightPosition": { "x": 14, "y": 10 },
+        "trafficLightPosition": { "x": 14, "y": 16 },
         "hiddenTitle": true
       }
     ]

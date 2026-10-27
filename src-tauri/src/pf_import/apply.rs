@@ -1233,7 +1233,7 @@ mod tests {
         let songs: Vec<SongItem> =
             e.db.local_playlist_tracks(mix.id)
                 .into_iter()
-                .map(|(_, json)| serde_json::from_str(&json).unwrap())
+                .map(|(_, json, _)| serde_json::from_str(&json).unwrap())
                 .collect();
         let order: Vec<&str> = songs.iter().map(|s| s.video_id.as_str()).collect();
         assert_eq!(order, ["vidBBBBBBB2", "vidAAAAAAA1", "vidCCCCCCC3"], "PlaylistForge's order");

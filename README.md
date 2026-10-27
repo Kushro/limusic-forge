@@ -65,17 +65,21 @@ and a portable build that keeps all its data next to the executable.
 - **Your library**: playlists, liked songs, saved albums and artists, your uploads, and write actions (like, add to playlist, create/edit/delete playlists including cover art, subscribe, save to library)
 - **History**: everything you have played, in YouTube Music's own day buckets
 - **Gapless playback** with loudness normalization, powered by libmpv
+- **Tempo, pitch and reverb**: adjust playback speed and pitch, add reverb with independent dry/wet controls, and save custom presets on this device.
 - **Queue** with radio/automix continuation, drag to reorder, restored across restarts
 - **Synced lyrics**: side panel with auto-scroll and click-to-jump, word by word where the source has the timings, with translations under each line
 - **Music videos**: optional, the video plays where the artwork sits, with the same gapless audio behind it
 - **Mini Player and theater mode**: shrink to a strip that keeps playing, or go fullscreen with cover and lyrics side by side
 - **Local Music**: play your own files, with all metadata still intact
-- **Last.fm scrobbling** and **Discord Rich Presence** (when the build is configured for them, see below)
+- **Last.fm scrobbling**: connect once from the title bar, every play is scrobbled
+- **ListenBrainz scrobbling**: paste a user token in the Scrobbling settings, same plays go there too
+- **Discord Rich Presence**: artwork, live progress bar, one click to toggle
 - **OS media keys** and now-playing integration (MPRIS on Linux, SMTC on Windows, plus playback buttons on the Windows taskbar preview)
 - **System tray**: close the window, keep the music; play/pause and skip from the tray, optional start-on-login
 - **Listen Together**: synced listening rooms over a small self-hosted relay
 - **Keyboard and mouse**: `Ctrl+K` searches from anywhere, `Ctrl+H` lists every shortcut, right-click menus throughout, `Ctrl` and the wheel zooms the interface
-- **Many languages**: English, German, Spanish, French, Indonesian, Italian, Japanese, Korean, Polish, Brazilian Portuguese, Romanian, Russian, Turkish, Ukrainian and Traditional Chinese
+- **Many languages**: English, German, Spanish, French, Indonesian, Italian, Japanese, Korean, Polish, Brazilian Portuguese, Romanian, Russian, Tamil, Turkish, Ukrainian, Vietnamese, and Simplified and Traditional Chinese
+- **Self-updating builds** (AppImage on Linux, setup.exe on Windows, .app on macOS)
 - **Make it yours**: accent palettes, custom colors, your own fonts, corner roundness, a custom app icon, and an adaptive theme that recolors the app from the playing cover
 
 ---
@@ -122,12 +126,19 @@ install LiMusic, not this fork.
 
 ## Scrobbling & Discord
 
-Both live in the title bar, next to the window controls.
+Last.fm lives in the title bar, next to the window controls, and ListenBrainz connects from
+Settings ▸ Scrobbling. Both get the same cleaned-up track (the tab's preview shows what each
+play counts as).
 
 - **Last.fm**: click the Last.fm mark, approve LiMusic Forge in the browser tab
-  that opens, and you're connected for good. Tracks scrobble at the halfway point
-  (or four minutes, whichever comes first), which is Last.fm's own rule. Click
-  again to see the account or disconnect.
+  that opens, and you're connected for good. Tracks scrobble at the halfway point (or
+  four minutes, whichever comes first), which is Last.fm's own rule. Click again
+  to see the account or disconnect.
+- **ListenBrainz**: open the Scrobbling settings, paste the user token from
+  [listenbrainz.org/settings](https://listenbrainz.org/settings/) and connect.
+  Plays submit as `playing_now` on start and one `single` listen at the same
+  halfway-or-four-minutes point. A new MetaBrainz account has to verify its email first, or
+  ListenBrainz turns every listen away (the Scrobbling tab says so).
 - **Discord**: click the Discord mark to toggle Rich Presence. Green dot means
   it's live. The card shows the track, artist, album art, and a progress bar, and
   it disappears when you pause.

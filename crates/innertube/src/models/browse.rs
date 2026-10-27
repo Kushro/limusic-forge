@@ -70,6 +70,10 @@ pub struct BrowseItem {
 #[serde(rename_all = "camelCase")]
 pub struct Section {
     pub title: String,
+    /// Which of home's known sections this is, whatever language the title is in (#476). `None`
+    /// for anything else, which home leaves out; a mood chip's feed shows it all.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<&'static str>,
     pub items: Vec<BrowseItem>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub more_browse_id: Option<String>,
@@ -220,6 +224,10 @@ pub struct PlaylistPage {
     pub collaborative: bool,
     /// Absent on lists YouTube will not reorder at all: albums and its own radio mixes.
     pub sort_menu: Option<SortMenu>,
+    /// Token for the "Suggestions" shelf YouTube Music puts under a playlist you own (#395), read
+    /// with `InnerTube::playlist_suggestions`. Withheld on anyone else's playlist, where the same
+    /// token pages to related playlists instead.
+    pub suggestions: Option<String>,
 }
 
 /// A page of extra tracks fetched via a continuation token.
@@ -229,13 +237,26 @@ pub struct PlaylistContinuation {
     pub continuation: Option<String>,
 }
 
+/// One batch of the suggestions shelf, and the token that swaps it for a fresh batch (the shelf's
+/// Refresh button in YouTube Music).
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct PlaylistSuggestions {
+    pub items: Vec<SongItem>,
+    pub refresh: Option<String>,
+}
+
 /// An artist detail page (`browse` on a `UC…` channel id). context/08.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ArtistPage {
     pub name: Option<String>,
-    /// The wide hero/banner image from the immersive header.
+    /// The wide hero/banner image from the page header.
     pub thumbnail: Option<String>,
+    /// The round channel avatar. Only `musicVisualHeaderRenderer` (a channel YouTube Music
+    /// doesn't treat as an artist) carries one; `musicImmersiveHeaderRenderer` has the banner
+    /// alone.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub avatar: Option<String>,
     pub description: Option<String>,
     /// e.g. "32.7M subscribers" (the long form; the short one is a bare "32.7M").
     pub subscribers: Option<String>,
@@ -339,7 +360,8 @@ pub fn parse_home(root: &Value) -> HomePage {
                 more.and_then(|e| e.get("browseId")).and_then(Value::as_str).map(str::to_owned);
             let more_params =
                 more.and_then(|e| e.get("params")).and_then(Value::as_str).map(str::to_owned);
-            sections.push(Section { title, items, more_browse_id, more_params });
+            let kind = super::home_shelves::kind(&title, more_browse_id.as_deref());
+            sections.push(Section { title, kind, items, more_browse_id, more_params });
         }
     }
     HomePage { chips, sections, continuation: continuation_token(root) }
@@ -477,6 +499,7 @@ pub fn parse_playlist(root: &Value) -> PlaylistPage {
         owned,
         collaborative,
         sort_menu: sort_menu(root),
+        suggestions: owned.then(|| suggestions_token(root)).flatten(),
     }
 }
 
@@ -541,6 +564,34 @@ pub fn parse_playlist_continuation(root: &Value) -> PlaylistContinuation {
     PlaylistContinuation {
         items,
         continuation: shelf_continuation(root).or_else(|| continuation_token(root)),
+    }
+}
+
+/// The suggestions shelf's token: the paging token of the section list the track shelf sits in.
+/// Read off that list's own `continuations`, since a sweep of the whole section would reach the
+/// track shelf's token first.
+fn suggestions_token(root: &Value) -> Option<String> {
+    find_all(root, "sectionListRenderer")
+        .into_iter()
+        .find_map(|s| continuation_token(s.get("continuations")?))
+}
+
+/// Parse the suggestions shelf: the first batch (a `sectionListContinuation` holding a
+/// `musicShelfRenderer`) or a refresh (a bare `musicShelfContinuation`). Rows and token are read
+/// off the shelf alone, so nothing else in the section can leak into either.
+pub fn parse_playlist_suggestions(root: &Value) -> PlaylistSuggestions {
+    let Some(shelf) = ["musicShelfRenderer", "musicShelfContinuation"]
+        .into_iter()
+        .find_map(|key| find_all(root, key).into_iter().next())
+    else {
+        return PlaylistSuggestions::default();
+    };
+    PlaylistSuggestions {
+        items: playlist_rows(shelf, None).collect(),
+        refresh: find_all(shelf, "reloadContinuationData")
+            .into_iter()
+            .find_map(|c| c.get("continuation")?.as_str())
+            .map(str::to_owned),
     }
 }
 
@@ -802,9 +853,9 @@ pub fn parse_album(root: &Value) -> AlbumPage {
                 it.artist_id = it.artist_id.take().or_else(|| artist_id.clone());
                 it.artist_runs = runs.clone();
             }
-            if it.album.is_none() {
-                it.album = title.clone();
-            }
+            // Every row here belongs to this album, so the page title is the album.
+            // It fixes #451, where a play count written word-first was read as the album.
+            it.album = title.clone().or(it.album.take());
             it
         })
         .collect();
@@ -903,7 +954,9 @@ pub fn parse_artist(root: &Value, browse_id: &str) -> ArtistPage {
     let header = find_all(root, "musicImmersiveHeaderRenderer")
         .into_iter()
         .next()
-        .or_else(|| find_all(root, "musicHeaderRenderer").into_iter().next());
+        .or_else(|| find_all(root, "musicHeaderRenderer").into_iter().next())
+        // A channel YouTube Music doesn't treat as an artist answers with this one instead.
+        .or_else(|| find_all(root, "musicVisualHeaderRenderer").into_iter().next());
 
     let name = header.and_then(|h| runs_text(h.get("title")));
     let description = header.and_then(|h| runs_text(h.get("description")));
@@ -912,6 +965,7 @@ pub fn parse_artist(root: &Value, browse_id: &str) -> ArtistPage {
         .and_then(|h| h.get("thumbnail"))
         .and_then(last_thumbnail)
         .or_else(|| header.and_then(last_thumbnail));
+    let avatar = header.and_then(|h| h.get("foregroundThumbnail")).and_then(last_thumbnail);
 
     let sub = header.and_then(|h| find_all(h, "subscribeButtonRenderer").into_iter().next());
     let channel_id = sub
@@ -966,6 +1020,7 @@ pub fn parse_artist(root: &Value, browse_id: &str) -> ArtistPage {
     ArtistPage {
         name,
         thumbnail,
+        avatar,
         description,
         subscribers,
         monthly_listeners,
@@ -988,6 +1043,39 @@ pub(crate) fn radio_playlist_id(node: &Value) -> Option<String> {
         .filter_map(Value::as_str)
         .find(|id| id.starts_with("RD"))
         .map(str::to_owned)
+}
+
+/// The "Appears on" shelf (#456): other artists' releases `artist_id` is featured on. YouTube Music
+/// has no such shelf, but the artist's top-songs playlist (`top_songs_id`) credits every track they
+/// are on, so a row led by somebody else is a feature on that artist's release. One card per
+/// release, in the playlist's order (most played first), subtitled with the lead artist.
+pub fn appears_on(songs: &[SongItem], artist_id: &str) -> Vec<BrowseItem> {
+    let mut seen = std::collections::HashSet::new();
+    songs
+        .iter()
+        .filter(|s| s.artist_id.as_deref().is_some_and(|a| a != artist_id))
+        .filter_map(|s| {
+            let id = s.album_id.clone()?;
+            let lead = s.artist_runs.first();
+            Some(BrowseItem {
+                kind: "album",
+                title: s.album.clone()?,
+                subtitle: Some(lead.map_or_else(|| s.artists.clone(), |r| r.text.clone())),
+                thumbnail: s.thumbnail.clone(),
+                duration: None,
+                album_id: None,
+                // The lead only: it stands for the release's artist, which is what the
+                // blocked-artist filter should match, not every guest on this one track.
+                artist_runs: lead.cloned().into_iter().collect(),
+                play_count: None,
+                is_video: false,
+                is_upload: false,
+                explicit: false,
+                id,
+            })
+        })
+        .filter(|c| seen.insert(c.id.clone()))
+        .collect()
 }
 
 fn parse_artist_carousel(node: &Value) -> Option<ArtistCarousel> {
@@ -1208,6 +1296,24 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    // underscores' top songs, trimmed to six rows: two of their own, then features on Oklou's
+    // "choke enough", Danny Brown's "Stardust" (twice) and Yaeji's "booboo2". Captured 2026-10-12.
+    #[test]
+    fn appears_on_keeps_releases_someone_else_leads_once_each() {
+        let root: Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/artist_top_songs_features.json"
+        ))
+        .unwrap();
+        let cards = appears_on(&parse_playlist(&root).items, "UCUdMQSZu3e12dk_DREEz80w");
+        let got: Vec<_> =
+            cards.iter().map(|c| (c.title.as_str(), c.subtitle.as_deref().unwrap())).collect();
+        assert_eq!(
+            got,
+            [("choke enough", "Oklou"), ("Stardust", "Danny Brown"), ("booboo2", "Yaeji")]
+        );
+        assert!(cards.iter().all(|c| c.kind == "album" && c.id.starts_with("MPRE")));
+    }
+
     // An artist radio id can't be built client-side (no `RD…` prefix trick) — it only exists in
     // the header's start-radio button, next to a pile of other playlist ids that aren't radios.
     #[test]
@@ -1229,6 +1335,34 @@ mod tests {
             "title": { "runs": [{ "text": "An Artist" }] }
         } } });
         assert_eq!(parse_artist(&bare, "UCx").radio_playlist_id, None);
+    }
+
+    // A channel YouTube Music doesn't treat as an artist comes back with a visual header, not an
+    // immersive one. Its banner and its round avatar are two different images.
+    #[test]
+    fn parses_a_channel_with_a_visual_header() {
+        let root = json!({ "header": { "musicVisualHeaderRenderer": {
+            "title": { "runs": [{ "text": "A Channel" }] },
+            "subscriptionButton": { "subscribeButtonRenderer": {
+                "subscribed": false,
+                "channelId": "UCchannel",
+                "subscriberCountText": { "runs": [{ "text": "1.2K" }] },
+                "longSubscriberCountText": { "runs": [{ "text": "1.2K subscribers" }] }
+            } },
+            "thumbnail": { "musicThumbnailRenderer": { "thumbnail": { "thumbnails": [
+                { "url": "https://banner/540" }, { "url": "https://banner/1440" }
+            ] } } },
+            "foregroundThumbnail": { "musicThumbnailRenderer": { "thumbnail": { "thumbnails": [
+                { "url": "https://avatar/60" }, { "url": "https://avatar/544" }
+            ] } } }
+        } } });
+        let a = parse_artist(&root, "UCx");
+        assert_eq!(a.name.as_deref(), Some("A Channel"));
+        assert_eq!(a.thumbnail.as_deref(), Some("https://banner/1440"));
+        assert_eq!(a.avatar.as_deref(), Some("https://avatar/544"));
+        assert_eq!(a.subscribers.as_deref(), Some("1.2K subscribers"));
+        assert_eq!(a.channel_id, "UCchannel");
+        assert!(!a.subscribed);
     }
 
     // History comes back as one `musicShelfRenderer` per day, not one shelf of rows: the day title
@@ -1355,6 +1489,8 @@ mod tests {
         assert_eq!(home.sections.len(), 3);
         let s = &home.sections[0];
         assert_eq!(s.title, "Mixed for you");
+        assert_eq!(s.kind, Some("mixed_for_you"));
+        assert_eq!(home.sections[1].kind, None, "not one of home's sections");
         assert_eq!(s.items.len(), 2);
         assert_eq!(s.items[0].kind, "playlist");
         assert_eq!(s.items[0].id, "VLPL123");
@@ -1649,6 +1785,105 @@ mod tests {
         let p = parse_playlist(&root);
         assert_eq!(p.items.len(), 1);
         assert_eq!(p.continuation, None, "the suggestions token is not a track continuation");
+    }
+
+    /// #395: the suggestions shelf is the section list's own token, never the track shelf's, and
+    /// only on a playlist you own (on anyone else's it pages to related playlists).
+    #[test]
+    fn owned_playlist_offers_its_suggestions_token() {
+        let page = |header: &str| {
+            json!({
+                "header": { header: { "header": { "musicResponsiveHeaderRenderer": {
+                    "title": { "runs": [{ "text": "Hip Hop" }] }
+                } } } },
+                "contents": { "twoColumnBrowseResultsRenderer": { "secondaryContents": {
+                    "sectionListRenderer": {
+                        "contents": [{ "musicPlaylistShelfRenderer": {
+                            "contents": [],
+                            "continuations": [{ "nextContinuationData": { "continuation": "MORE_TRACKS" } }]
+                        } }],
+                        "continuations": [{ "nextContinuationData": { "continuation": "SUGGEST" } }]
+                    }
+                } } }
+            })
+        };
+        let mine = parse_playlist(&page("musicEditablePlaylistDetailHeaderRenderer"));
+        assert_eq!(mine.continuation.as_deref(), Some("MORE_TRACKS"));
+        assert_eq!(mine.suggestions.as_deref(), Some("SUGGEST"));
+        assert_eq!(parse_playlist(&page("someoneElsesHeader")).suggestions, None);
+    }
+
+    /// The first batch arrives inside a section list continuation, a Refresh as a bare shelf
+    /// continuation. Each row embeds a copy of itself in its add button's command, which must not
+    /// count as a second suggestion.
+    #[test]
+    fn parses_both_shapes_of_the_suggestions_shelf() {
+        let row = |id: &str, title: &str| {
+            json!({ "musicResponsiveListItemRenderer": {
+                "playlistItemData": { "videoId": id },
+                "flexColumns": [
+                    { "musicResponsiveListItemFlexColumnRenderer": { "text": { "runs": [{ "text": title }] } } }
+                ],
+                "fixedColumns": [{ "musicResponsiveListItemFixedColumnRenderer": { "button": {
+                    "buttonRenderer": { "command": { "playlistEditEndpoint": { "clientActions": [
+                        { "musicAddSuggestionToPlaylistCommand": { "addToPlaylistCommand": {
+                            "insertShelfItemCommand": { "item": {
+                                "musicResponsiveListItemRenderer": { "playlistItemData": { "videoId": id } }
+                            } }
+                        } } }
+                    ] } } }
+                } } }]
+            } })
+        };
+        let first = json!({ "continuationContents": { "sectionListContinuation": {
+            "contents": [{ "musicShelfRenderer": {
+                "title": { "runs": [{ "text": "Suggestions" }] },
+                "contents": [row("aaaaaaaaaaa", "BAND4BAND"), row("bbbbbbbbbbb", "No Pole")],
+                "continuations": [{ "reloadContinuationData": { "continuation": "AGAIN" } }]
+            } }],
+            "continuations": [{ "nextContinuationData": { "continuation": "RELATED" } }]
+        } } });
+        let batch = parse_playlist_suggestions(&first);
+        let ids: Vec<_> = batch.items.iter().map(|s| s.video_id.as_str()).collect();
+        assert_eq!(ids, ["aaaaaaaaaaa", "bbbbbbbbbbb"]);
+        assert_eq!(batch.refresh.as_deref(), Some("AGAIN"), "not the related-playlists token");
+
+        let refresh = json!({ "continuationContents": { "musicShelfContinuation": {
+            "contents": [row("ccccccccccc", "Often")],
+            "continuations": [{ "reloadContinuationData": { "continuation": "AGAIN2" } }]
+        } } });
+        let batch = parse_playlist_suggestions(&refresh);
+        assert_eq!(batch.items.len(), 1);
+        assert_eq!(batch.refresh.as_deref(), Some("AGAIN2"));
+
+        // A playlist YouTube has nothing to suggest for: no shelf, no rows, no refresh.
+        assert!(parse_playlist_suggestions(&json!({})).items.is_empty());
+    }
+
+    /// A real first batch (captured 2026-10-11 off a 49-track playlist, trimmed to two rows and
+    /// scrubbed): each row's add button carries a copy of the row, and the shelf's Refresh is a
+    /// `reloadContinuationData`.
+    #[test]
+    fn parses_a_captured_suggestions_shelf() {
+        let root: Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/playlist_suggestions_shelf.json"
+        ))
+        .unwrap();
+        let batch = parse_playlist_suggestions(&root);
+        assert_eq!(batch.items.len(), 2);
+        assert!(batch.items.iter().all(|s| !s.title.is_empty() && !s.artists.is_empty()));
+        assert_eq!(batch.refresh.as_deref(), Some("CONTINUATION_SCRUBBED"));
+    }
+
+    /// Date added (the track list's column) reads `voteSortValue` off each row. Captured from an
+    /// owned playlist sorted Newest: one track added on its own, then two of a bulk add.
+    #[test]
+    fn playlist_rows_carry_when_they_were_added() {
+        let root: Value =
+            serde_json::from_str(include_str!("../../tests/fixtures/playlist_rows_added.json"))
+                .unwrap();
+        let added: Vec<_> = parse_playlist(&root).items.iter().map(|s| s.added_at).collect();
+        assert_eq!(added, [Some(1_755_417_934), Some(1_754_910_197), Some(1_754_910_196)]);
     }
 
     /// What the "Edit playlist" dialog prefills from. Both fields have to survive the round trip:
@@ -1990,6 +2225,32 @@ mod tests {
         assert_eq!(a.items[1].album.as_deref(), Some("Sjelen"));
     }
 
+    /// An album row has nothing to link in its play-count column, so `album_column` guesses, and the
+    /// header stamp used to stand behind that guess. It only filled an album that was still
+    /// empty, and by then the count had filled it, so the page title never arrived.
+    #[test]
+    fn an_album_page_stamps_its_title_over_a_localized_play_count() {
+        let root = json!({
+            "header": { "musicResponsiveHeaderRenderer": {
+                "title": { "runs": [{ "text": "Even In Arcadia" }] }
+            } },
+            "contents": { "musicShelfRenderer": { "contents": [
+                { "musicResponsiveListItemRenderer": {
+                    "playlistItemData": { "videoId": "vid1" },
+                    "flexColumns": [
+                        { "musicResponsiveListItemFlexColumnRenderer": { "text": { "runs": [{ "text": "Dangerous" }] } } },
+                        { "musicResponsiveListItemFlexColumnRenderer": { "text": {} } },
+                        { "musicResponsiveListItemFlexColumnRenderer": {
+                            "text": { "runs": [{ "text": "Tocou 25\u{a0}mi vezes" }] } } }
+                    ]
+                } }
+            ] } }
+        });
+        let a = parse_album(&root);
+        assert_eq!(a.items[0].title, "Dangerous");
+        assert_eq!(a.items[0].album.as_deref(), Some("Even In Arcadia"));
+    }
+
     /// The header's save-to-library toggle: `isToggled` is the state, and its like target carries
     /// the OLAK id even when no track row does (an album with nothing playable).
     #[test]
@@ -2240,6 +2501,7 @@ mod tests {
         assert_eq!(first.title, "Ep. 5 We're Live!");
         assert_eq!(first.artists, "Lemonade Stand");
         assert!(!first.is_video, "\"hide music videos\" would drop every episode");
+        assert!(first.is_episode, "the player shows the podcast controls off this");
         assert!(first.thumbnail.as_deref().unwrap().contains("xOXghljqUGw"));
         // A continuation has no header, so no show name, but the rows still come through.
         assert_eq!(parse_playlist_continuation(&root).items.len(), 2);

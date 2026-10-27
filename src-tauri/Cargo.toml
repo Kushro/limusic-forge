@@ -19,12 +19,15 @@ crate-type = ["rlib"]
 [dev-dependencies]
 # Temp dirs for the portable-mode detection tests (paths.rs, winstate.rs). Already in the lockfile.
 tempfile = "3"
+# Mock runtime for the IPC guard test (lib.rs `only_ui`).
+tauri = { version = "2", features = ["test"] }
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
 serde = { workspace = true }
+notify = { workspace = true }
 serde_json = { workspace = true }
 # `process`: the yt-dlp child of the download runner (download/runner.rs).
 tokio = { workspace = true, features = ["net", "io-util", "process"] }
@@ -103,6 +106,11 @@ chrono-tz = "0.10"
 # Checking the yt-dlp and ffmpeg downloads against their releases' SHA-256 sums (download/tools.rs).
 # Already in the lockfile (0.10.9).
 sha2 = "0.10"
+
+# Letting a song notification show while LiMusic Forge is frontmost (notify.rs, #94). Same objc2 that
+# mac-notification-sys and tao already pull in.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
 
 # Taskbar thumbnail toolbar (#47). Same `windows` version tauri-runtime-wry already pulls in, so
 # `Window::hwnd()` hands us a matching HWND.

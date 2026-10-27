@@ -48,10 +48,18 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  # libmpv comes from shinchiro's newest dev build, resolved at build time (see "Build the libmpv
-  # import library"): those are daily builds and old releases get deleted, so a pinned URL 404s
-  # within weeks.
-  MPV_REPO: shinchiro/mpv-winbuild-cmake
+  # Pinned libmpv, served from this repo's `deps` prerelease: shinchiro (mpv-winbuild-cmake) keeps
+  # only ~30 daily builds, so a pin straight to theirs 404s within two months. This one is
+  # libmpv-2.dll from shinchiro's 20260610 build (mpv v0.41.0-744-g304426c39), repacked out of our
+  # own v1.1.0 installer, so it is the exact DLL 1.1.0 and the 1.2.0 RCs shipped. Their later builds
+  # import vulkan-1.dll, which only a GPU driver installs, and 1.2.0 would not start without it
+  # (#436); the import check in the libmpv step refuses that now. Baseline x86_64, NOT the `-v3-`
+  # variant, which requires AVX2 and would crash on older CPUs. libmpv2 needs mpv >= 0.35 (client
+  # API 2.x). Bump deliberately, a new mpv is a new 117 MB DLL in the installer: a 7z with
+  # libmpv-2.dll at its root (a shinchiro `mpv-dev-x86_64-*.7z` works as is), uploaded with
+  # `gh release upload deps <file>`, then update both lines below.
+  MPV_DEV_URL: https://github.com/SimoHypers/limusic/releases/download/deps/libmpv-2-x86_64-20260610-git-304426c.7z
+  MPV_DEV_SHA256: af708edcdf6ed12ac7b2bb31b4cbeba0bf7d4eef345a715ef5de782c0ddd6671
   MPV_DIR: ${{ github.workspace }}\.libmpv
 
 jobs:
@@ -421,19 +429,10 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           New-Item -ItemType Directory -Force -Path "$env:MPV_DIR" | Out-Null
-          # The newest release's baseline x86_64 dev package: `mpv-dev-x86_64-<date>-git-<sha>.7z`.
-          # NOT the `-v3-` variant, which requires AVX2 and would crash on older CPUs. libmpv2 needs
-          # mpv >= 0.35 (client API 2.x), which every current build is.
-          $assets = gh api "repos/$env:MPV_REPO/releases/latest" --jq '.tag_name as $t | .assets[] | [$t, .name, .browser_download_url] | @tsv'
-          if ($LASTEXITCODE -ne 0) { throw "could not read the latest $env:MPV_REPO release" }
-          $pick = $assets | ForEach-Object { $tag, $name, $url = $_ -split "`t"; [pscustomobject]@{ tag = $tag; name = $name; url = $url } } |
-            Where-Object { $_.name -match '^mpv-dev-x86_64-\d{8}-git-[0-9a-f]+\.7z$' } | Select-Object -First 1
-          if (-not $pick) { throw "no baseline mpv-dev-x86_64 package in the latest $env:MPV_REPO release — did the asset names change?" }
-          Write-Host "libmpv: $($pick.name) (release $($pick.tag))"
-          curl.exe -fsSL -o "$env:MPV_DIR\mpv-dev.7z" "$($pick.url)"
-          if ($LASTEXITCODE -ne 0) { throw "download failed: $($pick.url)" }
+          curl.exe -fsSL -o "$env:MPV_DIR\mpv-dev.7z" "$env:MPV_DEV_URL"
+          if ((Get-FileHash "$env:MPV_DIR\mpv-dev.7z" -Algorithm SHA256).Hash -ne $env:MPV_DEV_SHA256) { throw "mpv-dev.7z does not match MPV_DEV_SHA256" }
           7z x "$env:MPV_DIR\mpv-dev.7z" -o"$env:MPV_DIR" -y | Out-Null
-          if (-not (Test-Path "$env:MPV_DIR\libmpv-2.dll")) { throw "libmpv-2.dll not found in $($pick.name) — did the dev package change shape?" }
+          if (-not (Test-Path "$env:MPV_DIR\libmpv-2.dll")) { throw "libmpv-2.dll not found in the dev package — did MPV_DEV_URL change shape?" }
 
           # dumpbin/lib live in the MSVC toolchain. (cargo itself finds MSVC on its own; this is
           # only so we can run the two tools.)
@@ -450,6 +449,22 @@ jobs:
           @("EXPORTS") + ($names | ForEach-Object { "    $_" }) | Set-Content -Path mpv.def -Encoding ascii
           & lib /def:mpv.def /name:libmpv-2.dll /out:mpv.lib /machine:x64
           if (-not (Test-Path "$env:MPV_DIR\mpv.lib")) { throw "lib.exe did not produce mpv.lib" }
+
+          # Every DLL libmpv imports has to be part of Windows itself, or the app cannot start on a PC
+          # that lacks it (#436: vulkan-1.dll comes with GPU drivers, not with Windows). A bump that
+          # adds an import fails here until someone checks the new name ships with Windows and adds it.
+          $system = @('ADVAPI32.dll', 'AVICAP32.dll', 'AVRT.dll', 'bcrypt.dll', 'bcryptprimitives.dll',
+            'CFGMGR32.dll', 'CRYPT32.dll', 'd2d1.dll', 'dwmapi.dll', 'DWrite.dll', 'GDI32.dll', 'IMM32.dll',
+            'IPHLPAPI.DLL', 'KERNEL32.dll', 'Normaliz.dll', 'ntdll.dll', 'ole32.dll', 'OLEAUT32.dll',
+            'OPENGL32.dll', 'Secur32.dll', 'SETUPAPI.dll', 'SHCORE.dll', 'SHELL32.dll', 'SHLWAPI.dll',
+            'USER32.dll', 'UxTheme.dll', 'VERSION.dll', 'WINMM.dll', 'WLDAP32.dll', 'WS2_32.dll')
+          $imports = & dumpbin /dependents libmpv-2.dll |
+            Select-String -Pattern '^\s+(\S+\.dll)\s*$' |
+            ForEach-Object { $_.Matches[0].Groups[1].Value }
+          if ($imports.Count -lt 10) { throw "parsed only $($imports.Count) imports from libmpv-2.dll, dumpbin output format changed?" }
+          $foreign = $imports | Where-Object { $_ -notlike 'api-ms-win-*' -and $system -notcontains $_ }
+          if ($foreign) { throw "libmpv-2.dll imports DLLs that are not part of Windows: $($foreign -join ', ')" }
+          Write-Host "libmpv-2.dll imports $($imports.Count) DLLs, all part of Windows"
           Write-Host "mpv.lib built from $($names.Count) exports"
 
           # tauri.windows.conf.json lists libmpv-2.dll under bundle.resources, so the installer
@@ -768,9 +783,11 @@ jobs:
           # tagged `beta` holding one latest.json, which installs on the beta channel read
           # (`check_beta_update` in commands.rs). A complete stable release moves the pointer too when
           # it is ahead of what the pointer holds, so beta installs land on 1.1.0 once it ships but
-          # stay on 1.1.0-rc.2 through a 1.0.3 fix. The pointer never moves backwards here, so a
-          # re-dispatch against an old tag cannot roll the beta channel back; that is done by hand
-          # (RELEASING.md §8).
+          # stay on 1.1.0-rc.2 through a 1.0.3 fix. It is also rewritten when it holds this same
+          # version, so a re-run that replaces a binary in place refreshes the beta copy of its
+          # signature: after 1.2.0's Windows installer was swapped (#436), the stale copy failed every
+          # beta install's signature check. The pointer never moves backwards here, so a re-dispatch
+          # against an old tag cannot roll the beta channel back; that is done by hand (RELEASING.md §8).
           REQUIRED_PLATFORMS='["darwin-aarch64","linux-x86_64","windows-x86_64"]'
           retry 3 fetch_manifest final
           HAVE="$(jq -c '.platforms | keys' final/latest.json)"
@@ -819,7 +836,7 @@ jobs:
             (TAG=beta; retry 3 fetch_manifest beta)
             BETA_VERSION="$(jq -r .version beta/latest.json)"
           fi
-          if [ -z "$BETA_VERSION" ] || semver_gt "$VERSION" "$BETA_VERSION"; then
+          if [ -z "$BETA_VERSION" ] || [ "$VERSION" = "$BETA_VERSION" ] || semver_gt "$VERSION" "$BETA_VERSION"; then
             (RELEASE_ID="$BETA_ID"; retry 3 upload final/latest.json)
             echo "beta channel moved to $VERSION (was ${BETA_VERSION:-empty})"
           else

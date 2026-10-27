@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { untrack } from 'svelte';
+	import type { Snippet } from 'svelte';
 	import { HugeiconsIcon, type IconSvgElement } from '@hugeicons/svelte';
 	import {
 		Alert02Icon,
@@ -18,13 +19,18 @@
 	import type { SongItem } from '$lib/api';
 	import { thumb } from '$lib/thumb';
 	import { lt } from '$lib/lt.svelte';
+	import { goto } from '$app/navigation';
 	import { anySaved, isLiked, openAddManyToPlaylist, ratingOf, savedPlaylists, toast, toggleRating } from '$lib/player.svelte';
 	import { progressOf, rowsOf, statusOf, track as trackDownloads } from '$lib/downloads.svelte';
+	import { addedLabel, addedTitle, CELL, END, TITLE, type TrackColumn } from '$lib/trackcolumns';
+	import { tagOf } from '$lib/stats';
+	import { myPlays } from './TrackColumns.svelte';
 	import SavedInPlaylists from './SavedInPlaylists.svelte';
 	import TrackMenu from './TrackMenu.svelte';
 	import ArtistLine from './ArtistLine.svelte';
 	import ExplicitIcon from './ExplicitIcon.svelte';
-	import { t } from '$lib/i18n.svelte';
+	import { currentLocale, t } from '$lib/i18n.svelte';
+	import { keyOf } from '$lib/shortcuts';
 	import type { TrackSelection } from '$lib/selection.svelte';
 	import { Checkbox } from './ui/checkbox';
 	import { Badge } from './ui/badge';
@@ -36,6 +42,7 @@
 		hideThumb = false,
 		compact = false,
 		showPlayCount = false,
+		columns,
 		hideRating = false,
 		onplay,
 		onAdd,
@@ -47,7 +54,8 @@
 		selection,
 		selectionKey,
 		lazy = false,
-		copies = 1
+		copies = 1,
+		trailing
 	}: {
 		song: SongItem;
 		/** Position badge when set (playlist/queue); omitted for flat search results. */
@@ -66,6 +74,13 @@
 		 * page (queue, previously played) and a narrow panel has no width to spare for it.
 		 */
 		showPlayCount?: boolean;
+		/**
+		 * The list's chosen columns (`TrackColumns.svelte`), on a playlist or album page under its
+		 * column header. Set, the row takes the header's layout (`trackcolumns.ts`): it decides the
+		 * plays, the duration and the added-by avatars too, and the explicit mark moves in front of
+		 * the artist, as the header has no column for it.
+		 */
+		columns?: TrackColumn[];
 		/**
 		 * The narrow queue-panel variant: drops the inline thumbs and the explicit mark. Two buttons
 		 * plus the duration leave nothing for the title and artists at that width, and the queue is
@@ -97,6 +112,9 @@
 		/** How many times this track is in the list it is shown in (a playlist page): 2 or more
 		 *  draws a "×2" chip, the hint that the duplicate finder has something to do. */
 		copies?: number;
+		/** Last in the row, after the ⋯ (the suggestions shelf's Add). Stop the click's propagation:
+		 *  the row itself is a play button. */
+		trailing?: Snippet;
 	} = $props();
 	const selectionDescriptionId = $props.id();
 
@@ -182,7 +200,7 @@
 			return;
 		}
 		if (selection && selectable) {
-			if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'a') {
+			if ((e.ctrlKey || e.metaKey) && keyOf(e) === 'a') {
 				e.preventDefault();
 				e.stopPropagation();
 				selection.selectAll();
@@ -282,13 +300,13 @@
 					if (!e.repeat) select(e.shiftKey);
 				}
 				if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); selection!.exit(); }
-				if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'a') {
+				if ((e.ctrlKey || e.metaKey) && keyOf(e) === 'a') {
 					e.preventDefault(); e.stopPropagation(); selection!.selectAll();
 				}
 			}}
 		/>
 	{/if}
-	<div class="flex min-w-0 flex-1 items-center gap-3">
+	<div class="flex min-w-0 items-center gap-3 {columns ? TITLE : 'flex-1'}">
 		<div class="flex min-w-0 shrink-0 items-center gap-3">
 			{#if index !== undefined}
 				<span
@@ -345,6 +363,9 @@
 				{/if}
 			</div>
 			<div class="flex min-w-0 items-center gap-1 text-xs text-muted-foreground">
+				{#if columns && song.explicit}
+					<ExplicitIcon class="mr-0.5 h-3.5 w-3.5 shrink-0" />
+				{/if}
 				<ArtistLine runs={song.artist_runs} text={song.artists} />
 				{#if compact && duration}
 					<!-- No leading dot with nothing before it: a search row can come back artist-less
@@ -359,23 +380,79 @@
 	<!-- Album rows only. Wide rows are mostly empty between the title and the duration, so it takes a
 	     centred column of its own there; narrow ones sit it next to the duration at its natural width
 	     rather than dropping it, since it never needs more than "1,234 plays" worth of room. -->
-	{#if song.play_count && showPlayCount && !compact}
+	{#if song.play_count && showPlayCount && !compact && !columns}
 		<div class="flex shrink-0 items-center justify-center text-xs text-muted-foreground lg:flex-1">
 			<span class="truncate">{t('library.play_count', { count: song.play_count })}</span>
 		</div>
 	{/if}
 
-	<div class="flex shrink-0 items-center {compact ? 'gap-0.5' : 'gap-2'}">
+	{#snippet avatars()}
+		<div class="flex shrink-0 -space-x-1.5" title={t('library.added_by', { user: song.added_by ?? '' })}>
+			{#each song.added_by_avatars ?? [] as src, i (i)}
+				{#if i < 3}
+					<img
+						{src}
+						alt=""
+						class="h-5 w-5 shrink-0 rounded-full object-cover ring-2 ring-background"
+						loading="lazy"
+					/>
+				{/if}
+			{/each}
+		</div>
+	{/snippet}
+
+	{#if columns}
+		<!-- One cell per column, drawn on every row whether it has a value or not, so none can pull
+		     its neighbours out from under their labels. Widths and breakpoints: `CELL`. -->
+		{#each columns as c (c)}
+			{#if c === 'album'}
+				<span class="truncate text-xs text-muted-foreground {CELL.album}">
+					{#if song.album_id}
+						<button
+							class="block max-w-full cursor-pointer truncate text-left hover:text-foreground hover:underline"
+							onclick={(e) => {
+								e.stopPropagation();
+								goto(`/album/${encodeURIComponent(song.album_id!)}`);
+							}}
+						>
+							{song.album}
+						</button>
+					{:else}
+						{song.album ?? ''}
+					{/if}
+				</span>
+			{:else if c === 'added'}
+				<span
+					class="truncate text-xs text-muted-foreground {CELL.added}"
+					title={song.added_at ? addedTitle(song.added_at, tagOf(currentLocale.id)) : undefined}
+				>
+					{song.added_at ? addedLabel(song.added_at, tagOf(currentLocale.id)) : ''}
+				</span>
+			{:else if c === 'by'}
+				<span class={CELL.by}>
+					{#if song.added_by_avatars?.length}{@render avatars()}{/if}
+				</span>
+			{:else if c === 'plays'}
+				<span class="truncate text-xs tabular-nums text-muted-foreground {CELL.plays}">
+					{song.play_count ?? ''}
+				</span>
+			{:else if c === 'mine'}
+				<!-- Blank, not 0: on a list you're still getting to know, the few you have played
+				     should stand out. -->
+				<span class="truncate text-xs tabular-nums text-muted-foreground {CELL.mine}">
+					{myPlays.counts[song.video_id] || ''}
+				</span>
+			{/if}
+		{/each}
+	{/if}
+
+	<div class="flex shrink-0 items-center {compact ? 'gap-0.5' : 'gap-2'} {columns ? END : ''}">
 		<!-- Collaborative playlists only: who put this track in the list. Every row on such a page
-		     carries one, so it can't leave a hole on its neighbours. -->
-		{#if song.added_by_avatar && !compact}
-			<img
-				src={song.added_by_avatar}
-				alt=""
-				title={t('library.added_by', { user: song.added_by ?? '' })}
-				class="h-5 w-5 shrink-0 rounded-full object-cover"
-				loading="lazy"
-			/>
+		     carries one, so it can't leave a hole on its neighbours. A Taste Match row that several
+		     members share overlaps their avatars, growing leftward so the marks stay in column.
+		     Under a column header it is a column of its own (Added by) instead. -->
+		{#if song.added_by_avatars?.length && !compact && !columns}
+			{@render avatars()}
 		{/if}
 		<!-- Both marks are always on, unlike the thumbs beside them: they are properties of the song,
 		     not actions, so hiding either until the pointer arrives would hide half of what it's for.
@@ -383,14 +460,17 @@
 		     would pull its checkmark into the tag's place and the column would zig-zag down the list.
 		     The checkmark's slot only exists once something is indexed: signed out, or before the
 		     first crawl, reserving it would be a hole on every row that can never fill. -->
-		{#if showRating && anySaved()}
-			<span class="flex h-7 w-7 shrink-0 items-center justify-center">
-				{#if inPlaylists.length}
-					<SavedInPlaylists playlists={inPlaylists} />
-				{/if}
-			</span>
-		{/if}
-		{#if !hideRating}
+		{#snippet saved()}
+			{#if showRating && anySaved()}
+				<span class="flex h-7 w-7 shrink-0 items-center justify-center">
+					{#if inPlaylists.length}
+						<SavedInPlaylists playlists={inPlaylists} />
+					{/if}
+				</span>
+			{/if}
+		{/snippet}
+		{#if !columns}{@render saved()}{/if}
+		{#if !hideRating && !columns}
 			<span class="flex h-3.5 w-3.5 shrink-0 items-center">
 				{#if song.explicit}
 					<ExplicitIcon class="h-3.5 w-3.5 text-muted-foreground" />
@@ -437,8 +517,14 @@
 				{/if}
 			</span>
 		{/if}
-		{#if duration && !compact}
-			<span class="shrink-0 text-xs tabular-nums text-muted-foreground">{duration}</span>
+		<!-- Under a column header the checkmark sits by the duration, the thumbs that only show on
+		     hover to its left: at rest the row ends "✓ 3:06" instead of a mark, a gap, then the length. -->
+		{#if columns}{@render saved()}{/if}
+		{#if !compact && (columns ? columns.includes('duration') : duration)}
+			<!-- A fixed slot, or every mark to its left moves with the digits (#463). `tabular-nums`
+			     alone isn't enough: DM Sans has no tabular figures, and 10:00 is wider in any font.
+			     5ch holds up to 59:59; an hour-long track still widens its own row. -->
+			<span class="min-w-[5ch] shrink-0 text-right text-xs tabular-nums text-muted-foreground">{duration}</span>
 		{/if}
 		{#if compact}
 			<!-- Persistent, not hover-only: a filled heart is state the row has to keep showing. -->
@@ -469,5 +555,6 @@
 				? ''
 				: 'invisible group-focus-within:visible group-hover:visible'}"
 		/>
+		{@render trailing?.()}
 	</div>
 </div>

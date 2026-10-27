@@ -519,7 +519,7 @@ fn albums_of(tracks: &[LocalTrack]) -> Vec<BrowseItem> {
 /// ponytail: splits on ";" and the feat. markers only. "," and "&" are left alone on purpose —
 /// they sit inside real names ("Tyler, The Creator", "Earth, Wind & Fire") often enough that
 /// splitting on them invents worse artists than it merges.
-fn primary_artist(artist: &str) -> &str {
+pub(crate) fn primary_artist(artist: &str) -> &str {
     let mut cut = artist.find(';').unwrap_or(artist.len());
     let lower = artist.to_lowercase();
     for marker in [" feat.", " feat ", " ft.", " ft ", " featuring "] {
@@ -662,6 +662,7 @@ pub fn playback_data(video_id: &str, path: &str) -> Result<crate::orchestrator::
         duration: None,
         // A file on disk has no `musicVideoType`, and video mode skips local ids anyway.
         is_video: None,
+        is_episode: None,
         thumbnail: None,
         stream_client: "local".to_owned(),
     })

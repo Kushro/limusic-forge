@@ -37,6 +37,7 @@ const ENV_KEYS: &[&str] = &[
     "LIMUSIC_DISABLED_CLIENTS",
     "WEBKIT_DISABLE_DMABUF_RENDERER",
     "WEBKIT_DMABUF_RENDERER_FORCE_SHM",
+    "WEBKIT_USE_SKIA_FOR_COMPOSITION",
     "__NV_DISABLE_EXPLICIT_SYNC",
     "GDK_BACKEND",
     "APPIMAGE",
@@ -137,11 +138,12 @@ fn header(app: &AppHandle, db: &Db) -> String {
     let disabled = db.get_setting("disabled_stream_clients").unwrap_or_default();
     let _ = writeln!(
         out,
-        "Signed in: {} | Proxy: {} | Quality: {} | Normalize: {} | Music videos: {} | Disabled clients: {}",
+        "Signed in: {} | Proxy: {} | Quality: {} | Normalize: {} | Crossfade: {} | Music videos: {} | Disabled clients: {}",
         yes_no(db.get_setting("session_cookie").is_some_and(|c| !c.is_empty())),
         yes_no(db.get_setting("proxy").is_some_and(|p| !p.is_empty())),
         db.get_setting("quality").unwrap_or_else(|| "HIGH".into()),
         yes_no(db.get_setting("normalize_volume").as_deref() != Some("false")),
+        crate::state::saved_crossfade(db).map_or_else(|| "off".into(), |s| format!("{s}s")),
         yes_no(db.get_setting("music_videos").as_deref() == Some("true")),
         if disabled.is_empty() { "none".into() } else { disabled },
     );
@@ -342,7 +344,7 @@ mod tests {
             "LiMusic Forge 0.7.3 (linux x86_64, AppImage)\n",
             "System: Fedora Linux 44 (KDE Plasma), kernel 7.1.8-200.fc44.x86_64, wayland session on KDE\n",
             "WebKitGTK: 2.50.6, NVIDIA: yes\n",
-            "Signed in: yes | Proxy: no | Quality: HIGH | Normalize: yes | Music videos: yes | Disabled clients: none\n",
+            "Signed in: yes | Proxy: no | Quality: HIGH | Normalize: yes | Crossfade: 5s | Music videos: yes | Disabled clients: none\n",
         );
         let out = redact(header);
         for kept in [
@@ -352,6 +354,7 @@ mod tests {
             "WebKitGTK: 2.50.6",
             "Quality: HIGH",
             "Normalize: yes",
+            "Crossfade: 5s",
             "Disabled clients: none",
         ] {
             assert!(out.contains(kept), "{kept} lost to redaction:\n{out}");

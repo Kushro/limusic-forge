@@ -135,7 +135,7 @@ pub fn song_occurrences(db: &crate::db::Db, video_id: &str) -> Vec<Occurrence> {
             return Some(
                 db.local_playlist_tracks(key)
                     .into_iter()
-                    .map(|(row, json)| {
+                    .map(|(row, json, _)| {
                         let v = serde_json::from_str::<SongItem>(&json)
                             .map(|s| s.video_id)
                             .unwrap_or_default();
