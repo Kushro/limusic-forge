@@ -91,6 +91,10 @@ notify-rust = "4"
 # the Windows updater, csv and unicode-normalization under lindera, strsim under clap.
 zip = { version = "4", default-features = false, features = ["deflate-flate2"] }
 csv = "1"
+# Profile export/import (profile/): `age` seals the opt-in secrets with a passphrase (scrypt +
+# ChaCha20-Poly1305); zeroize wipes them from memory when dropped.
+age = "0.11"
+zeroize = "1"
 strsim = "0.11"
 unicode-normalization = "0.1"
 # Upstream LiMusic migration (migrate_upstream.rs): absolute per-user paths before an AppHandle
