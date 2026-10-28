@@ -1,9 +1,11 @@
 <script lang="ts">
-	// Settings ▸ YouTube Data API: the daily check (src-tauri/src/wintask.rs, headless.rs). A Windows
-	// scheduled task, "LiMusic Forge Monitor", starts `limusic-forge --monitor --all` at the chosen
+	// Settings ▸ YouTube Data API: the daily check (src-tauri/src/wintask.rs, systemdtask.rs,
+	// headless.rs). A Windows scheduled task, "LiMusic Forge Monitor", or on Linux a systemd user
+	// timer (limusic-forge-monitor.timer), starts `limusic-forge --monitor --all` at the chosen
 	// time; with the app open the check runs in it instead. Registering again moves the task to this
-	// copy (a portable folder that moved) or to a new time. Whether that run also works through the
-	// job queue is `jobs.advance_jobs_headless` (on unless set to false).
+	// copy (a portable folder or AppImage that moved) or to a new time. Without a systemd user
+	// manager on Linux the status is unsupported with error `no_systemd_user`. Whether that run
+	// also works through the job queue is `jobs.advance_jobs_headless` (on unless set to false).
 	import { onMount } from 'svelte';
 	import { Button } from '$lib/components/ui/button';
 	import { Input } from '$lib/components/ui/input';
@@ -19,6 +21,9 @@
 	let error = $state('');
 
 	const advance = $derived(settings['jobs.advance_jobs_headless'] !== 'false');
+	// The webview reports the host OS; Android is not "Linux" here (no task there at all).
+	const linux = typeof navigator !== 'undefined' && /linux/i.test(navigator.userAgent) && !/android/i.test(navigator.userAgent);
+	const noSystemd = $derived(!!task && !task.supported && task.error === 'no_systemd_user');
 
 	function show(s: api.WinTaskStatus) {
 		task = s;
@@ -39,7 +44,13 @@
 		try {
 			show(await run());
 		} catch (e) {
-			error = String(e) === 'bad_time' ? t('schedule.bad_time') : String(e);
+			const msg = String(e);
+			error =
+				msg === 'bad_time'
+					? t('schedule.bad_time')
+					: msg === 'no_systemd_user'
+						? t('settings.monitor_linux.no_systemd_user')
+						: msg;
 		} finally {
 			busy = false;
 		}
@@ -70,8 +81,12 @@
 
 <div class="divide-y divide-border/60 overflow-hidden rounded-xl border bg-card">
 	<div class="px-4 py-3.5">
-		<p class="max-w-prose text-xs leading-relaxed text-muted-foreground">{t('schedule.hint')}</p>
-		{#if task && !task.supported}
+		<p class="max-w-prose text-xs leading-relaxed text-muted-foreground">
+			{linux ? t('settings.monitor_linux.hint') : t('schedule.hint')}
+		</p>
+		{#if noSystemd}
+			<p class="mt-2 text-xs text-muted-foreground" role="status">{t('settings.monitor_linux.no_systemd_user')}</p>
+		{:else if task && !task.supported}
 			<p class="mt-2 text-xs text-muted-foreground">{t('schedule.unsupported')}</p>
 		{:else if task}
 			<p class="mt-2 text-sm font-medium">
@@ -107,7 +122,9 @@
 			{/if}
 			{#if task.error}
 				<p class="mt-2 text-xs text-destructive" role="status">
-					{t('schedule.query_failed', { error: task.error })}
+					{linux
+							? t('settings.monitor_linux.query_failed', { error: task.error })
+							: t('schedule.query_failed', { error: task.error })}
 				</p>
 			{/if}
 		{:else if !error}

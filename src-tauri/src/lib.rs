@@ -39,12 +39,14 @@ mod paths;
 mod pf_import;
 mod playlist_tools;
 mod potoken;
+mod profile;
 mod quota;
 mod romanize;
 mod session;
 mod spotify;
 mod state;
 mod stats;
+mod systemdtask;
 #[cfg(target_os = "windows")]
 mod taskbar;
 mod tray;
@@ -703,6 +705,9 @@ pub fn run() {
     // copied in here, before anything opens the database or the webview profile it replaces.
     // A no-op unless phase 1 left its marker. Logged once logging is up, in `setup`.
     let migrated = migrate_upstream::apply_pending();
+    // Phase 2 of Settings ▸ Import & migrate ▸ Import profile (profile/import.rs), on the same
+    // terms: the staged profile replaces the database before anything opens it.
+    let imported = profile::import::apply_pending();
 
     let mut builder = tauri::Builder::default();
 
@@ -810,6 +815,17 @@ pub fn run() {
                     aside = ?r.aside,
                     error = ?r.error,
                     "upstream LiMusic migration"
+                );
+            }
+            if let Some(r) = &imported {
+                tracing::info!(
+                    status = ?r.status,
+                    error = ?r.error,
+                    aside = ?r.aside,
+                    secrets_restored = r.secrets_restored,
+                    remap = ?r.remap,
+                    warnings = ?r.warnings,
+                    "profile import"
                 );
             }
             let cache_dir = data_dir.join("audio-cache");
@@ -1532,6 +1548,14 @@ pub fn run() {
             commands::pf_import_apply,
             commands::pf_import_credentials,
             commands::pf_unregister_task,
+            profile::commands::profile_export,
+            profile::commands::profile_default_file_name,
+            profile::commands::profile_preview,
+            profile::commands::profile_import_request,
+            profile::commands::profile_import_result,
+            profile::commands::profile_take_webstorage,
+            profile::commands::profile_import_pending,
+            profile::commands::profile_import_cancel,
         ]))
         .on_window_event(|window, event| {
             // Close-to-tray: ✕ hides the main window and playback keeps running; real quit is

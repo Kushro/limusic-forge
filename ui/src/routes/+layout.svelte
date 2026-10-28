@@ -45,6 +45,9 @@
 	import LinkDialog from '$lib/components/LinkDialog.svelte';
 	import ImportDialog from '$lib/components/ImportDialog.svelte';
 	import ImportPrompt from '$lib/components/ImportPrompt.svelte';
+	import ProfileImportResult from '$lib/components/profile/ProfileImportResult.svelte';
+	import { applyStagedWebStorage } from '$lib/profile-webstorage';
+	import { profileTakeWebstorage } from '$lib/api';
 	import { handleImportDrop, initImport } from '$lib/import.svelte';
 	import MiniPlayer from '$lib/components/MiniPlayer.svelte';
 	import MiniDynamic from '$lib/components/MiniDynamic.svelte';
@@ -178,6 +181,8 @@
 				teardownMiniKeys();
 			};
 		}
+		// An imported profile's localStorage, once; reloads if it wrote anything.
+		void applyStagedWebStorage(profileTakeWebstorage);
 		// First: it reveals the window (see initWin).
 		const teardownWin = initWin();
 		checkForUpdatesQuiet();
@@ -332,6 +337,7 @@
 	<ImportDialog />
 	<!-- First run: offers LiMusic's / PlaylistForge's data once (onboarding.ts). -->
 	<ImportPrompt />
+	<ProfileImportResult />
 
 	<!-- The two notification banners below run at z-[100]. Dialogs and menus sit at z-50 and portal to
 	     <body>, so a z-50 banner loses the tie on DOM order and hides behind an open modal. The update

@@ -196,11 +196,11 @@ fn retry_locked<T>(
 
 /// The renames phase 2 does on Forge's own files, and how it waits for a held one. Injectable so
 /// a lock can be simulated without holding one.
-struct FsOps {
-    rename: Box<dyn Fn(&Path, &Path) -> io::Result<()>>,
-    is_transient: Box<dyn Fn(&io::Error) -> bool>,
-    backoff: Vec<Duration>,
-    sleep: Box<dyn Fn(Duration)>,
+pub(crate) struct FsOps {
+    pub(crate) rename: Box<dyn Fn(&Path, &Path) -> io::Result<()>>,
+    pub(crate) is_transient: Box<dyn Fn(&io::Error) -> bool>,
+    pub(crate) backoff: Vec<Duration>,
+    pub(crate) sleep: Box<dyn Fn(Duration)>,
 }
 
 impl Default for FsOps {
@@ -215,7 +215,7 @@ impl Default for FsOps {
 }
 
 impl FsOps {
-    fn rename_retrying(&self, from: &Path, to: &Path) -> io::Result<()> {
+    pub(crate) fn rename_retrying(&self, from: &Path, to: &Path) -> io::Result<()> {
         retry_locked(
             || (self.rename)(from, to),
             |e| (self.is_transient)(e),
@@ -1074,7 +1074,7 @@ pub fn upstream_running() -> bool {
     instance_running(UPSTREAM_ID)
 }
 
-fn forge_running() -> bool {
+pub(crate) fn forge_running() -> bool {
     instance_running(crate::paths::IDENTIFIER)
 }
 

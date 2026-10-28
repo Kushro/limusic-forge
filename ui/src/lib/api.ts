@@ -2258,10 +2258,12 @@ export const onQuotaChanged = (cb: () => void): Promise<UnlistenFn> =>
 	listen('quota-changed', () => cb());
 
 // --- headless monitor and Windows task ---
-// The Windows scheduled task that runs `limusic-forge --monitor --all` daily (src-tauri/src/
-// wintask.rs). Dates are as Windows printed them, in its own language and format.
+// The scheduled task that runs `limusic-forge --monitor --all` daily (src-tauri/src/wintask.rs;
+// on Linux a systemd user timer, systemdtask.rs). Dates are as the OS printed them, in its own
+// language and format.
 export type WinTaskStatus = {
-	/** `false` off Windows: there is no task to register. */
+	/** `false` where nothing can be registered: other OSes, or Linux without a systemd user
+	 * manager (`error` is then `no_systemd_user`). */
 	supported: boolean;
 	registered: boolean;
 	/** `HH:MM`, local: the time registering uses (`monitor.schedule_time`). */
@@ -2275,7 +2277,7 @@ export type WinTaskStatus = {
 	current_exe: string | null;
 	/** The task runs another copy (a portable folder that moved): register again to fix it. */
 	exe_moved: boolean;
-	/** Why the Task Scheduler could not be asked. */
+	/** Why the Task Scheduler (or systemd) could not be asked; `no_systemd_user` on Linux without it. */
 	error: string | null;
 };
 export const wintaskStatus = () => invoke<WinTaskStatus>('wintask_status');
@@ -2426,3 +2428,106 @@ export const onMatugenThemeChanged = (cb: (css: string | null) => void): Promise
 	listen<string | null>('matugen-theme-changed', (event) => cb(event.payload));
 export const startMatugenWatcher = () => invoke<void>('start_matugen_watcher');
 export const stopMatugenWatcher = () => invoke<void>('stop_matugen_watcher');
+
+// --- Profile export / import ---
+// Settings ▸ Import & migrate ▸ Profile (src-tauri/src/profile/). Rejections are ProfileError
+// codes, optionally followed by `: detail`: io, db, zip, bad_format, too_new,
+// passphrase_too_short, wrong_passphrase, corrupt_secrets, passphrase_required, already_pending, other.
+export type ProfileCounts = {
+	settings: number;
+	local_tracks: number;
+	local_playlists: number;
+	listens: number;
+	accounts: number;
+	ytdata_accounts: number;
+	snapshots: number;
+	downloads: number;
+	files: number;
+};
+export type SecretCounts = {
+	google_sessions: number;
+	ytdata_tokens: number;
+	client_secret: boolean;
+	lastfm: boolean;
+	listenbrainz: boolean;
+	proxy: boolean;
+};
+export type ProfileManifest = {
+	format_version: number;
+	app_version: string;
+	source_os: 'windows' | 'linux' | 'macos';
+	source_data_dir: string;
+	/** RFC 3339, UTC. */
+	created_at: string;
+	includes_secrets: boolean;
+	includes_caches: boolean;
+	counts: ProfileCounts;
+	secret_counts: SecretCounts | null;
+};
+export type PathRoot = {
+	root: string;
+	kinds: string[];
+	count: number;
+	suggestion: string | null;
+};
+export type RootDecision =
+	| { root: string; action: 'map'; to: string }
+	| { root: string; action: 'keep' }
+	| { root: string; action: 'drop' };
+export type ProfilePreview = {
+	manifest: ProfileManifest;
+	roots: PathRoot[];
+	/** The passphrase was given and opened the secrets. */
+	secrets_ok: boolean;
+};
+export type ProfileExportReport = {
+	path: string;
+	bytes: number;
+	manifest: ProfileManifest;
+	/** `[channel, code]` pairs: Data API tokens that could not be read. */
+	token_failures: [string, string][];
+};
+export type ProfileImportReport = {
+	/** What the new database holds (same shape as the manifest's counts). */
+	imported?: Partial<ProfileCounts>;
+	remap?: { rewritten: number; kept: number; dropped: number };
+	tokens?: { saved: string[]; failed: [string, string][] };
+	secrets_restored?: boolean;
+	/** `HH:MM` of `monitor.schedule_time`, for the "register the task again" offer. */
+	monitor_time?: string | null;
+	autostart_was_on?: boolean;
+	/** Short codes. */
+	warnings?: string[];
+	/** Set when the import was rolled back. */
+	error?: string | null;
+};
+export const profileExport = (
+	dest: string,
+	includeSecrets: boolean,
+	includeCaches: boolean,
+	passphrase: string | null,
+	webstorage: Record<string, string>
+) =>
+	invoke<ProfileExportReport>('profile_export', {
+		dest,
+		includeSecrets,
+		includeCaches,
+		passphrase,
+		webstorage
+	});
+export const profileDefaultFileName = () => invoke<string>('profile_default_file_name');
+export const profilePreview = (path: string, passphrase: string | null) =>
+	invoke<ProfilePreview>('profile_preview', { path, passphrase });
+/** Prepares the import and restarts the app: nothing after this line runs on success. */
+export const profileImportRequest = (
+	path: string,
+	passphrase: string | null,
+	decisions: RootDecision[]
+) => invoke<void>('profile_import_request', { path, passphrase, decisions });
+/** What the last import did; read once, then gone. */
+export const profileImportResult = () => invoke<ProfileImportReport | null>('profile_import_result');
+/** The imported localStorage, left by the restart; read once, then gone. */
+export const profileTakeWebstorage = () =>
+	invoke<Record<string, string> | null>('profile_take_webstorage');
+export const profileImportPending = () => invoke<boolean>('profile_import_pending');
+export const profileImportCancel = () => invoke<void>('profile_import_cancel');
