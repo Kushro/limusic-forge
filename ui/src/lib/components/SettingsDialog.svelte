@@ -76,6 +76,8 @@
 	import BudgetSettings from '$lib/components/ytdata/BudgetSettings.svelte';
 	import ScheduleSettings from '$lib/components/ytdata/ScheduleSettings.svelte';
 	import PfPreview from '$lib/components/import/PfPreview.svelte';
+	import ExportProfileCard from '$lib/components/profile/ExportProfileCard.svelte';
+	import ImportProfileCard from '$lib/components/profile/ImportProfileCard.svelte';
 
 	// `downloads` is only reached from the rail, so it is not one of the tabs others open onto.
 	type TabId = SettingsTab | 'downloads';
@@ -1436,6 +1438,14 @@
 							<h3 class={LABEL}>{t('settings.import.playlistforge_title')}</h3>
 							<!-- Detect, preview, import, summary, PlaylistForge's task. -->
 							<PfPreview />
+						</section>
+						<section class={GROUP} id="settings-profile-export">
+							<h3 class={LABEL}>{t('settings.profile.section_export')}</h3>
+							<ExportProfileCard />
+						</section>
+						<section class={GROUP} id="settings-profile-import">
+							<h3 class={LABEL}>{t('settings.profile.section_import')}</h3>
+							<ImportProfileCard />
 						</section>
 					{:else if tab === 'about'}
 						<div
