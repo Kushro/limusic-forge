@@ -5054,9 +5054,10 @@ pub async fn budget_partition(
 
 // --- headless monitor and Windows task ---
 
-/// The Windows scheduled task that runs `--monitor --all` once a day (wintask.rs): whether it is
-/// registered, when it runs next, the time in `monitor.schedule_time`, and whether it still runs
-/// this exe (a portable copy that moved). `supported: false` off Windows.
+/// The scheduled task that runs `--monitor --all` once a day (wintask.rs; a systemd user timer on
+/// Linux): whether it is registered, when it runs next, the time in `monitor.schedule_time`, and
+/// whether it still runs this exe (a portable copy that moved). `supported: false` on other OSes
+/// and on Linux without systemd user (`error: "no_systemd_user"`).
 #[tauri::command]
 pub async fn wintask_status(state: St<'_>) -> Result<crate::wintask::WinTaskStatus, String> {
     let time = crate::wintask::schedule_time(&state.db);
@@ -5067,7 +5068,8 @@ pub async fn wintask_status(state: St<'_>) -> Result<crate::wintask::WinTaskStat
 
 /// Register (or re-register) the task to run this exe daily at `time` (`HH:MM`, local), and keep
 /// the time in `monitor.schedule_time`. `Err("bad_time")` for anything but `H:MM`/`HH:MM`,
-/// `Err("unsupported")` off Windows; otherwise `schtasks`' own message.
+/// `Err("unsupported")` off Windows/Linux, `Err("no_systemd_user")` on Linux without it; otherwise
+/// `schtasks`' (or `systemctl`'s) own message.
 #[tauri::command]
 pub async fn wintask_register(
     state: St<'_>,

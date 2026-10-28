@@ -1581,6 +1581,11 @@
 			"pending_waiting": "Una migración desde LiMusic se va a ejecutar en el próximo inicio.",
 			"pending_retry_now": "Reintentar ahora",
 			"pending_cancel": "Cancelar"
+		},
+		"monitor_linux": {
+			"hint": "En Linux, un timer de systemd de usuario inicia LiMusic Forge una vez al día para revisar tus playlists y respaldarlas, incluso con la app cerrada. Si el equipo estaba apagado a esa hora, la revisión se hace en el próximo arranque. Si la app está abierta en ese momento, ella misma hace la revisión.",
+			"no_systemd_user": "Tu sistema no tiene una sesión de usuario de systemd, así que no se puede programar la revisión diaria.",
+			"query_failed": "No se pudo consultar a systemd sobre el timer: {error}"
 		}
 	},
 	"dialogs": {

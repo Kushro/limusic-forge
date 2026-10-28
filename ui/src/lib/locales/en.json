@@ -1581,6 +1581,11 @@
 			"pending_waiting": "A migration from LiMusic will run on the next start.",
 			"pending_retry_now": "Retry now",
 			"pending_cancel": "Cancel"
+		},
+		"monitor_linux": {
+			"hint": "On Linux, a systemd user timer starts LiMusic Forge once a day to check your playlists and back them up, even with the app closed. If the machine was off at that time, the check runs at the next start. If the app is open then, it runs the check itself.",
+			"no_systemd_user": "Your system doesn't have a systemd user session, so the daily check can't be scheduled here.",
+			"query_failed": "Could not ask systemd about the timer: {error}"
 		}
 	},
 	"dialogs": {

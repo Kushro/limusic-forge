@@ -45,6 +45,7 @@ mod session;
 mod spotify;
 mod state;
 mod stats;
+mod systemdtask;
 #[cfg(target_os = "windows")]
 mod taskbar;
 mod tray;

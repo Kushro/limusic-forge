@@ -10,8 +10,10 @@
 //! - Only [`TASK_NAME`] is ever created, queried or deleted here. PlaylistForge's own task
 //!   ("PlaylistForge Monitor") is the importer's business, with the user's confirmation (D35).
 //! - `schtasks` runs with `CREATE_NO_WINDOW`, so no console flashes up.
+//! - On Linux the same API (`register`, `unregister`, `status`, [`WinTaskStatus`]) delegates to a
+//!   systemd user timer (systemdtask.rs); elsewhere it reports `unsupported`.
 
-// Off Windows only the stubs and the tests use the pure half.
+// Off Windows only the Linux delegates, the stubs and the tests use the pure half.
 #![cfg_attr(not(windows), allow(dead_code))]
 
 use std::path::Path;
@@ -182,7 +184,8 @@ pub fn exe_moved(registered: Option<&str>, current: &Path) -> bool {
 /// What Settings shows about the task.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
 pub struct WinTaskStatus {
-    /// `false` off Windows: there is no task to register.
+    /// `false` where there is nothing to register with: neither Windows nor Linux, or Linux
+    /// without a systemd user manager (`error` is then `no_systemd_user`).
     pub supported: bool,
     pub registered: bool,
     /// The time from the setting (`HH:MM`), what registering uses.
@@ -296,17 +299,35 @@ pub fn status(schedule_time: String) -> WinTaskStatus {
     status_from(query(), schedule_time, current.as_deref())
 }
 
-#[cfg(not(windows))]
+/// Linux: the systemd user timer (systemdtask.rs). `exe` is the running exe; under an AppImage the
+/// timer gets `$APPIMAGE` instead, which outlives the mount.
+#[cfg(target_os = "linux")]
+pub fn register(exe: &Path, hh_mm: &str) -> Result<(), String> {
+    let target = crate::systemdtask::target_exe(exe, std::env::var_os("APPIMAGE").as_deref());
+    crate::systemdtask::register(&target, hh_mm)
+}
+
+#[cfg(target_os = "linux")]
+pub fn unregister() -> Result<(), String> {
+    crate::systemdtask::unregister()
+}
+
+#[cfg(target_os = "linux")]
+pub fn status(schedule_time: String) -> WinTaskStatus {
+    crate::systemdtask::status(schedule_time)
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
 pub fn register(_exe: &Path, _hh_mm: &str) -> Result<(), String> {
     Err("unsupported".into())
 }
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "linux")))]
 pub fn unregister() -> Result<(), String> {
     Err("unsupported".into())
 }
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "linux")))]
 pub fn status(schedule_time: String) -> WinTaskStatus {
     WinTaskStatus { supported: false, schedule_time, ..WinTaskStatus::default() }
 }

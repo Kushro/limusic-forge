@@ -2258,10 +2258,12 @@ export const onQuotaChanged = (cb: () => void): Promise<UnlistenFn> =>
 	listen('quota-changed', () => cb());
 
 // --- headless monitor and Windows task ---
-// The Windows scheduled task that runs `limusic-forge --monitor --all` daily (src-tauri/src/
-// wintask.rs). Dates are as Windows printed them, in its own language and format.
+// The scheduled task that runs `limusic-forge --monitor --all` daily (src-tauri/src/wintask.rs;
+// on Linux a systemd user timer, systemdtask.rs). Dates are as the OS printed them, in its own
+// language and format.
 export type WinTaskStatus = {
-	/** `false` off Windows: there is no task to register. */
+	/** `false` where nothing can be registered: other OSes, or Linux without a systemd user
+	 * manager (`error` is then `no_systemd_user`). */
 	supported: boolean;
 	registered: boolean;
 	/** `HH:MM`, local: the time registering uses (`monitor.schedule_time`). */
@@ -2275,7 +2277,7 @@ export type WinTaskStatus = {
 	current_exe: string | null;
 	/** The task runs another copy (a portable folder that moved): register again to fix it. */
 	exe_moved: boolean;
-	/** Why the Task Scheduler could not be asked. */
+	/** Why the Task Scheduler (or systemd) could not be asked; `no_systemd_user` on Linux without it. */
 	error: string | null;
 };
 export const wintaskStatus = () => invoke<WinTaskStatus>('wintask_status');
